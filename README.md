@@ -1,13 +1,7 @@
 # Codex Web
 
-Self-hosted mobile web UI for [Codex app-server](https://developers.openai.com/codex/app-server), inspired by [openai/codex#23200](https://github.com/openai/codex/issues/23200).
-
 Use Codex from a terminal, this web UI, or both. Clients connected to the same
 app-server share conversations.
-
-Run app-server where Codex should access files and tools: the host OS, a VS Code
-development container, or another container. That environment is where Codex
-does the work.
 
 ```text
 terminal ────────────┐
@@ -15,6 +9,10 @@ browser → Codex Web ─┴→ Unix socket → codex app-server → workspace
 ```
 
 ## 1. App server
+
+Run app-server where Codex should access files and tools: the host OS, a VS Code
+development container, or another container. That environment is where Codex
+does the work.
 
 Install and sign in to [Codex CLI](https://developers.openai.com/codex/cli) in
 the work environment. App-server is included with the CLI.
