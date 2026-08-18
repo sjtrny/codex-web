@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+    <title>Codex Web</title>
+    <script src="/static/theme.js"></script>
+    <link rel="stylesheet" href="/static/vendor/markdown.css">
+    <link rel="stylesheet" href="/static/style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <button id="sidebar-scrim" class="sidebar-scrim" type="button" aria-label="Close conversations" hidden></button>
+      <aside id="sidebar" class="sidebar" aria-label="Conversations">
+        <div class="brand">
+          <strong>Codex</strong>
+          <button id="preferences-toggle" class="settings-cog" type="button" aria-controls="preferences-dialog" aria-expanded="false" aria-haspopup="dialog" aria-label="Open settings" title="Settings">⚙</button>
+          <button id="close-sidebar" class="close-sidebar" type="button" aria-label="Close conversations">×</button>
+        </div>
+        <button id="new-thread" class="wide">+ New thread</button>
+        <nav id="threads" aria-label="Threads"></nav>
+      </aside>
+
+      <section class="chat">
+        <header class="topbar">
+          <button id="menu" class="menu-button" type="button" aria-controls="sidebar" aria-expanded="false">Chats</button>
+          <strong id="thread-title">New thread</strong>
+          <label class="cwd-label">
+            <span>cwd</span>
+            <input id="cwd" spellcheck="false" autocomplete="off">
+          </label>
+          <button id="settings-toggle" type="button" aria-controls="settings-panel" aria-expanded="false" title="Chat settings">Tune</button>
+          <button id="stop" disabled>Stop</button>
+        </header>
+
+        <section id="settings-panel" class="settings-panel" aria-label="Chat settings" hidden>
+          <fieldset id="settings-fields" class="settings-grid" disabled>
+            <legend class="sr-only">Chat settings</legend>
+            <label class="setting">
+              <span>Model</span>
+              <select id="setting-model" data-setting="model"><option value="">Loading…</option></select>
+            </label>
+            <label class="setting">
+              <span>Reasoning</span>
+              <select id="setting-effort" data-setting="effort"><option value="">Inherit current thread</option></select>
+            </label>
+            <label class="setting">
+              <span>Service</span>
+              <select id="setting-service-tier" data-setting="serviceTier"><option value="">Inherit current thread</option></select>
+            </label>
+            <label class="setting">
+              <span>Personality</span>
+              <select id="setting-personality" data-setting="personality"><option value="">Inherit current thread</option></select>
+            </label>
+            <label class="setting">
+              <span>Reasoning summary</span>
+              <select id="setting-summary" data-setting="summary"><option value="">Inherit current thread</option></select>
+            </label>
+            <label class="setting">
+              <span>Approvals</span>
+              <select id="setting-approval" data-setting="approvalPolicy"><option value="">Inherit current thread</option></select>
+            </label>
+            <label class="setting">
+              <span>Permissions</span>
+              <select id="setting-permissions" data-setting="permissions"><option value="">Inherit current thread</option></select>
+            </label>
+          </fieldset>
+          <p id="settings-note" class="settings-note">Overrides apply to the next message and remain with this thread.</p>
+        </section>
+
+        <div id="notice" class="notice" hidden></div>
+        <div class="messages-region">
+          <div id="messages" class="messages" aria-live="polite" aria-busy="false">
+            <p class="empty">Send a request to start a thread.</p>
+            <div id="thinking-indicator" class="thinking-indicator" role="status" aria-label="Codex is thinking" aria-live="polite" aria-atomic="true" hidden>
+              <span>Codex is thinking</span>
+              <span class="thinking-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+            </div>
+          </div>
+          <button id="jump-present" class="jump-present" type="button" aria-controls="messages" hidden>↓ Jump to present</button>
+        </div>
+        <section id="requests" class="requests" aria-label="Requests"></section>
+
+        <form id="composer" class="composer">
+          <div id="attachments" class="attachments" aria-label="Attachments" hidden></div>
+          <label class="file-picker" title="Attach files or images">
+            <span>Attach</span>
+            <input id="file-input" type="file" multiple>
+          </label>
+          <textarea id="prompt" rows="3" placeholder="Ask Codex…"></textarea>
+          <button id="send" type="submit" disabled>Send</button>
+        </form>
+      </section>
+    </main>
+    <dialog id="preferences-dialog" class="preferences-dialog" aria-labelledby="preferences-title">
+      <header class="preferences-header">
+        <h2 id="preferences-title">Settings</h2>
+        <button id="preferences-close" class="preferences-close" type="button" aria-label="Close settings">×</button>
+      </header>
+      <section class="preferences-body" aria-labelledby="appearance-title">
+        <h3 id="appearance-title">Appearance</h3>
+        <div class="theme-options" role="group" aria-label="Color theme">
+          <button id="theme-system" class="theme-option" type="button" data-theme-preference="system" aria-pressed="false"><strong>System</strong><small>Browser / OS</small></button>
+          <button id="theme-light" class="theme-option" type="button" data-theme-preference="light" aria-pressed="false"><strong>Light</strong><small>Always light</small></button>
+          <button id="theme-dark" class="theme-option" type="button" data-theme-preference="dark" aria-pressed="false"><strong>Dark</strong><small>Always dark</small></button>
+        </div>
+        <p id="theme-summary" class="preferences-note" aria-live="polite"></p>
+      </section>
+    </dialog>
+    <script src="/static/vendor/markdown.js" defer></script>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

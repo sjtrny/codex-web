@@ -1,0 +1,10 @@
+.git
+.gitignore
+.venv
+node_modules
+.ruff_cache
+__pycache__
+runtime
+uploads
+tests
+static/vendor
