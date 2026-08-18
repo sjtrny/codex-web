@@ -3,7 +3,7 @@
 Use Codex from a terminal, this web UI, or both. Clients connected to the same
 app-server share conversations.
 
-![Optional shell setup routes Codex CLI to the same Unix socket used by the Codex Web sidecar; both share one app-server and workspace.](docs/architecture.png)
+![Codex CLI and Codex Web share an app-server and workspace through a Unix socket.](docs/architecture.png)
 
 ## 1. App server
 
