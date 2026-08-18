@@ -1,11 +1,24 @@
-const WORKSPACE_PREFIX = "/workspaces/";
-const FILE_PREFIX = "file:///workspaces/";
+let workspaceRoot = "/workspaces";
+
+export function setWorkspaceRoot(value) {
+  const normalized = String(value || "").replace(/\/+$/, "") || "/";
+  if (!normalized.startsWith("/")) return false;
+  workspaceRoot = normalized;
+  return true;
+}
+
+function isWorkspacePath(value) {
+  return workspaceRoot === "/"
+    ? value.startsWith("/")
+    : value === workspaceRoot || value.startsWith(`${workspaceRoot}/`);
+}
 
 export function workspaceFileUrl(value) {
   let candidate = String(value || "");
-  if (candidate.startsWith(FILE_PREFIX)) {
+  if (candidate.startsWith("file://")) {
     candidate = candidate.slice("file://".length);
-  } else if (!candidate.startsWith(WORKSPACE_PREFIX)) {
+  }
+  if (!isWorkspacePath(candidate)) {
     return null;
   }
 

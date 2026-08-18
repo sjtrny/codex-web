@@ -1,6 +1,6 @@
 {
   "name": "codex-web-frontend",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "private": true,
   "scripts": {
     "build": "esbuild frontend/markdown.js --bundle --minify --format=iife --target=es2020 --outdir=static/vendor --entry-names=markdown --asset-names=fonts/[name]-[hash] --loader:.woff2=file --loader:.woff=file --loader:.ttf=file",

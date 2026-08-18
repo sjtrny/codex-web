@@ -1,6 +1,6 @@
 "use strict";
 
-const APP_VERSION = "0.9.2";
+const APP_VERSION = "0.9.3";
 const MAX_ACTIVITY_CHARS = 32 * 1024;
 const PRESENT_THRESHOLD_PX = 72;
 const THREAD_CACHE_LIMIT = 8;
@@ -1582,6 +1582,9 @@ async function boot() {
   try {
     const response = await fetch("/api/config", { cache: "no-store" });
     const config = await response.json();
+    globalThis.CodexMarkdown?.configure?.({
+      workspaceRoot: config.workspaceRoot,
+    });
     state.defaultCwd = config.defaultCwd || state.defaultCwd;
     state.uploadLimits = config.uploads || null;
     ui.cwd.value = state.defaultCwd;

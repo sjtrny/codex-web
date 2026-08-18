@@ -143,6 +143,16 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
                 "script-src 'self'", response.headers["Content-Security-Policy"]
             )
 
+    async def test_config_exposes_workspace_root(self) -> None:
+        async with (
+            ClientSession() as session,
+            session.get(f"http://127.0.0.1:{self.port}/api/config") as response,
+        ):
+            config = await response.json()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(config["workspaceRoot"], str(self.workspace_path))
+            self.assertEqual(config["version"], "0.9.3")
+
     async def test_markdown_assets_are_self_hosted(self) -> None:
         async with ClientSession() as session:
             for asset, marker in (

@@ -4,7 +4,11 @@ import { Marked } from "marked";
 import markedKatex from "marked-katex-extension";
 import { enhanceCodeBlocks } from "./code-copy.mjs";
 import standardLatex from "./standard-latex.mjs";
-import { rewriteWorkspaceLinks, workspaceFileUrl } from "./workspace-links.mjs";
+import {
+  rewriteWorkspaceLinks,
+  setWorkspaceRoot,
+  workspaceFileUrl,
+} from "./workspace-links.mjs";
 
 function escapeHtml(value) {
   return String(value)
@@ -71,4 +75,8 @@ function render(value) {
   }
 }
 
-globalThis.CodexMarkdown = Object.freeze({ render });
+function configure(options = {}) {
+  if (options.workspaceRoot) setWorkspaceRoot(options.workspaceRoot);
+}
+
+globalThis.CodexMarkdown = Object.freeze({ configure, render });

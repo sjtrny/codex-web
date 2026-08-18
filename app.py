@@ -24,7 +24,7 @@ from aiohttp import (
 )
 from aiohttp.helpers import content_disposition_header
 
-APP_VERSION = "0.9.2"
+APP_VERSION = "0.9.3"
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 MAX_MESSAGE_BYTES = 16 * 1024 * 1024
@@ -199,6 +199,7 @@ async def app_config(_: web.Request) -> web.Response:
     return web.json_response(
         {
             "defaultCwd": env("CODEX_DEFAULT_CWD", "/workspaces"),
+            "workspaceRoot": str(workspace_root()),
             "uploads": {
                 "maxBytes": max_bytes,
                 "maxFiles": max_files,

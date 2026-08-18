@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 
 import {
   rewriteWorkspaceLinks,
+  setWorkspaceRoot,
   workspaceFileUrl,
 } from "../frontend/workspace-links.mjs";
 
@@ -41,5 +42,17 @@ assert.equal(
 );
 assert.equal(attributes.get("data-workspace-file"), "true");
 assert.equal(link.title, "Open workspace file");
+
+assert.equal(setWorkspaceRoot("/srv/code/"), true);
+assert.equal(
+  workspaceFileUrl("/srv/code/project/result.txt:12"),
+  "/api/files?path=%2Fsrv%2Fcode%2Fproject%2Fresult.txt%3A12&line=12",
+);
+assert.equal(
+  workspaceFileUrl("file:///srv/code/project/image.png"),
+  "/api/files?path=%2Fsrv%2Fcode%2Fproject%2Fimage.png",
+);
+assert.equal(workspaceFileUrl("/workspaces/example-project/report.pdf"), null);
+assert.equal(setWorkspaceRoot("relative/path"), false);
 
 console.log("workspace-links=ok");

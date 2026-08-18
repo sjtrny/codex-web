@@ -1,21 +1,22 @@
 services:
   codex-web:
     build: .
+    user: "${CODEX_WEB_UID:-1000}:${CODEX_WEB_GID:-1000}"
     environment:
       CODEX_APP_SERVER_SOCKET: /run/codex/app.sock
       CODEX_DEFAULT_CWD: "${CODEX_DEFAULT_CWD:-/workspaces}"
-      CODEX_WORKSPACE_ROOT: /workspaces
+      CODEX_WORKSPACE_ROOT: "${CODEX_WORKSPACE_ROOT:-/workspaces}"
       CODEX_UPLOAD_DIR: /uploads
-      CODEX_UPLOAD_HOST_DIR: /workspaces/codex-web/uploads
+      CODEX_UPLOAD_HOST_DIR: "${CODEX_UPLOAD_HOST_DIR:-/workspaces/codex-web/uploads}"
       CODEX_UPLOAD_MAX_BYTES: "${CODEX_UPLOAD_MAX_BYTES:-52428800}"
       CODEX_UPLOAD_MAX_FILES: "${CODEX_UPLOAD_MAX_FILES:-12}"
       CODEX_UPLOAD_TOTAL_BYTES: "${CODEX_UPLOAD_TOTAL_BYTES:-209715200}"
     ports:
       - "0.0.0.0:${CODEX_WEB_PORT:-8765}:8000"
     volumes:
-      - ./runtime:/run/codex:ro
-      - ./uploads:/uploads
-      - ..:/workspaces:ro
+      - "${CODEX_RUNTIME_DIR:-./runtime}:/run/codex:ro"
+      - "${CODEX_UPLOAD_STORAGE_DIR:-./uploads}:/uploads"
+      - "${CODEX_WORKSPACE_HOST_PATH:-..}:${CODEX_WORKSPACE_ROOT:-/workspaces}:ro"
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
