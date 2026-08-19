@@ -24,7 +24,8 @@ COPY --from=frontend /build/static/vendor ./static/vendor
 
 RUN groupadd --gid 1000 app \
     && useradd --uid 1000 --gid 1000 --no-create-home --home-dir /nonexistent app \
-    && chown -R app:app /app
+    && chown -R app:app /app \
+    && chmod -R a+rX /app
 
 USER app
 EXPOSE 8000
