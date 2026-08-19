@@ -103,22 +103,21 @@
               <h1 id="search-title">Search chat history</h1>
               <p>Find a message across the conversations in your chat list. Dates use the containing turn's time.</p>
             </div>
-            <button id="search-close" type="button">Back to chat</button>
           </header>
           <div class="search-content">
             <form id="search-form" class="search-form" role="search">
               <div class="search-query-row">
                 <label class="sr-only" for="search-query">Search messages</label>
                 <input id="search-query" type="search" name="q" maxlength="256" placeholder="Search messages…" autocomplete="off" enterkeyhint="search">
-                <button id="search-submit" type="submit">Search</button>
+                <button id="search-submit" class="search-submit" type="submit">Search</button>
               </div>
               <fieldset class="search-filters">
                 <legend class="sr-only">Search filters</legend>
-                <label>
+                <label class="search-date-filter">
                   <span>From</span>
                   <input id="search-from" type="date" name="from">
                 </label>
-                <label>
+                <label class="search-date-filter">
                   <span>To</span>
                   <input id="search-to" type="date" name="to">
                 </label>

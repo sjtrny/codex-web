@@ -47,7 +47,6 @@ const ui = {
   searchChats: el("search-chats"),
   searchView: el("search-view"),
   searchMenu: el("search-menu"),
-  searchClose: el("search-close"),
   searchForm: el("search-form"),
   searchQuery: el("search-query"),
   searchFrom: el("search-from"),
@@ -2470,7 +2469,6 @@ if (globalThis.CODEX_WEB_TEST) {
     setSidebarOpen(false, false);
     setSearchOpen(true);
   });
-  ui.searchClose.addEventListener("click", () => setSearchOpen(false));
   ui.searchForm.addEventListener("submit", performSearch);
   ui.searchClear.addEventListener("click", (event) => {
     event.preventDefault();
