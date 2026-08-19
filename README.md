@@ -5,6 +5,8 @@ app-server share conversations.
 
 ![Codex CLI and Codex Web share an app-server and workspace through a Unix socket.](docs/architecture.png)
 
+![Codex Web and Codex CLI receive the same conversation updates.](docs/sync-demo.gif)
+
 ## Setup
 
 ### 1. App server

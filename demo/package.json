@@ -1,0 +1,16 @@
+{
+  "name": "codex-web-demo-recorder",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "record": "node record.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@xterm/xterm": "6.0.0",
+    "node-pty": "1.2.0-beta.15",
+    "playwright": "1.62.1"
+  }
+}
