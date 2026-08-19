@@ -16,7 +16,6 @@ LINE = (0.43, 0.49, 0.57)
 BORDER = (0.48, 0.53, 0.60)
 BLUE = (0.15, 0.36, 0.78)
 BLUE_PALE = (0.91, 0.94, 1.0)
-TEAL = (0.05, 0.47, 0.43)
 TEAL_PALE = (0.89, 0.97, 0.95)
 AMBER = (0.55, 0.29, 0.0)
 AMBER_PALE = (1.0, 0.96, 0.86)
@@ -166,6 +165,7 @@ def draw(surface_factory, width: int = WIDTH, height: int = HEIGHT):
 
     ctx.set_source_rgb(*BG)
     ctx.paint()
+    ctx.translate(-5, -10)
 
     ctx.set_source_rgb(*LINE)
     ctx.set_line_width(1.5)
@@ -175,13 +175,13 @@ def draw(surface_factory, width: int = WIDTH, height: int = HEIGHT):
     ctx.set_dash([])
 
     text(ctx, "USE EITHER - OR BOTH", 140, 236, 15, MUTED, centered=True)
-    text(ctx, "WORK ENVIRONMENT  /  HOST OR CONTAINER", 523, 84, 15, MUTED)
+    text(ctx, "HOST OR CONTAINER", 523, 84, 15, MUTED)
 
     arrow(ctx, [(250, 160), (475, 160), (475, 213), (530, 213)], BLUE)
     arrow(ctx, [(250, 300), (275, 300)], BLUE)
     arrow(ctx, [(475, 300), (510, 300), (510, 247), (530, 247)], BLUE)
-    arrow(ctx, [(700, 230), (760, 230)], TEAL)
-    arrow(ctx, [(965, 230), (1025, 230)], LINE)
+    arrow(ctx, [(700, 230), (760, 230)], BLUE)
+    arrow(ctx, [(965, 230), (1025, 230)], BLUE)
 
     card(ctx, 30, 114, 220, 92)
     terminal_icon(ctx, 50, 136)
@@ -189,7 +189,7 @@ def draw(surface_factory, width: int = WIDTH, height: int = HEIGHT):
 
     card(ctx, 30, 254, 220, 92)
     browser_icon(ctx, 50, 276)
-    text(ctx, "Web browser", 116, 309, 20, INK)
+    text(ctx, "Browser", 116, 309, 20, INK)
 
     card(ctx, 275, 254, 200, 92, BLUE_PALE)
     text(ctx, "Codex Web", 375, 309, 21, INK, centered=True)
