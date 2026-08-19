@@ -178,9 +178,13 @@ const {
   handleNotification,
   handleMessagesScroll,
   inputText,
+  isSearchSelectionCurrent,
   jumpToPresent,
+  normalizeSearchResponse,
   normalizeChatSettings,
+  parseSearchDate,
   pendingPromptText,
+  renderSearchResults,
   promptKeydown,
   renderThreadHistory,
   renderThinkingIndicator,
@@ -191,6 +195,7 @@ const {
   selectedTurnId,
   setThreadActivity,
   setSidebarOpen,
+  setSearchOpen,
   setPreferencesOpen,
   sortThreadsByActivity,
   state,
@@ -200,6 +205,7 @@ const {
   ui,
   updateControls,
   upsertMessage,
+  validateSearchDates,
 } = globalThis.CodexWebTest;
 
 globalThis.CodexTheme = {
@@ -471,6 +477,7 @@ assert.equal(threadActivityTimestamp(unsortedThreads[2]), 300);
 assert.deepEqual(sortThreadsByActivity(null), []);
 assert.deepEqual(THREAD_LIST_PARAMS, {
   limit: 50,
+  sourceKinds: ["cli", "vscode", "appServer"],
   sortKey: "recency_at",
   sortDirection: "desc",
 });
@@ -568,4 +575,140 @@ for (let index = 0; index < THREAD_CACHE_LIMIT + 2; index += 1) {
   cacheThreadSnapshot({ id: `lru-${index}`, turns: [] });
 }
 assert.ok(state.threadCache.size <= THREAD_CACHE_LIMIT, "thread cache should remain bounded");
-console.log("render-and-settings=ok");
+
+setSearchOpen(true);
+assert.equal(state.searchOpen, true);
+assert.equal(ui.searchView.hidden, false);
+assert.equal(ui.chat.classList.contains("search-active"), true);
+assert.equal(ui.searchChats.getAttribute("aria-pressed"), "true");
+assert.equal(ui.searchQuery.focusCount, 1);
+setSearchOpen(false, false);
+assert.equal(ui.searchView.hidden, true);
+assert.equal(ui.chat.classList.contains("search-active"), false);
+
+const searchSelectionSnapshot = { threadId: state.threadId, selectionId: state.selectionId };
+state.threadId = "search-thread";
+state.selectionId = 41;
+assert.equal(isSearchSelectionCurrent("search-thread", 41), true);
+state.selectionId = 42;
+assert.equal(
+  isSearchSelectionCurrent("search-thread", 41),
+  false,
+  "a search-result jump must become stale when the user selects another view",
+);
+state.threadId = searchSelectionSnapshot.threadId;
+state.selectionId = searchSelectionSnapshot.selectionId;
+
+assert.equal(parseSearchDate(1704153600).toISOString(), "2024-01-02T00:00:00.000Z");
+assert.equal(parseSearchDate("not-a-date"), null);
+const normalizedSearch = normalizeSearchResponse({
+  results: [{
+    thread_id: "search-thread",
+    turn_id: "search-turn",
+    message_id: "search-item",
+    thread_title: "Search result title",
+    role: "agent",
+    snippet: "A Straße in chat history",
+    matched_text: "Straße",
+    timestamp: "2024-01-02T00:00:00Z",
+    timestamp_source: "message",
+  }],
+  total: 3,
+  truncated: true,
+  partial: true,
+  skipped_threads: 2,
+});
+assert.equal(normalizedSearch.results.length, 1);
+assert.equal(normalizedSearch.results[0].threadId, "search-thread");
+assert.equal(normalizedSearch.results[0].itemId, "search-item");
+assert.equal(normalizedSearch.results[0].role, "assistant");
+assert.equal(normalizedSearch.results[0].date.toISOString(), "2024-01-02T00:00:00.000Z");
+assert.equal(normalizedSearch.total, 3);
+assert.equal(normalizedSearch.truncated, true);
+assert.equal(normalizedSearch.partial, true);
+assert.equal(normalizedSearch.skippedThreads, 2);
+
+ui.searchFrom.value = "2024-02-10";
+ui.searchTo.value = "2024-02-09";
+assert.equal(validateSearchDates(), false);
+assert.equal(ui.searchFrom.getAttribute("aria-invalid"), "true");
+assert.match(ui.searchStatus.textContent, /start date/i);
+ui.searchTo.value = "2024-02-10";
+assert.equal(validateSearchDates(), true);
+assert.equal(ui.searchFrom.getAttribute("aria-invalid"), null);
+
+renderSearchResults(normalizedSearch, "STRASSE");
+assert.equal(ui.searchResults.children.length, 1);
+assert.match(ui.searchStatus.textContent, /Showing 1 of 3 matches/);
+assert.match(ui.searchStatus.textContent, /2 conversations could not be searched/);
+const searchResultButton = ui.searchResults.children[0].children[0];
+assert.equal(searchResultButton.disabled, false);
+assert.equal(searchResultButton.children[0].children[0].textContent, "Search result title");
+assert.equal(searchResultButton.children[0].children[1].textContent, "Codex");
+const highlightedSnippet = searchResultButton.children[1];
+const highlight = highlightedSnippet.children.find((child) => child.tagName === "mark");
+assert.equal(highlight.textContent, "Straße", "search highlighting should safely preserve Unicode matches");
+assert.equal(searchResultButton.children[2].children[0].tagName, "time");
+
+const fallbackDateSearch = normalizeSearchResponse({
+  results: [
+    {
+      threadId: "turn-date-thread",
+      itemId: "turn-date-item",
+      threadTitle: "Turn timestamp",
+      snippet: "turn fallback",
+      timestamp: "2024-01-03T00:00:00Z",
+      dateSource: "turn",
+    },
+    {
+      threadId: "thread-date-thread",
+      itemId: "thread-date-item",
+      threadTitle: "Thread timestamp",
+      snippet: "thread fallback",
+      timestamp: "2024-01-02T00:00:00Z",
+      dateSource: "thread",
+    },
+  ],
+  total: 2,
+});
+renderSearchResults(fallbackDateSearch, "fallback");
+const turnTimeFallback = ui.searchResults.children[0].children[0].children[2].children[1];
+assert.equal(turnTimeFallback.textContent, " · turn time");
+assert.match(turnTimeFallback.title, /matching turn's timestamp/);
+const threadDateFallback = ui.searchResults.children[1].children[0].children[2].children[1];
+assert.equal(threadDateFallback.textContent, " · conversation date");
+assert.match(threadDateFallback.title, /conversation's timestamp/);
+
+const originalFetch = globalThis.fetch;
+let capturedSearchRequest;
+globalThis.fetch = async (url, options) => {
+  capturedSearchRequest = { url, options };
+  return {
+    ok: true,
+    status: 200,
+    async json() {
+      return { results: [], total: 0, truncated: false, partial: false };
+    },
+  };
+};
+ui.searchQuery.value = "needle";
+ui.searchFrom.value = "2024-01-01";
+ui.searchTo.value = "2024-01-31";
+ui.searchSort.value = "oldest";
+performSearch({ preventDefault() {} }).then(() => {
+  globalThis.fetch = originalFetch;
+  assert.equal(capturedSearchRequest.url, "/api/search");
+  assert.equal(capturedSearchRequest.options.method, "POST");
+  assert.equal(capturedSearchRequest.options.headers["Content-Type"], "application/json");
+  const requestBody = JSON.parse(capturedSearchRequest.options.body);
+  assert.equal(requestBody.q, "needle");
+  assert.equal(requestBody.from, "2024-01-01");
+  assert.equal(requestBody.to, "2024-01-31");
+  assert.equal(requestBody.sort, "oldest");
+  assert.equal(typeof requestBody.timezone, "string");
+  console.log("render-and-settings=ok");
+}).catch((error) => {
+  globalThis.fetch = originalFetch;
+  console.error(error);
+  process.exitCode = 1;
+});

@@ -6,10 +6,12 @@ const PRESENT_THRESHOLD_PX = 72;
 const THREAD_CACHE_LIMIT = 8;
 const THREAD_LIST_PARAMS = Object.freeze({
   limit: 50,
+  sourceKinds: ["cli", "vscode", "appServer"],
   sortKey: "recency_at",
   sortDirection: "desc",
 });
 const CHAT_SETTINGS_STORAGE_KEY = "codex-web-chat-settings-v1";
+const SEARCH_MATCH_HIGHLIGHT_MS = 4000;
 const CHAT_SETTING_FIELDS = [
   "model",
   "effort",
@@ -26,12 +28,26 @@ function emptyChatSettings() {
 
 const el = (id) => document.getElementById(id);
 const ui = {
+  chat: el("chat"),
   sidebar: el("sidebar"),
   sidebarScrim: el("sidebar-scrim"),
   menu: el("menu"),
   closeSidebar: el("close-sidebar"),
   threads: el("threads"),
   newThread: el("new-thread"),
+  searchChats: el("search-chats"),
+  searchView: el("search-view"),
+  searchMenu: el("search-menu"),
+  searchClose: el("search-close"),
+  searchForm: el("search-form"),
+  searchQuery: el("search-query"),
+  searchFrom: el("search-from"),
+  searchTo: el("search-to"),
+  searchSort: el("search-sort"),
+  searchClear: el("search-clear"),
+  searchSubmit: el("search-submit"),
+  searchStatus: el("search-status"),
+  searchResults: el("search-results"),
   preferencesToggle: el("preferences-toggle"),
   preferencesDialog: el("preferences-dialog"),
   preferencesClose: el("preferences-close"),
@@ -98,6 +114,10 @@ const state = {
   uploading: false,
   uploadLimits: null,
   sidebarOpen: false,
+  searchOpen: false,
+  searchRequestId: 0,
+  searchAbortController: null,
+  searchResults: [],
   followPresent: true,
   connectionStatus: "offline",
 };
@@ -617,6 +637,7 @@ function setSidebarOpen(open, moveFocus = true) {
   ui.sidebar.classList.toggle("open", state.sidebarOpen);
   ui.sidebarScrim.hidden = !state.sidebarOpen;
   ui.menu.setAttribute("aria-expanded", String(state.sidebarOpen));
+  ui.searchMenu.setAttribute("aria-expanded", String(state.sidebarOpen));
   const drawerHidden = !globalThis.CODEX_WEB_TEST
     && window.matchMedia("(max-width: 760px)").matches
     && !state.sidebarOpen;
@@ -624,8 +645,500 @@ function setSidebarOpen(open, moveFocus = true) {
   if (drawerHidden) ui.sidebar.setAttribute("aria-hidden", "true");
   else ui.sidebar.removeAttribute("aria-hidden");
   if (moveFocus) {
-    (state.sidebarOpen ? ui.closeSidebar : ui.menu).focus();
+    const returnTarget = state.searchOpen ? ui.searchMenu : ui.menu;
+    (state.sidebarOpen ? ui.closeSidebar : returnTarget).focus();
   }
+}
+
+function setSearchOpen(open, moveFocus = true) {
+  state.searchOpen = Boolean(open);
+  ui.chat.classList.toggle("search-active", state.searchOpen);
+  ui.searchView.hidden = !state.searchOpen;
+  ui.searchChats.setAttribute("aria-pressed", String(state.searchOpen));
+  if (state.searchOpen && state.settingsOpen) setSettingsOpen(false, false);
+  if (!moveFocus) return;
+  if (state.searchOpen) {
+    ui.searchQuery.focus();
+    return;
+  }
+  const mobile = globalThis.window?.matchMedia?.("(max-width: 760px)").matches;
+  (mobile ? ui.menu : ui.searchChats).focus();
+}
+
+function setSearchStatus(text, kind = "") {
+  ui.searchStatus.textContent = text;
+  ui.searchStatus.className = `search-status${kind ? ` ${kind}` : ""}`;
+}
+
+function setSearchBusy(busy) {
+  ui.searchResults.setAttribute("aria-busy", String(Boolean(busy)));
+  ui.searchSubmit.disabled = Boolean(busy);
+  ui.searchSubmit.textContent = busy ? "Searching…" : "Search";
+}
+
+function searchValue(objects, keys) {
+  for (const object of objects) {
+    if (!object || typeof object !== "object") continue;
+    for (const key of keys) {
+      const value = object[key];
+      if (value !== undefined && value !== null && value !== "") return value;
+    }
+  }
+  return null;
+}
+
+function searchText(value) {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return inputText(value);
+  if (value && typeof value === "object") {
+    return searchText(value.text ?? value.content ?? value.value ?? "");
+  }
+  return value === undefined || value === null ? "" : String(value);
+}
+
+function parseSearchDate(value) {
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+  let parsed;
+  if (typeof value === "number" || (typeof value === "string" && /^-?\d+(\.\d+)?$/.test(value.trim()))) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return null;
+    parsed = new Date(Math.abs(numeric) < 1e12 ? numeric * 1000 : numeric);
+  } else if (typeof value === "string" && value.trim()) {
+    parsed = new Date(value);
+  } else {
+    return null;
+  }
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function normalizeSearchRole(value) {
+  const role = String(value || "").toLowerCase();
+  if (["user", "human", "you"].includes(role)) return "user";
+  if (["assistant", "agent", "codex"].includes(role)) return "assistant";
+  return role || "message";
+}
+
+function normalizeSearchResult(raw) {
+  const message = raw?.message && typeof raw.message === "object" ? raw.message : null;
+  const thread = raw?.thread && typeof raw.thread === "object" ? raw.thread : null;
+  const objects = [raw, message];
+  const threadId = searchValue([raw, message, thread], ["threadId", "thread_id"])
+    ?? searchValue([thread], ["id"]);
+  const itemId = searchValue(objects, [
+    "itemId",
+    "item_id",
+    "messageId",
+    "message_id",
+  ]) ?? searchValue([message], ["id"]);
+  const turnId = searchValue(objects, ["turnId", "turn_id"]);
+  const title = searchText(searchValue([raw, thread], [
+    "threadTitle",
+    "thread_title",
+    "title",
+    "name",
+    "preview",
+  ])) || "Untitled thread";
+  const role = normalizeSearchRole(searchValue(objects, [
+    "role",
+    "messageRole",
+    "message_role",
+    "author",
+  ]));
+  const text = searchText(searchValue(objects, ["text", "content", "body"]));
+  const snippet = searchText(searchValue(objects, [
+    "snippet",
+    "excerpt",
+    "preview",
+  ])) || text || "No preview available.";
+  const matchedText = searchText(searchValue(objects, [
+    "matchedText",
+    "matched_text",
+  ]));
+
+  let dateSource = String(searchValue([raw], [
+    "timestampSource",
+    "timestamp_source",
+    "dateSource",
+    "date_source",
+  ]) || "").toLowerCase();
+  let dateValue = searchValue([message, raw], [
+    "messageCreatedAt",
+    "message_created_at",
+    "messageTimestamp",
+    "message_timestamp",
+  ]);
+  if (dateValue === null) {
+    dateValue = searchValue([message, raw], ["timestamp", "createdAt", "created_at", "date"]);
+  }
+  if (dateValue === null) {
+    dateValue = searchValue([raw, thread], [
+      "threadUpdatedAt",
+      "thread_updated_at",
+      "updatedAt",
+      "updated_at",
+      "threadCreatedAt",
+      "thread_created_at",
+      "createdAt",
+      "created_at",
+    ]);
+    dateSource = "thread";
+  }
+  if (!dateSource) dateSource = "message";
+
+  return {
+    raw,
+    threadId: threadId === null ? "" : String(threadId),
+    itemId: itemId === null ? "" : String(itemId),
+    turnId: turnId === null ? "" : String(turnId),
+    title,
+    role,
+    text,
+    snippet,
+    matchedText,
+    date: parseSearchDate(dateValue),
+    dateSource: dateSource.includes("thread") || dateSource.includes("turn")
+      ? dateSource
+      : "message",
+  };
+}
+
+function normalizeSearchResponse(payload) {
+  const rows = Array.isArray(payload)
+    ? payload
+    : (Array.isArray(payload?.results)
+      ? payload.results
+      : (Array.isArray(payload?.data?.results) ? payload.data.results : (payload?.data || [])));
+  const results = Array.isArray(rows)
+    ? rows.filter((row) => row && typeof row === "object").map(normalizeSearchResult)
+    : [];
+  const totalValue = Array.isArray(payload)
+    ? results.length
+    : searchValue([payload], ["total", "totalCount", "total_count", "count"]);
+  const numericTotal = Number(totalValue);
+  const total = Number.isFinite(numericTotal) && numericTotal >= 0
+    ? Math.max(numericTotal, results.length)
+    : results.length;
+  const truncated = !Array.isArray(payload) && Boolean(
+    payload?.truncated
+    || payload?.hasMore
+    || payload?.has_more
+    || total > results.length,
+  );
+  const skippedValue = Array.isArray(payload?.skippedThreads)
+    ? payload.skippedThreads.length
+    : Number(payload?.skippedThreads ?? payload?.skipped_threads ?? 0);
+  const skippedThreads = Number.isFinite(skippedValue) && skippedValue > 0 ? skippedValue : 0;
+  const partial = !Array.isArray(payload) && Boolean(payload?.partial || skippedThreads);
+  return { results, total, truncated, partial, skippedThreads };
+}
+
+function formatSearchDate(date) {
+  if (!date) return "Date unavailable";
+  try {
+    return date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  } catch {
+    return date.toLocaleString();
+  }
+}
+
+function appendHighlightedText(container, text, query) {
+  const source = String(text || "");
+  const needle = String(query || "").trim();
+  if (!needle) {
+    container.textContent = source;
+    return;
+  }
+  const exactMatch = source.includes(needle);
+  const foldedSource = exactMatch ? source : source.toLocaleLowerCase();
+  const foldedNeedle = exactMatch ? needle : needle.toLocaleLowerCase();
+  let cursor = 0;
+  let marks = 0;
+  while (cursor < source.length && marks < 50) {
+    const match = foldedSource.indexOf(foldedNeedle, cursor);
+    if (match < 0) break;
+    if (match > cursor) {
+      const before = document.createElement("span");
+      before.textContent = source.slice(cursor, match);
+      container.append(before);
+    }
+    const mark = document.createElement("mark");
+    mark.textContent = source.slice(match, match + needle.length);
+    container.append(mark);
+    cursor = match + needle.length;
+    marks += 1;
+  }
+  if (cursor < source.length) {
+    const after = document.createElement("span");
+    after.textContent = source.slice(cursor);
+    container.append(after);
+  }
+}
+
+function searchRoleLabel(role) {
+  if (role === "user") return "You";
+  if (role === "assistant") return "Codex";
+  return role === "message" ? "Message" : `${role[0]?.toUpperCase() || ""}${role.slice(1)}`;
+}
+
+function searchItemText(item) {
+  if (!item) return "";
+  if (item.type === "userMessage") return inputText(item.content);
+  return searchText(item.text ?? item.content ?? "");
+}
+
+function locateSearchItem(result, query) {
+  if (result.itemId && state.items.has(result.itemId)) {
+    return { itemId: result.itemId, exact: true };
+  }
+  const entry = cachedThread(result.threadId, false);
+  if (!entry) return null;
+  let turns = entry.thread?.turns || [];
+  if (result.turnId) {
+    const matchingTurn = turns.find((turn) => String(turn.id) === result.turnId);
+    if (matchingTurn) turns = [matchingTurn];
+  }
+  let candidates = turns.flatMap((turn) => turn.items || []).filter((item) => (
+    item?.id && state.items.has(item.id) && ["userMessage", "agentMessage"].includes(item.type)
+  ));
+  const type = result.role === "user"
+    ? "userMessage"
+    : (result.role === "assistant" ? "agentMessage" : "");
+  const roleCandidates = type ? candidates.filter((item) => item.type === type) : [];
+  if (roleCandidates.length) candidates = roleCandidates;
+  const needle = String(query || "").trim().toLocaleLowerCase();
+  const textMatch = needle
+    ? candidates.find((item) => searchItemText(item).toLocaleLowerCase().includes(needle))
+    : null;
+  const selected = textMatch || candidates[0];
+  return selected ? { itemId: String(selected.id), exact: false } : null;
+}
+
+function focusSearchItem(itemId) {
+  const node = state.items.get(itemId)?.node;
+  if (!node) return false;
+  node.setAttribute("tabindex", "-1");
+  node.classList.add("search-match");
+  node.scrollIntoView?.({ behavior: "smooth", block: "center" });
+  node.focus({ preventScroll: true });
+  window.setTimeout(() => {
+    node.classList.remove("search-match");
+    node.removeAttribute("tabindex");
+  }, SEARCH_MATCH_HIGHLIGHT_MS);
+  return true;
+}
+
+function isSearchSelectionCurrent(threadId, selectionId) {
+  return state.threadId === threadId && state.selectionId === selectionId;
+}
+
+async function openSearchResult(result, query, button) {
+  if (!state.ready) {
+    setSearchStatus("Chats are reconnecting. Try opening this result again in a moment.", "error");
+    return;
+  }
+  button.disabled = true;
+  let selectionId = null;
+  try {
+    setSearchOpen(false, false);
+    setSidebarOpen(false, false);
+    const opening = openThread(result.threadId);
+    selectionId = state.selectionId;
+    await opening;
+    if (!isSearchSelectionCurrent(result.threadId, selectionId)) return;
+    if (!cachedThread(result.threadId, false)) {
+      if (!ui.notice.textContent) notice("Unable to load this conversation.");
+      return;
+    }
+    const match = locateSearchItem(result, query);
+    if (match && focusSearchItem(match.itemId)) {
+      notice(match.exact ? "" : "Opened the matching turn; the exact message position was unavailable.");
+    } else {
+      notice("Opened the conversation; the exact matching message could not be positioned.");
+    }
+  } catch (error) {
+    if (selectionId !== null && !isSearchSelectionCurrent(result.threadId, selectionId)) return;
+    notice(error.message || "Unable to open this search result.");
+  } finally {
+    button.disabled = !result.threadId;
+  }
+}
+
+function renderSearchResults(response, query) {
+  state.searchResults = response.results;
+  ui.searchResults.replaceChildren();
+  if (!response.results.length) {
+    let summary = `No messages found for “${query}”.`;
+    if (response.partial) {
+      const skipped = response.skippedThreads
+        ? `${response.skippedThreads.toLocaleString()} conversation${response.skippedThreads === 1 ? "" : "s"}`
+        : "Some conversations";
+      summary += ` ${skipped} could not be searched.`;
+    }
+    setSearchStatus(summary, response.partial ? "error" : "empty");
+    return;
+  }
+
+  const shown = response.results.length;
+  let summary;
+  if (response.truncated || response.total > shown) {
+    summary = `Showing ${shown.toLocaleString()} of ${response.total.toLocaleString()} matches. Refine your search or date range to narrow the results.`;
+  } else {
+    summary = `${response.total.toLocaleString()} match${response.total === 1 ? "" : "es"} found.`;
+  }
+  if (response.partial) {
+    const skipped = response.skippedThreads
+      ? `${response.skippedThreads.toLocaleString()} conversation${response.skippedThreads === 1 ? "" : "s"}`
+      : "Some conversations";
+    summary += ` ${skipped} could not be searched.`;
+  }
+  setSearchStatus(summary, response.partial ? "error" : "");
+
+  for (const result of response.results) {
+    const item = document.createElement("li");
+    item.className = "search-result";
+    const button = document.createElement("button");
+    button.className = "search-result-button";
+    button.type = "button";
+    button.disabled = !result.threadId;
+
+    const heading = document.createElement("span");
+    heading.className = "search-result-heading";
+    const title = document.createElement("strong");
+    title.className = "search-result-title";
+    title.textContent = result.title;
+    const role = document.createElement("span");
+    role.className = "search-result-role";
+    role.textContent = searchRoleLabel(result.role);
+    heading.append(title, role);
+
+    const snippet = document.createElement("span");
+    snippet.className = "search-result-snippet";
+    appendHighlightedText(snippet, result.snippet, result.matchedText || query);
+
+    const meta = document.createElement("span");
+    meta.className = "search-result-meta";
+    if (result.date) {
+      const time = document.createElement("time");
+      time.setAttribute("datetime", result.date.toISOString());
+      time.textContent = formatSearchDate(result.date);
+      meta.append(time);
+    } else {
+      meta.textContent = "Date unavailable";
+    }
+    if (result.dateSource !== "message") {
+      const fallback = document.createElement("span");
+      const turnTime = result.dateSource.includes("turn");
+      fallback.className = "search-result-fallback";
+      fallback.textContent = turnTime ? " · turn time" : " · conversation date";
+      fallback.title = turnTime
+        ? "An exact message timestamp was unavailable; this is the matching turn's timestamp."
+        : "An exact message timestamp was unavailable; this is the conversation's timestamp.";
+      meta.append(fallback);
+    }
+    if (!result.threadId) meta.textContent += " · conversation unavailable";
+
+    button.append(heading, snippet, meta);
+    button.addEventListener("click", () => openSearchResult(result, query, button));
+    item.append(button);
+    ui.searchResults.append(item);
+  }
+}
+
+function validateSearchDates() {
+  ui.searchFrom.removeAttribute("aria-invalid");
+  ui.searchTo.removeAttribute("aria-invalid");
+  if (!ui.searchFrom.value || !ui.searchTo.value || ui.searchFrom.value <= ui.searchTo.value) {
+    return true;
+  }
+  ui.searchFrom.setAttribute("aria-invalid", "true");
+  ui.searchTo.setAttribute("aria-invalid", "true");
+  ui.searchResults.replaceChildren();
+  setSearchStatus("The start date must be on or before the end date.", "error");
+  return false;
+}
+
+async function performSearch(event) {
+  event?.preventDefault?.();
+  state.searchAbortController?.abort();
+  state.searchAbortController = null;
+  const requestId = ++state.searchRequestId;
+  const query = ui.searchQuery.value.trim();
+  if (!query) {
+    setSearchBusy(false);
+    ui.searchResults.replaceChildren();
+    setSearchStatus("Enter a word or phrase to search your chat history.");
+    ui.searchQuery.focus();
+    return;
+  }
+  if (!validateSearchDates()) {
+    setSearchBusy(false);
+    return;
+  }
+
+  const controller = new AbortController();
+  state.searchAbortController = controller;
+  setSearchBusy(true);
+  ui.searchResults.replaceChildren();
+  setSearchStatus(`Searching for “${query}”…`, "loading");
+
+  const params = { q: query, sort: ui.searchSort.value || "newest" };
+  if (ui.searchFrom.value) params.from = ui.searchFrom.value;
+  if (ui.searchTo.value) params.to = ui.searchTo.value;
+  try {
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (timezone) params.timezone = timezone;
+  } catch {
+    // Date filtering remains available in environments without an IANA time zone.
+  }
+  try {
+    const response = await fetch("/api/search", {
+      method: "POST",
+      cache: "no-store",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+      signal: controller.signal,
+    });
+    let payload;
+    try {
+      payload = await response.json();
+    } catch {
+      payload = {};
+    }
+    if (!response.ok) {
+      const errorMessage = typeof payload.error === "string"
+        ? payload.error
+        : (payload.error?.message || payload.message);
+      throw new Error(errorMessage || `Search failed (${response.status})`);
+    }
+    if (requestId !== state.searchRequestId) return;
+    renderSearchResults(normalizeSearchResponse(payload), query);
+  } catch (error) {
+    if (error.name === "AbortError" || requestId !== state.searchRequestId) return;
+    ui.searchResults.replaceChildren();
+    setSearchStatus(error.message || "Search is temporarily unavailable.", "error");
+  } finally {
+    if (requestId === state.searchRequestId) {
+      state.searchAbortController = null;
+      setSearchBusy(false);
+    }
+  }
+}
+
+function clearSearch() {
+  state.searchAbortController?.abort();
+  state.searchAbortController = null;
+  state.searchRequestId += 1;
+  state.searchResults = [];
+  ui.searchQuery.value = "";
+  ui.searchFrom.value = "";
+  ui.searchTo.value = "";
+  ui.searchSort.value = "newest";
+  ui.searchFrom.removeAttribute("aria-invalid");
+  ui.searchTo.removeAttribute("aria-invalid");
+  ui.searchResults.replaceChildren();
+  setSearchBusy(false);
+  setSearchStatus("Enter a word or phrase to search your chat history.");
+  ui.searchQuery.focus();
 }
 
 function formatBytes(bytes) {
@@ -1258,6 +1771,7 @@ function renderThreads(threads, reconcileActivity = false) {
     button.append(title, meta);
     button.addEventListener("click", () => {
       setSidebarOpen(false, false);
+      setSearchOpen(false, false);
       openThread(thread.id);
     });
     ui.threads.append(button);
@@ -1318,6 +1832,7 @@ async function openThread(threadId, showErrors = true) {
 
 function beginNewThread() {
   saveCurrentThreadView();
+  setSearchOpen(false, false);
   state.selectionId += 1;
   state.threadId = null;
   state.attachments = [];
@@ -1620,6 +2135,7 @@ if (globalThis.CODEX_WEB_TEST) {
     cachedThread,
     handleNotification,
     handleMessagesScroll,
+    isSearchSelectionCurrent,
     jumpToPresent,
     renderThreadHistory,
     renderThinkingIndicator,
@@ -1630,7 +2146,13 @@ if (globalThis.CODEX_WEB_TEST) {
     selectedTurnId,
     setThreadActivity,
     setSidebarOpen,
+    setSearchOpen,
     setPreferencesOpen,
+    normalizeSearchResponse,
+    parseSearchDate,
+    performSearch,
+    renderSearchResults,
+    validateSearchDates,
     sortThreadsByActivity,
     state,
     threadActivityTimestamp,
@@ -1672,8 +2194,25 @@ if (globalThis.CODEX_WEB_TEST) {
   }
   ui.cwd.addEventListener("change", refreshPermissionProfiles);
   ui.menu.addEventListener("click", () => setSidebarOpen(!state.sidebarOpen));
+  ui.searchMenu.addEventListener("click", () => setSidebarOpen(!state.sidebarOpen));
   ui.closeSidebar.addEventListener("click", () => setSidebarOpen(false));
   ui.sidebarScrim.addEventListener("click", () => setSidebarOpen(false));
+  ui.searchChats.addEventListener("click", () => {
+    setSidebarOpen(false, false);
+    setSearchOpen(true);
+  });
+  ui.searchClose.addEventListener("click", () => setSearchOpen(false));
+  ui.searchForm.addEventListener("submit", performSearch);
+  ui.searchClear.addEventListener("click", (event) => {
+    event.preventDefault();
+    clearSearch();
+  });
+  for (const control of [ui.searchFrom, ui.searchTo, ui.searchSort]) {
+    control.addEventListener("change", () => {
+      if (ui.searchQuery.value.trim()) performSearch();
+      else validateSearchDates();
+    });
+  }
   ui.newThread.addEventListener("click", () => {
     setSidebarOpen(false, false);
     beginNewThread();
@@ -1683,6 +2222,7 @@ if (globalThis.CODEX_WEB_TEST) {
     if (ui.preferencesDialog.open) return;
     if (state.settingsOpen) setSettingsOpen(false);
     else if (state.sidebarOpen) setSidebarOpen(false);
+    else if (state.searchOpen) setSearchOpen(false);
   });
   const mobileLayout = window.matchMedia("(max-width: 760px)");
   const closeDrawerOnDesktop = (event) => {
@@ -1694,6 +2234,7 @@ if (globalThis.CODEX_WEB_TEST) {
     mobileLayout.addListener(closeDrawerOnDesktop);
   }
   setSidebarOpen(false, false);
+  setSearchOpen(false, false);
   setSettingsOpen(false, false);
   ui.fileInput.addEventListener("change", () => uploadFiles(ui.fileInput.files));
   ui.prompt.addEventListener("keydown", promptKeydown);

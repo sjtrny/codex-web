@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import os
@@ -12,6 +13,86 @@ from aiohttp import ClientSession, FormData, WSMsgType, web
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 codex_web = importlib.import_module("app")
+
+
+class SearchHelperTests(unittest.TestCase):
+    def test_bounded_search_sort_preserves_message_order_for_equal_dates(self) -> None:
+        matches = [
+            {"itemId": "first", "_timestamp": 20.0, "_sequence": 0},
+            {"itemId": "second", "_timestamp": 20.0, "_sequence": 1},
+            {"itemId": "older", "_timestamp": 10.0, "_sequence": 2},
+        ]
+        codex_web.trim_search_matches(matches, "desc", 2)
+        self.assertEqual(
+            [match["itemId"] for match in matches],
+            ["first", "second"],
+        )
+
+        matches.append({"itemId": "older", "_timestamp": 10.0, "_sequence": 2})
+        codex_web.trim_search_matches(matches, "asc", 2)
+        self.assertEqual(
+            [match["itemId"] for match in matches],
+            ["older", "first"],
+        )
+
+    def test_search_uses_containing_turn_times_across_midnight(self) -> None:
+        thread = {
+            "id": "midnight-thread",
+            "createdAt": 1704150000,
+            "turns": [
+                {
+                    "id": "midnight-turn",
+                    "startedAt": 1704153590,
+                    "completedAt": 1704153610,
+                    "items": [
+                        {
+                            "id": "midnight-user",
+                            "type": "userMessage",
+                            "content": [{"type": "text", "text": "needle before"}],
+                        },
+                        {
+                            "id": "midnight-agent",
+                            "type": "agentMessage",
+                            "text": "needle after",
+                        },
+                    ],
+                }
+            ],
+        }
+
+        january_first = list(
+            codex_web.thread_message_matches(
+                thread,
+                "needle",
+                codex_web.date(2024, 1, 1),
+                codex_web.date(2024, 1, 1),
+                codex_web.ZoneInfo("UTC"),
+                0,
+            )
+        )
+        january_second = list(
+            codex_web.thread_message_matches(
+                thread,
+                "needle",
+                codex_web.date(2024, 1, 2),
+                codex_web.date(2024, 1, 2),
+                codex_web.ZoneInfo("UTC"),
+                0,
+            )
+        )
+
+        self.assertEqual(
+            [match["itemId"] for match in january_first], ["midnight-user"]
+        )
+        self.assertEqual(
+            [match["itemId"] for match in january_second], ["midnight-agent"]
+        )
+        self.assertTrue(
+            all(
+                match["timestampSource"] == "turn"
+                for match in january_first + january_second
+            )
+        )
 
 
 class ProxyTests(unittest.IsolatedAsyncioTestCase):
@@ -42,6 +123,10 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
         os.environ["CODEX_UPLOAD_MAX_BYTES"] = str(1024 * 1024)
         os.environ["CODEX_UPLOAD_MAX_FILES"] = "4"
         os.environ["CODEX_UPLOAD_TOTAL_BYTES"] = str(2 * 1024 * 1024)
+        self.backend_messages = []
+        self.search_list_pages = None
+        self.search_thread_reads = {}
+        self.search_thread_behaviors = {}
 
         backend = web.Application()
 
@@ -50,6 +135,61 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             await socket.prepare(request)
             async for message in socket:
                 if message.type is WSMsgType.TEXT:
+                    payload = json.loads(message.data)
+                    self.backend_messages.append(payload)
+                    if self.search_list_pages is not None:
+                        method = payload.get("method")
+                        if method == "initialize":
+                            await socket.send_json(
+                                {
+                                    "method": "thread/status/changed",
+                                    "params": {"threadId": "notification-only"},
+                                }
+                            )
+                            await socket.send_json(
+                                {"id": payload["id"], "result": {"userAgent": "test"}}
+                            )
+                            continue
+                        if method == "initialized":
+                            continue
+                        if method == "thread/list":
+                            key = (
+                                bool(payload["params"].get("archived")),
+                                payload["params"].get("cursor"),
+                            )
+                            result = self.search_list_pages.get(
+                                key, {"data": [], "nextCursor": None}
+                            )
+                            await socket.send_json(
+                                {"id": payload["id"], "result": result}
+                            )
+                            continue
+                        if method == "thread/read":
+                            thread_id = payload["params"]["threadId"]
+                            behavior = self.search_thread_behaviors.get(thread_id, {})
+                            if behavior.get("close"):
+                                await socket.close()
+                                break
+                            if delay := behavior.get("delay"):
+                                await asyncio.sleep(delay)
+                                if socket.closed:
+                                    break
+                            result = self.search_thread_reads[thread_id]
+                            try:
+                                if "error" in result:
+                                    await socket.send_json(
+                                        {
+                                            "id": payload["id"],
+                                            "error": result["error"],
+                                        }
+                                    )
+                                else:
+                                    await socket.send_json(
+                                        {"id": payload["id"], "result": result}
+                                    )
+                            except ConnectionResetError:
+                                break
+                            continue
                     await socket.send_str(message.data)
             return socket
 
@@ -122,6 +262,14 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('id="status"', body)
             self.assertNotIn('id="theme-toggle"', body)
             self.assertIn('id="jump-present"', body)
+            self.assertIn('id="search-chats"', body)
+            self.assertIn('id="search-view"', body)
+            self.assertIn('id="search-query"', body)
+            self.assertIn('maxlength="256"', body)
+            self.assertIn('id="search-from"', body)
+            self.assertIn('id="search-to"', body)
+            self.assertIn('id="search-sort"', body)
+            self.assertIn('aria-live="polite"', body)
             self.assertIn("Jump to present", body)
             self.assertIn('id="thinking-indicator"', body)
             self.assertIn("Codex is thinking", body)
@@ -152,6 +300,512 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 200)
             self.assertEqual(config["workspaceRoot"], str(self.workspace_path))
             self.assertEqual(config["version"], "0.9.3")
+
+    async def test_searches_all_thread_pages_and_filters_message_dates(self) -> None:
+        self.search_list_pages = {
+            (False, None): {
+                "data": [{"id": "alpha"}, {"id": "outside-range"}],
+                "nextCursor": "active-page-2",
+            },
+            (False, "active-page-2"): {
+                "data": [
+                    {"id": "late"},
+                    {"id": "middle"},
+                    {"id": "undated"},
+                ],
+                "nextCursor": None,
+            },
+        }
+        self.search_thread_reads = {
+            "alpha": {
+                "thread": {
+                    "id": "alpha",
+                    "name": "Alpha chat",
+                    "preview": "ignored preview",
+                    "createdAt": 1704067200,
+                    "turns": [
+                        {
+                            "id": "turn-alpha",
+                            "startedAt": 1704153600,
+                            "completedAt": 1704153660,
+                            "items": [
+                                {
+                                    "id": "message-alpha",
+                                    "type": "userMessage",
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": "The Straße and STRASSE both match.",
+                                        },
+                                        {"type": "localImage", "path": "/image.png"},
+                                    ],
+                                },
+                                {
+                                    "id": "answer-alpha",
+                                    "type": "agentMessage",
+                                    "text": "No result in this answer.",
+                                },
+                            ],
+                        }
+                    ],
+                }
+            },
+            "outside-range": {
+                "thread": {
+                    "id": "outside-range",
+                    "preview": "Old chat",
+                    "createdAt": 1704067200,
+                    "turns": [
+                        {
+                            "id": "turn-old",
+                            "startedAt": 1704067200,
+                            "completedAt": 1704067260,
+                            "items": [
+                                {
+                                    "id": "message-old",
+                                    "type": "userMessage",
+                                    "content": [
+                                        {"type": "text", "text": "STRASSE before range"}
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            },
+            "late": {
+                "thread": {
+                    "id": "late",
+                    "preview": "Late preview title",
+                    "createdAt": 1704240000,
+                    "turns": [
+                        {
+                            "id": "turn-late",
+                            "startedAt": 1704240000,
+                            "completedAt": 1704326399,
+                            "items": [
+                                {
+                                    "id": "answer-late",
+                                    "type": "agentMessage",
+                                    "text": "A late strasse response",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            },
+            "middle": {
+                "thread": {
+                    "id": "middle",
+                    "preview": "Middle preview",
+                    "createdAt": 1704283200,
+                    "turns": [
+                        {
+                            "id": "turn-middle",
+                            "startedAt": 1704283200,
+                            "completedAt": None,
+                            "items": [
+                                {
+                                    "id": "answer-middle",
+                                    "type": "agentMessage",
+                                    "text": "Middle STRASSE response",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            },
+            "undated": {
+                "thread": {
+                    "id": "undated",
+                    "preview": "Undated preview",
+                    "createdAt": 1704286800,
+                    "turns": [
+                        {
+                            "id": "turn-undated",
+                            "startedAt": None,
+                            "completedAt": None,
+                            "items": [
+                                {
+                                    "id": "answer-undated",
+                                    "type": "agentMessage",
+                                    "text": "Undated STRASSE response",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            },
+        }
+
+        async with (
+            ClientSession() as session,
+            session.post(
+                f"http://127.0.0.1:{self.port}/api/search",
+                json={
+                    "q": "STRASSE",
+                    "sort": "oldest",
+                    "from": "2024-01-02",
+                    "to": "2024-01-03",
+                    "limit": "2",
+                },
+            ) as response,
+        ):
+            result = await response.json()
+
+        self.assertEqual(response.status, 200, result)
+        self.assertEqual(result["total"], 3)
+        self.assertTrue(result["truncated"])
+        self.assertFalse(result["partial"])
+        self.assertEqual(result["skippedThreads"], 0)
+        self.assertEqual(result["timezone"], "UTC")
+        self.assertEqual(
+            [match["itemId"] for match in result["results"]],
+            ["message-alpha", "answer-middle"],
+        )
+        first, middle = result["results"]
+        self.assertEqual(first["messageId"], "message-alpha")
+        self.assertEqual(first["threadTitle"], "Alpha chat")
+        self.assertEqual(first["title"], "Alpha chat")
+        self.assertEqual(first["role"], "user")
+        self.assertNotIn("text", first)
+        self.assertNotIn("_timestamp", first)
+        self.assertNotIn("_sequence", first)
+        self.assertIn("Straße", first["snippet"])
+        self.assertEqual(first["matchedText"], "Straße")
+        self.assertEqual(first["timestamp"], "2024-01-02T00:00:00Z")
+        self.assertEqual(first["createdAt"], first["timestamp"])
+        self.assertEqual(first["timestampSource"], "turn")
+        self.assertEqual(middle["threadId"], "middle")
+        self.assertEqual(middle["timestampSource"], "turn")
+        self.assertEqual(middle["dateSource"], "turn")
+
+        list_requests = [
+            message
+            for message in self.backend_messages
+            if message.get("method") == "thread/list"
+        ]
+        self.assertEqual(len(list_requests), 2)
+        self.assertEqual(list_requests[1]["params"]["cursor"], "active-page-2")
+        self.assertTrue(
+            all(not request["params"]["archived"] for request in list_requests)
+        )
+        self.assertTrue(
+            all(
+                request["params"]["sourceKinds"] == ["cli", "vscode", "appServer"]
+                for request in list_requests
+            )
+        )
+        read_requests = [
+            message
+            for message in self.backend_messages
+            if message.get("method") == "thread/read"
+        ]
+        self.assertEqual(len(read_requests), 5)
+        self.assertTrue(
+            all(request["params"]["includeTurns"] for request in read_requests)
+        )
+        methods = [message.get("method") for message in self.backend_messages]
+        self.assertLess(methods.index("initialize"), methods.index("initialized"))
+        self.assertLess(methods.index("initialized"), methods.index("thread/list"))
+
+    async def test_search_date_range_uses_the_requested_time_zone(self) -> None:
+        self.search_list_pages = {
+            (False, None): {
+                "data": [{"id": "timezone-thread"}],
+                "nextCursor": None,
+            }
+        }
+        self.search_thread_reads = {
+            "timezone-thread": {
+                "thread": {
+                    "id": "timezone-thread",
+                    "preview": "Time zone chat",
+                    "createdAt": 1704151800,
+                    "turns": [
+                        {
+                            "id": "timezone-turn",
+                            "startedAt": 1704151800,
+                            "completedAt": 1704151860,
+                            "items": [
+                                {
+                                    "id": "timezone-message",
+                                    "type": "userMessage",
+                                    "content": [
+                                        {"type": "text", "text": "timezone match"}
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+        }
+        async with (
+            ClientSession() as session,
+            session.post(
+                f"http://127.0.0.1:{self.port}/api/search",
+                json={
+                    "q": "timezone",
+                    "from": "2024-01-02",
+                    "to": "2024-01-02",
+                    "timezone": "Asia/Tokyo",
+                },
+            ) as response,
+        ):
+            result = await response.json()
+
+        self.assertEqual(response.status, 200, result)
+        self.assertEqual(result["timezone"], "Asia/Tokyo")
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["results"][0]["timestamp"], "2024-01-01T23:30:00Z")
+
+    async def test_search_reports_partial_results_when_a_thread_cannot_be_read(
+        self,
+    ) -> None:
+        self.search_list_pages = {
+            (False, None): {
+                "data": [{"id": "available"}, {"id": "unreadable"}],
+                "nextCursor": None,
+            },
+        }
+        self.search_thread_reads = {
+            "available": {
+                "thread": {
+                    "id": "available",
+                    "preview": "Available",
+                    "createdAt": 1704153600,
+                    "turns": [
+                        {
+                            "id": "turn-available",
+                            "startedAt": 1704153600,
+                            "completedAt": 1704153660,
+                            "items": [
+                                {
+                                    "id": "answer-available",
+                                    "type": "agentMessage",
+                                    "text": "find this text",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            },
+            "unreadable": {"error": {"code": -32000, "message": "corrupt history"}},
+        }
+        async with (
+            ClientSession() as session,
+            session.post(
+                f"http://127.0.0.1:{self.port}/api/search",
+                json={"q": "find"},
+            ) as response,
+        ):
+            result = await response.json()
+
+        self.assertEqual(response.status, 200, result)
+        self.assertEqual(result["total"], 1)
+        self.assertTrue(result["partial"])
+        self.assertEqual(result["skippedThreads"], 1)
+
+    async def test_search_reconnects_after_closed_timed_out_and_oversized_reads(
+        self,
+    ) -> None:
+        thread_ids = [
+            "before",
+            "closed",
+            "slow",
+            "oversized",
+            "after",
+        ]
+        self.search_list_pages = {
+            (False, None): {
+                "data": [{"id": thread_id} for thread_id in thread_ids],
+                "nextCursor": None,
+            }
+        }
+
+        def thread_result(thread_id: str, text: str) -> dict[str, object]:
+            return {
+                "thread": {
+                    "id": thread_id,
+                    "createdAt": 1704153600,
+                    "turns": [
+                        {
+                            "id": f"turn-{thread_id}",
+                            "startedAt": 1704153600,
+                            "completedAt": 1704153660,
+                            "items": [
+                                {
+                                    "id": f"message-{thread_id}",
+                                    "type": "agentMessage",
+                                    "text": text,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+
+        self.search_thread_reads = {
+            "before": thread_result("before", "needle before failures"),
+            "closed": thread_result("closed", "needle on a closed connection"),
+            "slow": thread_result("slow", "needle in a slow response"),
+            "oversized": thread_result(
+                "oversized", f"needle in oversized response {'x' * 4096}"
+            ),
+            "after": thread_result("after", "needle after failures"),
+        }
+        self.search_thread_behaviors = {
+            "closed": {"close": True},
+            "slow": {"delay": 0.08},
+        }
+        old_message_bytes = codex_web.MAX_MESSAGE_BYTES
+        old_rpc_timeout = codex_web.SEARCH_RPC_TIMEOUT_SECONDS
+        codex_web.MAX_MESSAGE_BYTES = 1024
+        codex_web.SEARCH_RPC_TIMEOUT_SECONDS = 0.02
+        try:
+            async with (
+                ClientSession() as session,
+                session.post(
+                    f"http://127.0.0.1:{self.port}/api/search",
+                    json={"q": "needle", "limit": 10},
+                ) as response,
+            ):
+                result = await response.json()
+        finally:
+            codex_web.MAX_MESSAGE_BYTES = old_message_bytes
+            codex_web.SEARCH_RPC_TIMEOUT_SECONDS = old_rpc_timeout
+
+        self.assertEqual(response.status, 200, result)
+        self.assertEqual(result["total"], 2)
+        self.assertTrue(result["partial"])
+        self.assertFalse(result["timedOut"])
+        self.assertEqual(result["skippedThreads"], 3)
+        self.assertEqual(
+            {match["threadId"] for match in result["results"]},
+            {"before", "after"},
+        )
+        initialize_requests = [
+            message
+            for message in self.backend_messages
+            if message.get("method") == "initialize"
+        ]
+        self.assertEqual(len(initialize_requests), 4)
+
+    async def test_global_search_deadline_returns_matches_already_found(self) -> None:
+        self.search_list_pages = {
+            (False, None): {
+                "data": [
+                    {"id": "before-deadline"},
+                    {"id": "at-deadline"},
+                    {"id": "after-deadline"},
+                ],
+                "nextCursor": None,
+            }
+        }
+
+        def thread_result(thread_id: str) -> dict[str, object]:
+            return {
+                "thread": {
+                    "id": thread_id,
+                    "createdAt": 1704153600,
+                    "turns": [
+                        {
+                            "id": f"turn-{thread_id}",
+                            "startedAt": 1704153600,
+                            "completedAt": 1704153660,
+                            "items": [
+                                {
+                                    "id": f"message-{thread_id}",
+                                    "type": "agentMessage",
+                                    "text": f"deadline needle {thread_id}",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+
+        self.search_thread_reads = {
+            thread_id: thread_result(thread_id)
+            for thread_id in ("before-deadline", "at-deadline", "after-deadline")
+        }
+        self.search_thread_behaviors = {"at-deadline": {"delay": 0.25}}
+        old_search_timeout = codex_web.SEARCH_TIMEOUT_SECONDS
+        old_rpc_timeout = codex_web.SEARCH_RPC_TIMEOUT_SECONDS
+        codex_web.SEARCH_TIMEOUT_SECONDS = 0.1
+        codex_web.SEARCH_RPC_TIMEOUT_SECONDS = 1
+        try:
+            async with (
+                ClientSession() as session,
+                session.post(
+                    f"http://127.0.0.1:{self.port}/api/search",
+                    json={"q": "deadline needle", "limit": 10},
+                ) as response,
+            ):
+                result = await response.json()
+        finally:
+            codex_web.SEARCH_TIMEOUT_SECONDS = old_search_timeout
+            codex_web.SEARCH_RPC_TIMEOUT_SECONDS = old_rpc_timeout
+
+        self.assertEqual(response.status, 200, result)
+        self.assertEqual(result["total"], 1)
+        self.assertTrue(result["partial"])
+        self.assertTrue(result["timedOut"])
+        self.assertEqual(result["skippedThreads"], 2)
+        self.assertEqual(result["results"][0]["threadId"], "before-deadline")
+        read_thread_ids = [
+            message["params"]["threadId"]
+            for message in self.backend_messages
+            if message.get("method") == "thread/read"
+        ]
+        self.assertNotIn("after-deadline", read_thread_ids)
+
+    async def test_search_validates_query_sort_dates_and_limit(self) -> None:
+        cases = (
+            ({}, "q is required"),
+            ({"q": "x", "sort": "sideways"}, "sort must be"),
+            ({"q": "x", "from": "01/02/2024"}, "YYYY-MM-DD"),
+            ({"q": "x", "to": "2024-02-30"}, "valid date"),
+            (
+                {"q": "x", "from": "2024-01-03", "to": "2024-01-02"},
+                "must not be after",
+            ),
+            ({"q": "x", "limit": "0"}, "between 1"),
+            ({"q": "x", "limit": "201"}, "between 1"),
+            ({"q": "x", "limit": "many"}, "integer"),
+            ({"q": "x", "limit": []}, "integer"),
+            ({"q": "x", "timezone": "Mars/Olympus_Mons"}, "IANA time zone"),
+            ({"q": "x" * 257}, "at most 256"),
+            ({"q": 123}, "q must be a string"),
+        )
+        async with ClientSession() as session:
+            for params, expected_error in cases:
+                with self.subTest(params=params):
+                    async with session.post(
+                        f"http://127.0.0.1:{self.port}/api/search",
+                        json=params,
+                    ) as response:
+                        result = await response.json()
+                    self.assertEqual(response.status, 400, result)
+                    self.assertIn(expected_error, result["error"])
+        self.assertEqual(self.backend_messages, [])
+
+    async def test_search_query_is_not_accepted_in_the_access_log_url(self) -> None:
+        async with ClientSession() as session:
+            async with session.get(
+                f"http://127.0.0.1:{self.port}/api/search",
+                params={"q": "private search terms"},
+            ) as response:
+                self.assertEqual(response.status, 405)
+            async with session.post(
+                f"http://127.0.0.1:{self.port}/api/search",
+                data="not-json",
+                headers={"Content-Type": "application/json"},
+            ) as response:
+                result = await response.json()
+                self.assertEqual(response.status, 400)
+                self.assertIn("JSON", result["error"])
 
     async def test_markdown_assets_are_self_hosted(self) -> None:
         async with ClientSession() as session:
@@ -205,6 +859,9 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(".code-block pre { padding-top:", stylesheet)
             self.assertIn(':root[data-theme="dark"] {', stylesheet)
             self.assertIn(".preferences-dialog {", stylesheet)
+            self.assertIn(".search-view {", stylesheet)
+            self.assertIn(".search-results {", stylesheet)
+            self.assertIn(".message.search-match {", stylesheet)
             self.assertIn(".settings-cog {", stylesheet)
             self.assertIn(".settings-panel { grid-row: 2;", stylesheet)
             self.assertIn(
