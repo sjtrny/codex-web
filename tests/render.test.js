@@ -16,6 +16,8 @@ class FakeElement {
     this.open = false;
     this.disabled = false;
     this.value = "";
+    this.selectionStart = 0;
+    this.selectionEnd = 0;
     this._textContent = "";
     this._scrollTop = 0;
     this._scrollHeight = null;
@@ -129,6 +131,11 @@ class FakeElement {
     globalThis.document.activeElement = this;
   }
 
+  setSelectionRange(start, end) {
+    this.selectionStart = start;
+    this.selectionEnd = end;
+  }
+
   getBoundingClientRect() {
     return { left: this._left };
   }
@@ -227,6 +234,7 @@ const {
   MAX_SIDEBAR_WIDTH,
   SIDEBAR_WIDTH_STORAGE_KEY,
   SIDEBAR_COLLAPSED_STORAGE_KEY,
+  THREAD_QUERY_PARAM,
   beginNewThread,
   buildTurnInput,
   cacheItemUpdate,
@@ -235,6 +243,7 @@ const {
   cachedThread,
   handleNotification,
   handleMessagesScroll,
+  handlePromptInput,
   inputText,
   isSearchSelectionCurrent,
   jumpToPresent,
@@ -263,6 +272,7 @@ const {
   setThreadActivity,
   setSidebarOpen,
   setSidebarWidth,
+  setThreadPromptHistory,
   sidebarMaxWidth,
   startSidebarResize,
   syncSidebarBreakpoint,
@@ -273,12 +283,17 @@ const {
   sortThreadsByActivity,
   state,
   threadActivityTimestamp,
+  threadComposerKey,
+  threadHref,
+  threadIdFromSearch,
   threadSettingsParams,
   turnSettingsParams,
   ui,
   updateControls,
   upsertMessage,
   validateSearchDates,
+  restoreComposerDraft,
+  saveComposerDraft,
 } = globalThis.CodexWebTest;
 
 globalThis.CodexTheme = {
@@ -401,6 +416,88 @@ assert.equal(submitCount, 1, "Shift+Enter should not submit");
 assert.equal(preventCount, 1, "Shift+Enter should preserve the textarea newline");
 promptKeydown(keyEvent({ isComposing: true }));
 assert.equal(submitCount, 1, "IME composition Enter should not submit");
+
+state.selectionId = 10;
+state.threadId = "history-a";
+state.composerKey = threadComposerKey(state.threadId, state.selectionId);
+setThreadPromptHistory({
+  id: "history-a",
+  turns: [
+    {
+      items: [
+        {
+          id: "history-a-first",
+          type: "userMessage",
+          content: [{ type: "text", text: "first prompt" }],
+        },
+        { id: "history-a-agent", type: "agentMessage", text: "answer" },
+        {
+          id: "history-a-second",
+          type: "userMessage",
+          content: [{ type: "text", text: "second prompt" }],
+        },
+      ],
+    },
+  ],
+});
+ui.prompt.value = "unfinished draft";
+ui.prompt.setSelectionRange(ui.prompt.value.length, ui.prompt.value.length);
+handlePromptInput();
+let historyPreventCount = 0;
+const historyKeyEvent = (key, overrides = {}) => ({
+  key,
+  shiftKey: false,
+  altKey: false,
+  ctrlKey: false,
+  metaKey: false,
+  isComposing: false,
+  preventDefault() {
+    historyPreventCount += 1;
+  },
+  ...overrides,
+});
+promptKeydown(historyKeyEvent("ArrowUp"));
+assert.equal(ui.prompt.value, "second prompt", "Up should recall the newest prompt in this chat");
+promptKeydown(historyKeyEvent("ArrowUp"));
+assert.equal(ui.prompt.value, "first prompt", "repeated Up should move backward through prompts");
+promptKeydown(historyKeyEvent("ArrowUp"));
+assert.equal(ui.prompt.value, "first prompt", "history should stop at the oldest prompt");
+promptKeydown(historyKeyEvent("ArrowDown"));
+assert.equal(ui.prompt.value, "second prompt", "Down should move toward newer prompts");
+promptKeydown(historyKeyEvent("ArrowDown"));
+assert.equal(ui.prompt.value, "unfinished draft", "Down past the newest prompt should restore the draft");
+assert.equal(historyPreventCount, 5);
+promptKeydown(historyKeyEvent("ArrowDown"));
+assert.equal(historyPreventCount, 5, "Down should be untouched outside history navigation");
+
+ui.prompt.value = "first line\nsecond line";
+ui.prompt.setSelectionRange(ui.prompt.value.length, ui.prompt.value.length);
+handlePromptInput();
+promptKeydown(historyKeyEvent("ArrowUp"));
+assert.equal(ui.prompt.value, "first line\nsecond line", "Up should retain normal textarea behavior below the first line");
+assert.equal(historyPreventCount, 5);
+ui.prompt.setSelectionRange(0, 0);
+promptKeydown(historyKeyEvent("ArrowUp"));
+assert.equal(ui.prompt.value, "second prompt", "Up on the first line should enter prompt history");
+assert.equal(historyPreventCount, 6);
+
+ui.prompt.value = "draft for chat A";
+handlePromptInput();
+saveComposerDraft();
+state.threadId = "history-b";
+state.composerKey = threadComposerKey(state.threadId, state.selectionId);
+restoreComposerDraft();
+assert.equal(ui.prompt.value, "", "a different chat should start with its own empty draft");
+ui.prompt.value = "draft for chat B";
+handlePromptInput();
+state.threadId = "history-a";
+state.composerKey = threadComposerKey(state.threadId, state.selectionId);
+restoreComposerDraft();
+assert.equal(ui.prompt.value, "draft for chat A", "switching back should restore the original chat draft");
+state.threadId = "history-b";
+state.composerKey = threadComposerKey(state.threadId, state.selectionId);
+restoreComposerDraft();
+assert.equal(ui.prompt.value, "draft for chat B", "each chat should retain an independent draft");
 
 const attachments = [
   {
@@ -686,9 +783,23 @@ assert.deepEqual(THREAD_LIST_PARAMS, {
   sortKey: "recency_at",
   sortDirection: "desc",
 });
+assert.equal(THREAD_QUERY_PARAM, "thread");
+assert.equal(threadHref("thread/with spaces"), "/?thread=thread%2Fwith+spaces");
+assert.equal(threadIdFromSearch("?thread=thread%2Fwith+spaces"), "thread/with spaces");
+assert.equal(threadIdFromSearch("?thread=%20%20"), null);
 assert.equal(ui.threads.children[0].classList.contains("running"), true);
 assert.equal(ui.threads.children[0].getAttribute("aria-busy"), "true");
 assert.equal(ui.threads.children[1].classList.contains("active"), true);
+assert.equal(ui.threads.children[0].tagName, "a", "sidebar chats should be browser links");
+assert.equal(ui.threads.children[0].getAttribute("href"), "/?thread=thread-a");
+assert.equal(ui.threads.children[1].getAttribute("aria-current"), "page");
+let modifiedClickPrevented = false;
+ui.threads.children[0].listeners.get("click")({
+  button: 0,
+  ctrlKey: true,
+  preventDefault() { modifiedClickPrevented = true; },
+});
+assert.equal(modifiedClickPrevented, false, "modified clicks must retain native new-window behavior");
 
 state.ready = false;
 handleNotification("turn/started", {

@@ -11,6 +11,7 @@ const THREAD_LIST_PARAMS = Object.freeze({
   sortDirection: "desc",
 });
 const CHAT_SETTINGS_STORAGE_KEY = "codex-web-chat-settings-v1";
+const THREAD_QUERY_PARAM = "thread";
 const SEARCH_MATCH_HIGHLIGHT_MS = 4000;
 const SIDEBAR_WIDTH_STORAGE_KEY = "codex-web-sidebar-width-v1";
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "codex-web-sidebar-collapsed-v1";
@@ -112,6 +113,12 @@ const state = {
   settingsByThread: new Map(),
   newThreadSettings: emptyChatSettings(),
   settingsOpen: false,
+  composerDrafts: new Map(),
+  composerKey: "new:0",
+  promptHistoryByThread: new Map(),
+  promptHistoryIndexesByThread: new Map(),
+  promptHistoryIndex: null,
+  promptHistoryDraft: "",
   items: new Map(),
   requestCards: new Map(),
   reconnectTimer: null,
@@ -284,6 +291,43 @@ function saveCurrentThreadView() {
   if (!entry) return;
   entry.scrollTop = ui.messages.scrollTop;
   entry.followPresent = state.followPresent;
+}
+
+function threadComposerKey(threadId, selectionId = state.selectionId) {
+  return threadId ? `thread:${threadId}` : `new:${selectionId}`;
+}
+
+function resetPromptHistoryNavigation() {
+  state.promptHistoryIndex = null;
+  state.promptHistoryDraft = "";
+}
+
+function saveComposerDraft(key = state.composerKey) {
+  if (ui.prompt.value) state.composerDrafts.set(key, ui.prompt.value);
+  else state.composerDrafts.delete(key);
+}
+
+function restoreComposerDraft(key = state.composerKey) {
+  ui.prompt.value = state.composerDrafts.get(key) || "";
+  ui.prompt.setSelectionRange?.(ui.prompt.value.length, ui.prompt.value.length);
+  resetPromptHistoryNavigation();
+}
+
+function clearComposerDraft(key = state.composerKey) {
+  state.composerDrafts.delete(key);
+  if (key === state.composerKey) ui.prompt.value = "";
+  resetPromptHistoryNavigation();
+}
+
+function moveComposerDraft(fromKey, toKey) {
+  if (fromKey === toKey || !state.composerDrafts.has(fromKey)) return;
+  state.composerDrafts.set(toKey, state.composerDrafts.get(fromKey));
+  state.composerDrafts.delete(fromKey);
+}
+
+function handlePromptInput() {
+  resetPromptHistoryNavigation();
+  saveComposerDraft();
 }
 
 function findCachedTurn(entry, turnId) {
@@ -1628,6 +1672,9 @@ function handleNotification(method, params) {
       return;
     case "thread/deleted":
       state.threadCache.delete(params.threadId);
+      state.composerDrafts.delete(threadComposerKey(params.threadId));
+      state.promptHistoryByThread.delete(params.threadId);
+      state.promptHistoryIndexesByThread.delete(params.threadId);
       refreshThreads();
       return;
     case "thread/status/changed":
@@ -1666,6 +1713,7 @@ function handleNotification(method, params) {
       return;
     case "item/completed":
       cacheItemUpdate(params);
+      rememberThreadPrompt(params.threadId, params.item);
       if (params.threadId === state.threadId) renderItem(params.item, true);
       return;
     case "item/agentMessage/delta":
@@ -1847,6 +1895,103 @@ function inputText(content = []) {
     .join("\n");
 }
 
+function setThreadPromptHistory(thread) {
+  if (!thread?.id) return;
+  const prompts = [];
+  const indexes = new Map();
+  for (const turn of thread.turns || []) {
+    for (const item of turn.items || []) {
+      if (item?.type !== "userMessage") continue;
+      const text = inputText(item.content).trim();
+      if (!text) continue;
+      if (item.id) indexes.set(String(item.id), prompts.length);
+      prompts.push(text);
+    }
+  }
+  state.promptHistoryByThread.set(thread.id, prompts);
+  state.promptHistoryIndexesByThread.set(thread.id, indexes);
+  if (thread.id === state.threadId) resetPromptHistoryNavigation();
+}
+
+function rememberThreadPrompt(threadId, item) {
+  if (!threadId || item?.type !== "userMessage") return;
+  const text = inputText(item.content).trim();
+  if (!text) return;
+  const prompts = state.promptHistoryByThread.get(threadId) || [];
+  const indexes = state.promptHistoryIndexesByThread.get(threadId) || new Map();
+  const itemId = item.id ? String(item.id) : "";
+  const existingIndex = itemId ? indexes.get(itemId) : undefined;
+  if (existingIndex === undefined) {
+    if (itemId) indexes.set(itemId, prompts.length);
+    prompts.push(text);
+  } else {
+    prompts[existingIndex] = text;
+  }
+  state.promptHistoryByThread.set(threadId, prompts);
+  state.promptHistoryIndexesByThread.set(threadId, indexes);
+}
+
+function currentPromptHistory() {
+  if (!state.threadId) return [];
+  return state.promptHistoryByThread.get(state.threadId) || [];
+}
+
+function promptCaretIsOnFirstLine() {
+  const start = Number.isInteger(ui.prompt.selectionStart)
+    ? ui.prompt.selectionStart
+    : ui.prompt.value.length;
+  const end = Number.isInteger(ui.prompt.selectionEnd)
+    ? ui.prompt.selectionEnd
+    : start;
+  return start === end && !ui.prompt.value.slice(0, start).includes("\n");
+}
+
+function showPromptHistoryValue(value) {
+  ui.prompt.value = value;
+  saveComposerDraft();
+  ui.prompt.setSelectionRange?.(value.length, value.length);
+}
+
+function navigatePromptHistory(event) {
+  if (
+    event.isComposing
+    || event.altKey
+    || event.ctrlKey
+    || event.metaKey
+    || event.shiftKey
+  ) return false;
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return false;
+
+  const prompts = currentPromptHistory();
+  if (!prompts.length) {
+    resetPromptHistoryNavigation();
+    return false;
+  }
+
+  if (event.key === "ArrowUp") {
+    if (state.promptHistoryIndex === null) {
+      if (!promptCaretIsOnFirstLine()) return false;
+      state.promptHistoryDraft = ui.prompt.value;
+      state.promptHistoryIndex = prompts.length;
+    }
+    state.promptHistoryIndex = Math.max(0, state.promptHistoryIndex - 1);
+    showPromptHistoryValue(prompts[state.promptHistoryIndex]);
+    return true;
+  }
+
+  if (state.promptHistoryIndex === null) return false;
+  const nextIndex = state.promptHistoryIndex + 1;
+  if (nextIndex < prompts.length) {
+    state.promptHistoryIndex = nextIndex;
+    showPromptHistoryValue(prompts[nextIndex]);
+  } else {
+    const draft = state.promptHistoryDraft;
+    resetPromptHistoryNavigation();
+    showPromptHistoryValue(draft);
+  }
+  return true;
+}
+
 function reasoningText(summary) {
   if (!Array.isArray(summary)) return typeof summary === "string" ? summary : "";
   return summary
@@ -1909,6 +2054,7 @@ function renderItem(item, completed, threadId = state.threadId) {
 }
 
 function renderThreadHistory(thread) {
+  setThreadPromptHistory(thread);
   clearMessages();
   const turns = thread.turns || [];
   const fragment = document.createDocumentFragment();
@@ -1977,6 +2123,38 @@ function sortThreadsByActivity(threads) {
     .map(({ thread }) => thread);
 }
 
+function threadIdFromSearch(search = "") {
+  try {
+    const threadId = new URLSearchParams(search).get(THREAD_QUERY_PARAM)?.trim();
+    return threadId || null;
+  } catch {
+    return null;
+  }
+}
+
+function threadHref(threadId) {
+  const params = new URLSearchParams({ [THREAD_QUERY_PARAM]: String(threadId) });
+  return `/?${params.toString()}`;
+}
+
+function replaceThreadLocation(threadId) {
+  if (typeof globalThis.window?.history?.replaceState !== "function") return;
+  try {
+    window.history.replaceState(null, "", threadId ? threadHref(threadId) : "/");
+  } catch {
+    // Navigation still works if browser history is unavailable.
+  }
+}
+
+function plainPrimaryClick(event) {
+  return !event.defaultPrevented
+    && (event.button ?? 0) === 0
+    && !event.altKey
+    && !event.ctrlKey
+    && !event.metaKey
+    && !event.shiftKey;
+}
+
 function renderThreads(threads, reconcileActivity = false) {
   const sortedThreads = sortThreadsByActivity(threads);
   state.threads = sortedThreads;
@@ -1992,10 +2170,11 @@ function renderThreads(threads, reconcileActivity = false) {
     const running = thread.status?.type === "active"
       || state.activeTurns.has(thread.id)
       || state.submittingThreads.has(thread.id);
-    const button = document.createElement("button");
-    button.className = `thread${thread.id === state.threadId ? " active" : ""}${running ? " running" : ""}`;
-    button.type = "button";
-    button.setAttribute("aria-busy", String(running));
+    const link = document.createElement("a");
+    link.className = `thread${thread.id === state.threadId ? " active" : ""}${running ? " running" : ""}`;
+    link.setAttribute("href", threadHref(thread.id));
+    link.setAttribute("aria-busy", String(running));
+    if (thread.id === state.threadId) link.setAttribute("aria-current", "page");
     const title = document.createElement("strong");
     title.textContent = threadLabel(thread);
     const meta = document.createElement("small");
@@ -2004,13 +2183,15 @@ function renderThreads(threads, reconcileActivity = false) {
       ? new Date(activityTimestamp * 1000).toLocaleString()
       : "Unknown time";
     meta.textContent = `${timestamp} · ${running ? "active" : (thread.status?.type || "unknown")}`;
-    button.append(title, meta);
-    button.addEventListener("click", () => {
+    link.append(title, meta);
+    link.addEventListener("click", (event) => {
+      if (!plainPrimaryClick(event)) return;
+      event.preventDefault();
       setSidebarOpen(false, false);
       setSearchOpen(false, false);
       openThread(thread.id);
     });
-    ui.threads.append(button);
+    ui.threads.append(link);
   }
 }
 
@@ -2029,8 +2210,12 @@ async function refreshThreads() {
 async function openThread(threadId, showErrors = true) {
   if (!state.ready) return;
   saveCurrentThreadView();
+  saveComposerDraft();
   const selectionId = ++state.selectionId;
   state.threadId = threadId;
+  state.composerKey = threadComposerKey(threadId, selectionId);
+  restoreComposerDraft();
+  replaceThreadLocation(threadId);
   renderChatSettings();
   notice("");
   const cached = cachedThread(threadId);
@@ -2068,9 +2253,13 @@ async function openThread(threadId, showErrors = true) {
 
 function beginNewThread() {
   saveCurrentThreadView();
+  saveComposerDraft();
   setSearchOpen(false, false);
   state.selectionId += 1;
   state.threadId = null;
+  state.composerKey = threadComposerKey(null, state.selectionId);
+  restoreComposerDraft();
+  replaceThreadLocation(null);
   state.attachments = [];
   renderAttachments();
   notice("");
@@ -2099,15 +2288,18 @@ function renderLocalPrompt(id, text, threadId, selectionId) {
 
 async function submitPrompt(event) {
   event.preventDefault();
-  const text = ui.prompt.value.trim();
+  const draftText = ui.prompt.value;
+  const text = draftText.trim();
   const attachments = [...state.attachments];
   const input = buildTurnInput(text, attachments);
   if (!input.length || !state.ready || selectedThreadBusy() || state.uploading) return;
   const selectionId = state.selectionId;
+  const submissionComposerKey = state.composerKey;
+  let targetComposerKey = submissionComposerKey;
   const cwd = ui.cwd.value || state.defaultCwd;
   const chatSettings = { ...currentChatSettings() };
   let targetThreadId = state.threadId;
-  ui.prompt.value = "";
+  clearComposerDraft(submissionComposerKey);
   state.attachments = [];
   renderAttachments();
   notice("");
@@ -2131,6 +2323,8 @@ async function submitPrompt(event) {
         ...threadSettingsParams(chatSettings),
       });
       targetThreadId = started.thread.id;
+      targetComposerKey = threadComposerKey(targetThreadId, selectionId);
+      moveComposerDraft(submissionComposerKey, targetComposerKey);
       cacheThreadSnapshot(started.thread);
       const pending = {
         id: pendingId,
@@ -2145,9 +2339,15 @@ async function submitPrompt(event) {
       state.settingsByThread.set(targetThreadId, { ...chatSettings });
       persistChatSettings();
       state.submittingThreads.add(targetThreadId);
-      if (selectionId === state.selectionId && state.threadId === null) {
+      if (
+        selectionId === state.selectionId
+        && state.threadId === null
+        && state.composerKey === submissionComposerKey
+      ) {
         state.threadId = targetThreadId;
+        state.composerKey = targetComposerKey;
         ui.title.textContent = threadLabel(started.thread);
+        replaceThreadLocation(targetThreadId);
         renderChatSettings();
         renderThreads(state.threads);
       }
@@ -2177,11 +2377,20 @@ async function submitPrompt(event) {
       pendingNode.remove();
       if (state.pendingUser?.id === pendingId) state.pendingUser = null;
       state.items.delete(pendingId);
-      ui.prompt.value = text;
+      if (!state.composerDrafts.has(targetComposerKey)) {
+        state.composerDrafts.set(targetComposerKey, draftText);
+      }
+      if (state.composerKey === targetComposerKey) {
+        restoreComposerDraft(targetComposerKey);
+        ui.prompt.setSelectionRange?.(ui.prompt.value.length, ui.prompt.value.length);
+      }
       state.attachments = attachments;
       renderAttachments();
       notice(error.message);
     } else {
+      if (!state.composerDrafts.has(targetComposerKey)) {
+        state.composerDrafts.set(targetComposerKey, draftText);
+      }
       notice(`Background turn failed: ${error.message}`);
     }
   } finally {
@@ -2328,6 +2537,12 @@ function handleServerRequest(message) {
 }
 
 async function boot() {
+  const requestedThreadId = threadIdFromSearch(globalThis.location?.search || "");
+  if (requestedThreadId) {
+    state.threadId = requestedThreadId;
+    state.composerKey = threadComposerKey(requestedThreadId);
+    restoreComposerDraft();
+  }
   loadStoredChatSettings();
   renderChatSettings();
   try {
@@ -2346,6 +2561,10 @@ async function boot() {
 }
 
 function promptKeydown(event) {
+  if (navigatePromptHistory(event)) {
+    event.preventDefault();
+    return;
+  }
   if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
   event.preventDefault();
   ui.composer.requestSubmit();
@@ -2362,10 +2581,23 @@ if (globalThis.CODEX_WEB_TEST) {
     MAX_SIDEBAR_WIDTH,
     SIDEBAR_WIDTH_STORAGE_KEY,
     SIDEBAR_COLLAPSED_STORAGE_KEY,
+    THREAD_QUERY_PARAM,
     buildTurnInput,
+    clearComposerDraft,
+    currentPromptHistory,
+    handlePromptInput,
     inputText,
+    navigatePromptHistory,
     pendingPromptText,
     promptKeydown,
+    rememberThreadPrompt,
+    resetPromptHistoryNavigation,
+    restoreComposerDraft,
+    saveComposerDraft,
+    setThreadPromptHistory,
+    threadComposerKey,
+    threadHref,
+    threadIdFromSearch,
     normalizeChatSettings,
     threadSettingsParams,
     turnSettingsParams,
@@ -2503,6 +2735,7 @@ if (globalThis.CODEX_WEB_TEST) {
   setSearchOpen(false, false);
   setSettingsOpen(false, false);
   ui.fileInput.addEventListener("change", () => uploadFiles(ui.fileInput.files));
+  ui.prompt.addEventListener("input", handlePromptInput);
   ui.prompt.addEventListener("keydown", promptKeydown);
   ui.prompt.addEventListener("paste", (event) => {
     const files = [...(event.clipboardData?.files || [])];
