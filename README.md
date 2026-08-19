@@ -5,7 +5,9 @@ app-server share conversations.
 
 ![Codex CLI and Codex Web share an app-server and workspace through a Unix socket.](docs/architecture.png)
 
-## 1. App server
+## Setup
+
+### 1. App server
 
 Run app-server where Codex should access files and tools: the host OS, a VS Code
 development container, or another container. That environment is where Codex
@@ -25,7 +27,7 @@ Keep it running with a service manager. The socket directory must be visible to
 each client. App-server is
 [experimental](https://developers.openai.com/codex/developer-commands).
 
-## 2. Terminal (optional)
+### 2. Terminal (optional)
 
 Connect from any shell:
 
@@ -43,7 +45,7 @@ source /absolute/path/to/codex-web/codex-remote.bash
 `codex`, `resume`, `fork`, `archive`, `delete`, and `unarchive` use app-server.
 Other subcommands and `codex-local` use the local executable.
 
-## 3. Web (optional)
+### 3. Web (optional)
 
 With Docker Compose:
 
