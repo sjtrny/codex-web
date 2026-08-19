@@ -241,6 +241,8 @@ const {
   cacheThreadSnapshot,
   cacheTurnUpdate,
   cachedThread,
+  mergeOrderedById,
+  mergeThreadSnapshot,
   handleNotification,
   handleMessagesScroll,
   handlePromptInput,
@@ -975,6 +977,111 @@ assert.equal(
   2,
   "a sparse turn completion must not discard cached streamed items",
 );
+
+assert.deepEqual(
+  mergeOrderedById(
+    [{ id: "user" }, { id: "commentary" }, { id: "final" }],
+    [{ id: "command" }, { id: "final" }],
+  ).map((item) => item.id),
+  ["user", "commentary", "command", "final"],
+  "an authoritative prefix should be inserted before already streamed items",
+);
+
+cacheThreadSnapshot({
+  id: "reconcile-thread",
+  cwd: "/workspaces",
+  status: { type: "idle" },
+  turns: [{
+    id: "reconcile-turn",
+    status: "completed",
+    items: [
+      {
+        id: "reconcile-command",
+        type: "commandExecution",
+        command: "inspect",
+        status: "completed",
+        aggregatedOutput: "done",
+      },
+      { id: "reconcile-final", type: "agentMessage", text: "answer" },
+    ],
+  }],
+});
+const reconciled = mergeThreadSnapshot({
+  id: "reconcile-thread",
+  cwd: "/workspaces",
+  status: { type: "idle" },
+  turns: [{
+    id: "reconcile-turn",
+    status: "completed",
+    items: [
+      {
+        id: "reconcile-user",
+        type: "userMessage",
+        content: [{ type: "text", text: "the missing prompt" }],
+      },
+      { id: "reconcile-commentary", type: "agentMessage", text: "starting" },
+      { id: "reconcile-final", type: "agentMessage", text: "answer" },
+    ],
+  }],
+});
+assert.deepEqual(
+  reconciled.thread.turns[0].items.map((item) => item.id),
+  [
+    "reconcile-user",
+    "reconcile-commentary",
+    "reconcile-command",
+    "reconcile-final",
+  ],
+  "snapshot reconciliation must restore a missed user-message prefix without losing live commands",
+);
+state.threadId = "reconcile-thread";
+renderThreadHistory(reconciled.thread);
+assert.ok(
+  ui.messages.children.indexOf(state.items.get("reconcile-user").node)
+    < ui.messages.children.indexOf(state.items.get("reconcile-command").node),
+  "the repaired user message should render before the command that followed it",
+);
+
+const pendingNode = renderLocalPrompt(
+  "pending-correlation",
+  "optimistic prompt",
+  "reconcile-thread",
+  state.selectionId,
+);
+state.ready = false;
+handleNotification("item/started", {
+  threadId: "reconcile-thread",
+  turnId: "unrelated-turn",
+  item: {
+    id: "unrelated-user",
+    type: "userMessage",
+    content: [{ type: "text", text: "a different prompt" }],
+  },
+});
+assert.equal(
+  state.pendingUser.id,
+  "pending-correlation",
+  "an unrelated user item must not clear a newer optimistic prompt",
+);
+handleNotification("turn/started", {
+  threadId: "reconcile-thread",
+  turn: { id: "correlation-turn", status: "inProgress" },
+});
+assert.equal(state.pendingUser.turnId, "correlation-turn");
+handleNotification("item/started", {
+  threadId: "reconcile-thread",
+  turnId: "correlation-turn",
+  item: {
+    id: "canonical-correlation-user",
+    type: "userMessage",
+    content: [{ type: "text", text: "optimistic prompt" }],
+  },
+});
+assert.equal(state.pendingUser, null, "the canonical item should replace its correlated optimistic prompt");
+assert.equal(pendingNode.parentNode, null);
+assert.equal(state.items.has("pending-correlation"), false);
+assert.equal(state.items.has("canonical-correlation-user"), true);
+
 for (let index = 0; index < THREAD_CACHE_LIMIT + 2; index += 1) {
   cacheThreadSnapshot({ id: `lru-${index}`, turns: [] });
 }
@@ -1099,7 +1206,7 @@ ui.searchQuery.value = "needle";
 ui.searchFrom.value = "2024-01-01";
 ui.searchTo.value = "2024-01-31";
 ui.searchSort.value = "oldest";
-performSearch({ preventDefault() {} }).then(() => {
+performSearch({ preventDefault() {} }).then(async () => {
   globalThis.fetch = originalFetch;
   assert.equal(capturedSearchRequest.url, "/api/search");
   assert.equal(capturedSearchRequest.options.method, "POST");
@@ -1110,6 +1217,66 @@ performSearch({ preventDefault() {} }).then(() => {
   assert.equal(requestBody.to, "2024-01-31");
   assert.equal(requestBody.sort, "oldest");
   assert.equal(typeof requestBody.timezone, "string");
+
+  const originalSocket = state.ws;
+  const originalReady = state.ready;
+  const originalWebSocket = globalThis.WebSocket;
+  const rpcMessages = [];
+  globalThis.WebSocket = { OPEN: 1 };
+  state.ws = {
+    readyState: 1,
+    send(payload) {
+      rpcMessages.push(JSON.parse(payload));
+    },
+  };
+  state.ready = true;
+  cacheThreadSnapshot({
+    id: "rpc-reconcile-thread",
+    status: { type: "active", activeFlags: [] },
+    turns: [{ id: "rpc-reconcile-turn", status: "inProgress", items: [] }],
+  });
+  handleNotification("item/started", {
+    threadId: "rpc-reconcile-thread",
+    turnId: "rpc-reconcile-turn",
+    item: {
+      id: "rpc-reconcile-command",
+      type: "commandExecution",
+      command: "inspect",
+      status: "inProgress",
+      aggregatedOutput: "",
+    },
+  });
+  const resumeRequest = rpcMessages.find((message) => message.method === "thread/resume");
+  assert.ok(resumeRequest, "a later item should repair a turn whose user-message prefix is missing");
+  assert.equal(resumeRequest.params.threadId, "rpc-reconcile-thread");
+  const pendingResume = state.pending.get(resumeRequest.id);
+  window.clearTimeout(pendingResume.timer);
+  state.pending.delete(resumeRequest.id);
+  pendingResume.resolve({
+    thread: {
+      id: "rpc-reconcile-thread",
+      status: { type: "active", activeFlags: [] },
+      turns: [{
+        id: "rpc-reconcile-turn",
+        status: "inProgress",
+        items: [{
+          id: "rpc-reconcile-user",
+          type: "userMessage",
+          content: [{ type: "text", text: "restored over RPC" }],
+        }],
+      }],
+    },
+  });
+  await state.threadReconciliations.get("rpc-reconcile-thread").promise;
+  assert.deepEqual(
+    cachedThread("rpc-reconcile-thread").thread.turns[0].items.map((item) => item.id),
+    ["rpc-reconcile-user", "rpc-reconcile-command"],
+  );
+  state.ws = originalSocket;
+  state.ready = originalReady;
+  if (originalWebSocket === undefined) delete globalThis.WebSocket;
+  else globalThis.WebSocket = originalWebSocket;
+
   console.log("render-and-settings=ok");
 }).catch((error) => {
   globalThis.fetch = originalFetch;

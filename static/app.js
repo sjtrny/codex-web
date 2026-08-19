@@ -105,6 +105,7 @@ const state = {
   threads: [],
   threadRefreshId: 0,
   threadCache: new Map(),
+  threadReconciliations: new Map(),
   connectionGeneration: 0,
   models: [],
   modelsLoaded: false,
@@ -273,6 +274,145 @@ function pruneThreadCache() {
   }
 }
 
+function mergeOrderedById(authoritative = [], live = [], mergeItem = null) {
+  const primary = Array.isArray(authoritative) ? authoritative : [];
+  const secondary = Array.isArray(live) ? live : [];
+  const combine = mergeItem || ((source, cached) => ({ ...cached, ...source }));
+  const keyFor = (item) => item?.id == null ? null : String(item.id);
+  const primaryById = new Map();
+  const secondaryById = new Map();
+  const secondaryIndexes = new Map();
+
+  primary.forEach((item) => {
+    const key = keyFor(item);
+    if (key !== null && !primaryById.has(key)) primaryById.set(key, item);
+  });
+  secondary.forEach((item, index) => {
+    const key = keyFor(item);
+    if (key === null || secondaryById.has(key)) return;
+    secondaryById.set(key, item);
+    secondaryIndexes.set(key, index);
+  });
+
+  // Shared IDs are ordering anchors. Anything present only in the authoritative
+  // snapshot is inserted before live-only items in the same gap, which repairs a
+  // missed turn prefix without dropping notifications that arrived meanwhile.
+  const anchors = [];
+  let lastSecondaryIndex = -1;
+  primary.forEach((item, primaryIndex) => {
+    const secondaryIndex = secondaryIndexes.get(keyFor(item));
+    if (secondaryIndex === undefined || secondaryIndex <= lastSecondaryIndex) return;
+    anchors.push({ primaryIndex, secondaryIndex });
+    lastSecondaryIndex = secondaryIndex;
+  });
+
+  const merged = [];
+  const emitted = new Set();
+  const append = (item, fromPrimary) => {
+    if (!item || typeof item !== "object") return;
+    const key = keyFor(item);
+    if (key !== null && emitted.has(key)) return;
+    if (key !== null) emitted.add(key);
+    const source = fromPrimary ? item : primaryById.get(key);
+    const cached = fromPrimary ? secondaryById.get(key) : item;
+    merged.push(source ? combine(source, cached) : { ...item });
+  };
+
+  let primaryCursor = 0;
+  let secondaryCursor = 0;
+  for (const anchor of anchors) {
+    while (primaryCursor < anchor.primaryIndex) append(primary[primaryCursor++], true);
+    while (secondaryCursor < anchor.secondaryIndex) append(secondary[secondaryCursor++], false);
+    append(primary[anchor.primaryIndex], true);
+    primaryCursor = anchor.primaryIndex + 1;
+    secondaryCursor = anchor.secondaryIndex + 1;
+  }
+  while (primaryCursor < primary.length) append(primary[primaryCursor++], true);
+  while (secondaryCursor < secondary.length) append(secondary[secondaryCursor++], false);
+  return merged;
+}
+
+function mergeThreadItem(authoritative, live) {
+  if (!live) return { ...authoritative };
+  const merged = { ...live, ...authoritative };
+  for (const field of ["text", "aggregatedOutput"]) {
+    const sourceText = authoritative?.[field];
+    const liveText = live?.[field];
+    if (
+      typeof liveText === "string"
+      && typeof sourceText === "string"
+      && liveText.length > sourceText.length
+    ) {
+      merged[field] = liveText;
+    }
+  }
+  if (
+    authoritative?.type === "reasoning"
+    && reasoningText(live?.summary).length > reasoningText(authoritative?.summary).length
+  ) {
+    merged.summary = live.summary;
+  }
+  if (
+    authoritative?.status === "inProgress"
+    && live?.status
+    && live.status !== "inProgress"
+  ) {
+    merged.status = live.status;
+  }
+  return merged;
+}
+
+function mergeTurnSnapshot(authoritative, live) {
+  if (!live) {
+    return {
+      ...authoritative,
+      items: mergeOrderedById(authoritative?.items, [], mergeThreadItem),
+    };
+  }
+  const merged = { ...live, ...authoritative };
+  merged.items = mergeOrderedById(authoritative?.items, live?.items, mergeThreadItem);
+  if (
+    authoritative?.status === "inProgress"
+    && live?.status
+    && live.status !== "inProgress"
+  ) {
+    merged.status = live.status;
+  }
+  return merged;
+}
+
+function mergeThreadData(authoritative, live) {
+  if (!live) {
+    return {
+      ...authoritative,
+      turns: mergeOrderedById(authoritative?.turns, [], mergeTurnSnapshot),
+    };
+  }
+  const merged = { ...live, ...authoritative };
+  merged.turns = mergeOrderedById(authoritative?.turns, live?.turns, mergeTurnSnapshot);
+  return merged;
+}
+
+function pendingUserMatches(pending, item, threadId, turnId) {
+  if (!pending || pending.threadId == null || threadId == null) return false;
+  if (String(pending.threadId) !== String(threadId)) return false;
+  if (item?.id != null && String(pending.id) === String(item.id)) return true;
+  return Boolean(
+    pending.turnId != null
+    && turnId != null
+    && String(pending.turnId) === String(turnId)
+  );
+}
+
+function threadContainsPendingUser(thread, pending) {
+  return (thread?.turns || []).some((turn) => (
+    (turn.items || []).some((item) => (
+      item.type === "userMessage"
+      && pendingUserMatches(pending, item, thread.id, turn.id)
+    ))
+  ));
+}
+
 function cacheThreadSnapshot(thread) {
   if (!thread?.id) return null;
   const previous = state.threadCache.get(thread.id);
@@ -284,6 +424,24 @@ function cacheThreadSnapshot(thread) {
     followPresent: previous?.followPresent ?? true,
     pendingUser: previous?.pendingUser || null,
   };
+  state.threadCache.set(thread.id, entry);
+  pruneThreadCache();
+  return entry;
+}
+
+function mergeThreadSnapshot(thread) {
+  if (!thread?.id) return null;
+  const previous = state.threadCache.get(thread.id);
+  if (!previous) return cacheThreadSnapshot(thread);
+  const entry = {
+    ...previous,
+    thread: mergeThreadData(thread, previous.thread),
+    generation: state.connectionGeneration,
+    lastAccess: Date.now(),
+  };
+  if (threadContainsPendingUser(entry.thread, entry.pendingUser)) {
+    entry.pendingUser = null;
+  }
   state.threadCache.set(thread.id, entry);
   pruneThreadCache();
   return entry;
@@ -359,14 +517,8 @@ function cacheTurnUpdate(threadId, turn, fallbackStatus = "inProgress") {
     };
     entry.thread.turns.push(cached);
   } else {
-    const items = Array.isArray(cached.items) ? cached.items : [];
-    for (const item of Array.isArray(turn.items) ? turn.items : []) {
-      const existing = items.find((candidate) => candidate.id === item.id);
-      if (existing) Object.assign(existing, item);
-      else items.push({ ...item });
-    }
-    Object.assign(cached, turn);
-    cached.items = items;
+    const merged = mergeTurnSnapshot(turn, cached);
+    Object.assign(cached, merged);
   }
   entry.lastAccess = Date.now();
   return cached;
@@ -389,7 +541,12 @@ function cacheItemUpdate(params) {
   const index = turn.items.findIndex((candidate) => candidate.id === item.id);
   if (index >= 0) Object.assign(turn.items[index], item);
   else turn.items.push({ ...item });
-  if (item.type === "userMessage") entry.pendingUser = null;
+  if (
+    item.type === "userMessage"
+    && pendingUserMatches(entry.pendingUser, item, params.threadId, params.turnId)
+  ) {
+    entry.pendingUser = null;
+  }
 }
 
 function cachedItem(threadId, turnId, itemId, type) {
@@ -439,6 +596,33 @@ function appendCachedReasoning(params) {
 function setCachedPendingUser(threadId, pending) {
   const entry = cachedThread(threadId, false);
   if (entry) entry.pendingUser = pending;
+}
+
+function setPendingUserTurn(threadId, turnId) {
+  if (!threadId || !turnId) return false;
+  const entry = cachedThread(threadId, false);
+  let pending = entry?.pendingUser || null;
+  if (!pending && state.pendingUser?.threadId === threadId) {
+    pending = state.pendingUser;
+  }
+  if (!pending) return false;
+  if (pending.turnId != null && String(pending.turnId) !== String(turnId)) return false;
+  if (entry?.pendingUser) entry.pendingUser.turnId = turnId;
+  if (state.pendingUser?.id === pending.id) state.pendingUser.turnId = turnId;
+  return true;
+}
+
+function reconcileMissingTurnPrefix(params) {
+  if (!params?.threadId || !params.turnId) return;
+  const entry = cachedThread(params.threadId, false);
+  const turn = findCachedTurn(entry, params.turnId);
+  if (!turn || (turn.items || []).some((item) => item.type === "userMessage")) return;
+  const pending = entry?.pendingUser;
+  if (
+    pending
+    && (pending.turnId == null || String(pending.turnId) === String(params.turnId))
+  ) return;
+  void reconcileThreadHistory(params.threadId);
 }
 
 function normalizeChatSettings(value = {}) {
@@ -1677,6 +1861,7 @@ async function connect() {
     state.submittingThreads.clear();
     state.submittingViews.clear();
     failPending("Connection closed");
+    state.threadReconciliations.clear();
     setStatus("offline", "offline");
     updateControls();
     state.reconnectTimer = window.setTimeout(connect, 1800);
@@ -1706,6 +1891,46 @@ function handleMessage(message) {
   }
 }
 
+function reconcileThreadHistory(threadId) {
+  const cached = cachedThread(threadId, false);
+  if (!state.ready || !threadId || !cached) return Promise.resolve(cached);
+
+  const current = state.threadReconciliations.get(threadId);
+  if (current) {
+    current.queued = true;
+    return current.promise;
+  }
+
+  const reconciliation = { queued: false, promise: null };
+  reconciliation.promise = (async () => {
+    let entry = cached;
+    do {
+      reconciliation.queued = false;
+      const generation = state.connectionGeneration;
+      const result = await rpc("thread/resume", { threadId });
+      if (
+        generation !== state.connectionGeneration
+        || !result?.thread
+        || !cachedThread(threadId, false)
+      ) break;
+      const selected = state.threadId === threadId;
+      if (selected) saveCurrentThreadView();
+      entry = mergeThreadSnapshot(result.thread) || entry;
+      if (selected && state.threadId === threadId) renderCachedThread(entry);
+    } while (reconciliation.queued && state.ready);
+    return entry;
+  })().catch((error) => {
+    globalThis.console?.warn?.(`Unable to reconcile thread ${threadId}:`, error);
+    return null;
+  }).finally(() => {
+    if (state.threadReconciliations.get(threadId) === reconciliation) {
+      state.threadReconciliations.delete(threadId);
+    }
+  });
+  state.threadReconciliations.set(threadId, reconciliation);
+  return reconciliation.promise;
+}
+
 function handleNotification(method, params) {
   switch (method) {
     case "codex-web/connected":
@@ -1727,6 +1952,7 @@ function handleNotification(method, params) {
       return;
     case "thread/deleted":
       state.threadCache.delete(params.threadId);
+      state.threadReconciliations.delete(params.threadId);
       state.composerDrafts.delete(threadComposerKey(params.threadId));
       state.promptHistoryByThread.delete(params.threadId);
       state.promptHistoryIndexesByThread.delete(params.threadId);
@@ -1748,6 +1974,10 @@ function handleNotification(method, params) {
       return;
     case "turn/started":
       cacheTurnUpdate(params.threadId, params.turn || {});
+      {
+        const hasLocalPrompt = setPendingUserTurn(params.threadId, params.turn?.id);
+        if (!hasLocalPrompt) void reconcileThreadHistory(params.threadId);
+      }
       if (cachedThread(params.threadId, false)) {
         cachedThread(params.threadId, false).thread.status = {
           type: "active",
@@ -1760,31 +1990,42 @@ function handleNotification(method, params) {
     case "turn/completed":
       cacheTurnUpdate(params.threadId, params.turn || {}, "completed");
       clearThreadActivity(params.threadId);
+      void reconcileThreadHistory(params.threadId);
       refreshThreads();
       return;
     case "item/started":
       cacheItemUpdate(params);
-      if (params.threadId === state.threadId) renderItem(params.item, false);
+      reconcileMissingTurnPrefix(params);
+      if (params.threadId === state.threadId) {
+        renderItem(params.item, false, params.threadId, params.turnId);
+      }
       return;
     case "item/completed":
       cacheItemUpdate(params);
+      reconcileMissingTurnPrefix(params);
       rememberThreadPrompt(params.threadId, params.item);
-      if (params.threadId === state.threadId) renderItem(params.item, true);
+      if (params.threadId === state.threadId) {
+        renderItem(params.item, true, params.threadId, params.turnId);
+      }
       return;
     case "item/agentMessage/delta":
       appendCachedText(params, "agentMessage");
+      reconcileMissingTurnPrefix(params);
       if (params.threadId === state.threadId) upsertMessage(params.itemId, "agent", params.delta, true);
       return;
     case "item/plan/delta":
       appendCachedText(params, "plan");
+      reconcileMissingTurnPrefix(params);
       if (params.threadId === state.threadId) upsertActivity(params.itemId, "plan", params.delta, true);
       return;
     case "item/reasoning/summaryTextDelta":
       appendCachedReasoning(params);
+      reconcileMissingTurnPrefix(params);
       if (params.threadId === state.threadId) upsertActivity(params.itemId, "reasoning", params.delta, true);
       return;
     case "item/commandExecution/outputDelta":
       appendCachedText(params, "commandExecution", "aggregatedOutput");
+      reconcileMissingTurnPrefix(params);
       if (params.threadId === state.threadId) upsertActivity(params.itemId, "command", params.delta, true);
       return;
     case "serverRequest/resolved":
@@ -2062,12 +2303,12 @@ function fileChangeText(item) {
   }).join("\n");
 }
 
-function renderItem(item, completed, threadId = state.threadId) {
+function renderItem(item, completed, threadId = state.threadId, turnId = null) {
   if (!item?.id || !item.type) return;
   switch (item.type) {
     case "userMessage":
-      if (state.pendingUser?.threadId === threadId) {
-        state.pendingUser.node.remove();
+      if (pendingUserMatches(state.pendingUser, item, threadId, turnId)) {
+        state.pendingUser.node?.remove();
         state.items.delete(state.pendingUser.id);
         state.pendingUser = null;
       }
@@ -2116,7 +2357,7 @@ function renderThreadHistory(thread) {
   state.renderTarget = fragment;
   try {
     for (const turn of turns) {
-      for (const item of turn.items || []) renderItem(item, true, thread.id);
+      for (const item of turn.items || []) renderItem(item, true, thread.id, turn.id);
     }
   } finally {
     state.renderTarget = null;
@@ -2287,14 +2528,16 @@ async function openThread(threadId, showErrors = true) {
   renderThreads(state.threads);
   updateControls();
   if (cached?.generation === state.connectionGeneration) {
-    refreshPermissionProfiles();
-    refreshThreads();
+    await reconcileThreadHistory(threadId);
+    if (selectionId !== state.selectionId || state.threadId !== threadId) return;
+    await refreshPermissionProfiles();
+    await refreshThreads();
     return;
   }
   try {
     const result = await rpc("thread/resume", { threadId });
     const thread = result.thread;
-    const refreshed = cacheThreadSnapshot(thread);
+    const refreshed = mergeThreadSnapshot(thread);
     if (selectionId !== state.selectionId || state.threadId !== threadId) return;
     renderCachedThread(refreshed);
     await refreshPermissionProfiles();
@@ -2335,7 +2578,7 @@ function beginNewThread() {
 function renderLocalPrompt(id, text, threadId, selectionId) {
   jumpToPresent();
   const node = upsertMessage(id, "user", text);
-  const pending = { id, text, threadId, selectionId };
+  const pending = { id, text, threadId, selectionId, turnId: null };
   state.pendingUser = { ...pending, node };
   setCachedPendingUser(threadId, pending);
   return node;
@@ -2362,7 +2605,8 @@ async function submitPrompt(event) {
   if (targetThreadId) state.submittingThreads.add(targetThreadId);
   updateControls();
 
-  const pendingId = `pending-${Date.now()}-${selectionId}`;
+  const pendingId = globalThis.crypto?.randomUUID?.()
+    || `pending-${Date.now()}-${selectionId}`;
   const pendingText = pendingPromptText(text, attachments);
   const pendingNode = renderLocalPrompt(
     pendingId,
@@ -2386,6 +2630,7 @@ async function submitPrompt(event) {
         text: pendingText,
         threadId: targetThreadId,
         selectionId,
+        turnId: null,
       };
       setCachedPendingUser(targetThreadId, pending);
       if (state.pendingUser?.id === pendingId) {
@@ -2411,9 +2656,11 @@ async function submitPrompt(event) {
       threadId: targetThreadId,
       input,
       cwd,
+      clientUserMessageId: pendingId,
       ...turnSettingsParams(chatSettings),
     });
     if (result.turn) cacheTurnUpdate(targetThreadId, result.turn);
+    if (result.turn?.id) setPendingUserTurn(targetThreadId, result.turn.id);
     if (result.turn?.status === "inProgress") {
       setThreadActivity(targetThreadId, result.turn.id);
     } else {
@@ -2661,6 +2908,8 @@ if (globalThis.CODEX_WEB_TEST) {
     cacheThreadSnapshot,
     cacheTurnUpdate,
     cachedThread,
+    mergeOrderedById,
+    mergeThreadSnapshot,
     handleNotification,
     handleMessagesScroll,
     isSearchSelectionCurrent,
