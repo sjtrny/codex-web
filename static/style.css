@@ -125,7 +125,7 @@ button:disabled { cursor: default; opacity: .45; }
 .shell { position: relative; display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); min-width: 0; min-height: 0; height: 100vh; height: 100dvh; overflow: hidden; }
 
 .menu-button { display: none; }
-.close-sidebar, .sidebar-scrim { display: none; }
+.close-sidebar, .sidebar-scrim, .sidebar-swipe-edge { display: none; }
 
 .sidebar {
   grid-column: 1;
@@ -509,6 +509,10 @@ button:disabled { cursor: default; opacity: .45; }
     -webkit-overflow-scrolling: touch;
   }
   .sidebar.open { transform: translateX(0); }
+  .sidebar.sidebar-swiping {
+    transform: translateX(var(--sidebar-swipe-translate));
+    transition: none;
+  }
   .sidebar-resizer { display: none; }
   .sidebar-scrim {
     position: fixed;
@@ -521,8 +525,25 @@ button:disabled { cursor: default; opacity: .45; }
     border: 0;
     border-radius: 0;
     background: var(--scrim);
+    opacity: 1;
+    transition: opacity 160ms ease-out;
   }
+  .sidebar-scrim:hover:not(:disabled) { background: var(--scrim); }
   .sidebar-scrim[hidden] { display: none; }
+  .sidebar-scrim.sidebar-swiping {
+    opacity: var(--sidebar-swipe-opacity);
+    transition: none;
+  }
+  .sidebar-swipe-edge {
+    position: fixed;
+    z-index: 28;
+    inset: 0 auto 0 0;
+    display: block;
+    width: max(24px, env(safe-area-inset-left));
+    touch-action: pan-y;
+    overscroll-behavior-x: contain;
+  }
+  .sidebar-swipe-edge[hidden] { display: none; }
   .menu-button, .close-sidebar { display: inline-flex; align-items: center; justify-content: center; }
   .topbar button { min-height: 44px; }
   .close-sidebar { width: 44px; height: 44px; margin-left: 0; padding: 0; font-size: 1.35rem; }
@@ -586,7 +607,7 @@ button:disabled { cursor: default; opacity: .45; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .sidebar { transition: none; }
+  .sidebar, .sidebar-scrim { transition: none; }
   .sidebar-toggle-icon { transition: none; }
   .thinking-dots > span { animation: none; opacity: .7; }
   .search-status.loading::before, .message.search-match { animation: none; }

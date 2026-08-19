@@ -20,6 +20,9 @@ const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 520;
 const MIN_CHAT_WIDTH = 440;
 const SIDEBAR_KEYBOARD_STEP = 16;
+const SIDEBAR_SWIPE_OPEN_DISTANCE = 56;
+const SIDEBAR_SWIPE_DIRECTION_RATIO = 1.25;
+const SIDEBAR_SWIPE_DRAG_START_DISTANCE = 6;
 const CHAT_SETTING_FIELDS = [
   "model",
   "effort",
@@ -43,6 +46,7 @@ const ui = {
   sidebarToggle: el("sidebar-toggle"),
   sidebarResizer: el("sidebar-resizer"),
   sidebarScrim: el("sidebar-scrim"),
+  sidebarSwipeEdge: el("sidebar-swipe-edge"),
   menu: el("menu"),
   closeSidebar: el("close-sidebar"),
   threads: el("threads"),
@@ -136,6 +140,10 @@ const state = {
   sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
   sidebarPreferredWidth: DEFAULT_SIDEBAR_WIDTH,
   sidebarResizePointerId: null,
+  sidebarSwipePointerId: null,
+  sidebarSwipeStartX: 0,
+  sidebarSwipeStartY: 0,
+  sidebarSwipeDragging: false,
   searchOpen: false,
   searchRequestId: 0,
   searchAbortController: null,
@@ -961,6 +969,10 @@ function syncSidebarVisibility() {
     !mobile && state.sidebarCollapsed,
   );
   ui.sidebarScrim.hidden = !(mobile && state.sidebarOpen);
+  ui.sidebarScrim.inert = !(mobile && state.sidebarOpen);
+  if (ui.sidebarScrim.inert) ui.sidebarScrim.setAttribute("aria-hidden", "true");
+  else ui.sidebarScrim.removeAttribute("aria-hidden");
+  ui.sidebarSwipeEdge.hidden = !mobile || state.sidebarOpen;
   ui.sidebar.inert = sidebarHidden;
   ui.chat.inert = mobile && state.sidebarOpen;
   if (sidebarHidden) ui.sidebar.setAttribute("aria-hidden", "true");
@@ -1004,7 +1016,9 @@ function syncSidebarVisibility() {
 }
 
 function setSidebarOpen(open, moveFocus = true) {
-  state.sidebarOpen = Boolean(open);
+  const nextOpen = Boolean(open);
+  if (nextOpen) cancelSidebarSwipe();
+  state.sidebarOpen = nextOpen;
   syncSidebarVisibility();
   if (moveFocus && sidebarIsMobile()) {
     const returnTarget = state.searchOpen ? ui.searchMenu : ui.menu;
@@ -1040,6 +1054,170 @@ function toggleSidebar() {
   } else {
     setSidebarCollapsed(!state.sidebarCollapsed);
   }
+}
+
+function sidebarSwipeDeltas(event) {
+  return {
+    horizontal: Number(event.clientX) - state.sidebarSwipeStartX,
+    vertical: Math.abs(Number(event.clientY) - state.sidebarSwipeStartY),
+  };
+}
+
+function sidebarSwipeShouldOpen(event) {
+  const { horizontal, vertical } = sidebarSwipeDeltas(event);
+  return (
+    Number.isFinite(horizontal)
+    && Number.isFinite(vertical)
+    && horizontal >= SIDEBAR_SWIPE_OPEN_DISTANCE
+    && horizontal >= vertical * SIDEBAR_SWIPE_DIRECTION_RATIO
+  );
+}
+
+function mobileSidebarWidth() {
+  const renderedWidth = Number(ui.sidebar.getBoundingClientRect?.().width);
+  if (Number.isFinite(renderedWidth) && renderedWidth > 0) return renderedWidth;
+  return Math.min(sidebarViewportWidth() * 0.86, 320);
+}
+
+function beginSidebarSwipeDrag() {
+  state.sidebarSwipeDragging = true;
+  ui.sidebar.classList.add("sidebar-swiping");
+  ui.sidebarScrim.classList.add("sidebar-swiping");
+  ui.sidebarScrim.hidden = false;
+}
+
+function renderSidebarSwipe(event) {
+  const { horizontal } = sidebarSwipeDeltas(event);
+  const width = mobileSidebarWidth();
+  const progress = Math.max(0, Math.min(1, horizontal / width));
+  const translate = Math.min(0, -width + Math.max(0, horizontal));
+  ui.sidebar.style.setProperty("--sidebar-swipe-translate", `${translate}px`);
+  ui.sidebarScrim.style.setProperty("--sidebar-swipe-opacity", String(progress));
+  return progress;
+}
+
+function startSidebarSwipe(event) {
+  if (
+    !sidebarIsMobile()
+    || state.sidebarOpen
+    || state.sidebarSwipePointerId !== null
+    || event.isPrimary === false
+    || (event.button !== undefined && event.button !== 0)
+  ) {
+    return;
+  }
+  const clientX = Number(event.clientX);
+  const clientY = Number(event.clientY);
+  if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return;
+  state.sidebarSwipePointerId = event.pointerId ?? 1;
+  state.sidebarSwipeStartX = clientX;
+  state.sidebarSwipeStartY = clientY;
+  if (event.pointerId !== undefined) {
+    ui.sidebarSwipeEdge.setPointerCapture?.(event.pointerId);
+  }
+}
+
+function moveSidebarSwipe(event) {
+  if (
+    state.sidebarSwipePointerId === null
+    || (event.pointerId ?? 1) !== state.sidebarSwipePointerId
+  ) {
+    return;
+  }
+  const { horizontal, vertical } = sidebarSwipeDeltas(event);
+  if (!Number.isFinite(horizontal) || !Number.isFinite(vertical)) return;
+  if (!state.sidebarSwipeDragging) {
+    if (
+      horizontal < SIDEBAR_SWIPE_DRAG_START_DISTANCE
+      || horizontal < vertical * SIDEBAR_SWIPE_DIRECTION_RATIO
+    ) {
+      return;
+    }
+    beginSidebarSwipeDrag();
+  }
+  event.preventDefault?.();
+  renderSidebarSwipe(event);
+}
+
+function finishSidebarSwipe(event) {
+  if (
+    state.sidebarSwipePointerId === null
+    || (event.pointerId ?? 1) !== state.sidebarSwipePointerId
+  ) {
+    return;
+  }
+  const shouldOpen = (
+    event.type !== "pointercancel"
+    && state.sidebarSwipeDragging
+    && sidebarSwipeShouldOpen(event)
+  );
+  if (state.sidebarSwipeDragging) event.preventDefault?.();
+  settleSidebarSwipe(shouldOpen);
+}
+
+function releaseSidebarSwipePointer() {
+  const pointerId = state.sidebarSwipePointerId;
+  state.sidebarSwipePointerId = null;
+  state.sidebarSwipeStartX = 0;
+  state.sidebarSwipeStartY = 0;
+  if (pointerId === null) return;
+  try {
+    if (
+      typeof ui.sidebarSwipeEdge.hasPointerCapture !== "function"
+      || ui.sidebarSwipeEdge.hasPointerCapture(pointerId)
+    ) {
+      ui.sidebarSwipeEdge.releasePointerCapture?.(pointerId);
+    }
+  } catch {
+    // Capture may already be gone when the browser dispatches lostpointercapture.
+  }
+}
+
+function clearSidebarSwipePresentation() {
+  ui.sidebar.classList.remove("sidebar-swiping");
+  ui.sidebarScrim.classList.remove("sidebar-swiping");
+  ui.sidebar.style.removeProperty("--sidebar-swipe-translate");
+  ui.sidebarScrim.style.removeProperty("--sidebar-swipe-opacity");
+}
+
+function settleSidebarSwipe(open) {
+  const wasDragging = state.sidebarSwipeDragging;
+  releaseSidebarSwipePointer();
+  state.sidebarSwipeDragging = false;
+  state.sidebarOpen = Boolean(open);
+  syncSidebarVisibility();
+  if (wasDragging) void ui.sidebar.offsetWidth;
+  clearSidebarSwipePresentation();
+  if (open && sidebarIsMobile()) ui.closeSidebar.focus();
+}
+
+function cancelSidebarSwipe() {
+  if (state.sidebarSwipePointerId === null && !state.sidebarSwipeDragging) return;
+  settleSidebarSwipe(false);
+}
+
+function handleSidebarSwipeCaptureLoss(event) {
+  if (
+    state.sidebarSwipePointerId !== null
+    && (event.pointerId ?? 1) === state.sidebarSwipePointerId
+  ) {
+    cancelSidebarSwipe();
+  }
+}
+
+function handleSidebarScrimClick(event) {
+  event.preventDefault?.();
+  if (sidebarIsMobile() && state.sidebarOpen) setSidebarOpen(false);
+}
+
+function handleSidebarScrimPointerDown(event) {
+  if (
+    event.isPrimary === false
+    || (event.button !== undefined && event.button !== 0)
+  ) {
+    return;
+  }
+  handleSidebarScrimClick(event);
 }
 
 function sidebarPointerWidth(event) {
@@ -1156,6 +1334,7 @@ function syncSidebarBreakpoint() {
     )
   );
   cancelSidebarResize(true);
+  cancelSidebarSwipe();
   state.sidebarOpen = false;
   applyPreferredSidebarWidth();
   syncSidebarVisibility();
@@ -2883,6 +3062,7 @@ if (globalThis.CODEX_WEB_TEST) {
     MAX_SIDEBAR_WIDTH,
     SIDEBAR_WIDTH_STORAGE_KEY,
     SIDEBAR_COLLAPSED_STORAGE_KEY,
+    SIDEBAR_SWIPE_OPEN_DISTANCE,
     THREAD_QUERY_PARAM,
     buildTurnInput,
     clearComposerDraft,
@@ -2922,19 +3102,26 @@ if (globalThis.CODEX_WEB_TEST) {
     selectedThreadBusy,
     selectedTurnId,
     setThreadActivity,
+    cancelSidebarSwipe,
     cancelSidebarResize,
     clampSidebarWidth,
     applyPreferredSidebarWidth,
     finishSidebarResize,
+    finishSidebarSwipe,
     handleSidebarCaptureLoss,
+    handleSidebarScrimClick,
+    handleSidebarScrimPointerDown,
+    handleSidebarSwipeCaptureLoss,
     initializeSidebarLayout,
     moveSidebarResize,
+    moveSidebarSwipe,
     resizeSidebarFromKeyboard,
     setSidebarCollapsed,
     setSidebarOpen,
     setSidebarWidth,
     sidebarMaxWidth,
     startSidebarResize,
+    startSidebarSwipe,
     syncSidebarBreakpoint,
     syncSidebarVisibility,
     toggleSidebar,
@@ -2994,7 +3181,16 @@ if (globalThis.CODEX_WEB_TEST) {
     if (sidebarIsMobile()) setSidebarOpen(false);
     else setSidebarCollapsed(true);
   });
-  ui.sidebarScrim.addEventListener("click", () => setSidebarOpen(false));
+  ui.sidebarScrim.addEventListener("pointerdown", handleSidebarScrimPointerDown);
+  ui.sidebarScrim.addEventListener("click", handleSidebarScrimClick);
+  ui.sidebarSwipeEdge.addEventListener("pointerdown", startSidebarSwipe);
+  ui.sidebarSwipeEdge.addEventListener("pointermove", moveSidebarSwipe);
+  ui.sidebarSwipeEdge.addEventListener("pointerup", finishSidebarSwipe);
+  ui.sidebarSwipeEdge.addEventListener("pointercancel", finishSidebarSwipe);
+  ui.sidebarSwipeEdge.addEventListener(
+    "lostpointercapture",
+    handleSidebarSwipeCaptureLoss,
+  );
   ui.sidebarResizer.addEventListener("pointerdown", startSidebarResize);
   ui.sidebarResizer.addEventListener("pointermove", moveSidebarResize);
   ui.sidebarResizer.addEventListener("pointerup", finishSidebarResize);
@@ -3037,7 +3233,10 @@ if (globalThis.CODEX_WEB_TEST) {
     mobileLayout.addListener(syncSidebarBreakpoint);
   }
   window.addEventListener("resize", applyPreferredSidebarWidth, { passive: true });
-  window.addEventListener("blur", () => cancelSidebarResize(true));
+  window.addEventListener("blur", () => {
+    cancelSidebarResize(true);
+    cancelSidebarSwipe();
+  });
   initializeSidebarLayout();
   setSearchOpen(false, false);
   setSettingsOpen(false, false);

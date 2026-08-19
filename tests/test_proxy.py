@@ -257,6 +257,7 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('class="sidebar-toggle-icon"', body)
             self.assertIn('id="sidebar-content"', body)
             self.assertIn('id="sidebar-resizer"', body)
+            self.assertIn('id="sidebar-swipe-edge"', body)
             self.assertIn('role="separator"', body)
             self.assertIn('aria-orientation="vertical"', body)
             self.assertIn('id="settings-toggle"', body)
@@ -894,6 +895,10 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(".sidebar-content[hidden] { display: none; }", stylesheet)
             self.assertIn("cursor: col-resize", stylesheet)
             self.assertIn(".sidebar.open { transform: translateX(0); }", stylesheet)
+            self.assertIn(".sidebar-swipe-edge {", stylesheet)
+            self.assertIn("touch-action: pan-y", stylesheet)
+            self.assertIn(".sidebar.sidebar-swiping {", stylesheet)
+            self.assertIn(".sidebar-scrim.sidebar-swiping {", stylesheet)
             self.assertIn(
                 ".thread.running { border-left-color: var(--success); }", stylesheet
             )

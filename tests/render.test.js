@@ -234,6 +234,7 @@ const {
   MAX_SIDEBAR_WIDTH,
   SIDEBAR_WIDTH_STORAGE_KEY,
   SIDEBAR_COLLAPSED_STORAGE_KEY,
+  SIDEBAR_SWIPE_OPEN_DISTANCE,
   THREAD_QUERY_PARAM,
   beginNewThread,
   buildTurnInput,
@@ -263,12 +264,18 @@ const {
   selectedThreadBusy,
   selectedTurnId,
   applyPreferredSidebarWidth,
+  cancelSidebarSwipe,
   cancelSidebarResize,
   clampSidebarWidth,
   finishSidebarResize,
+  finishSidebarSwipe,
   handleSidebarCaptureLoss,
+  handleSidebarScrimClick,
+  handleSidebarScrimPointerDown,
+  handleSidebarSwipeCaptureLoss,
   initializeSidebarLayout,
   moveSidebarResize,
+  moveSidebarSwipe,
   resizeSidebarFromKeyboard,
   setSidebarCollapsed,
   setThreadActivity,
@@ -277,6 +284,7 @@ const {
   setThreadPromptHistory,
   sidebarMaxWidth,
   startSidebarResize,
+  startSidebarSwipe,
   syncSidebarBreakpoint,
   syncSidebarVisibility,
   toggleSidebar,
@@ -707,10 +715,12 @@ assert.equal(ui.sidebarResizer.hidden, true);
 assert.equal(ui.sidebarToggle.hidden, true);
 assert.equal(ui.menu.hidden, false);
 assert.equal(ui.sidebarContent.hidden, false);
+assert.equal(ui.sidebarSwipeEdge.hidden, false);
 setSidebarOpen(true);
 assert.equal(state.sidebarOpen, true);
 assert.equal(ui.sidebar.classList.contains("open"), true);
 assert.equal(ui.sidebarScrim.hidden, false);
+assert.equal(ui.sidebarSwipeEdge.hidden, true);
 assert.equal(ui.chat.inert, true);
 assert.equal(ui.menu.getAttribute("aria-expanded"), "true");
 assert.equal(ui.menu.textContent, "Chats");
@@ -722,6 +732,7 @@ syncSidebarBreakpoint();
 assert.equal(state.sidebarOpen, false);
 assert.equal(ui.sidebar.classList.contains("open"), false);
 assert.equal(ui.sidebarScrim.hidden, true);
+assert.equal(ui.sidebarSwipeEdge.hidden, true);
 assert.equal(ui.chat.inert, false);
 assert.equal(state.sidebarWidth, 500);
 assert.equal(state.sidebarPreferredWidth, 500);
@@ -749,6 +760,140 @@ setSidebarOpen(true);
 setSidebarOpen(false);
 assert.equal(ui.menu.getAttribute("aria-expanded"), "false");
 assert.equal(ui.menu.focusCount, menuFocusBeforeMobile + 2);
+
+startSidebarSwipe({
+  button: 0,
+  clientX: 4,
+  clientY: 100,
+  isPrimary: false,
+  pointerId: 19,
+});
+assert.equal(state.sidebarSwipePointerId, null, "secondary pointers must be ignored");
+
+startSidebarSwipe({ button: 0, clientX: 4, clientY: 100, pointerId: 20 });
+assert.equal(state.sidebarSwipePointerId, 20);
+assert.equal(ui.sidebarSwipeEdge.pointerCaptures.has(20), true);
+finishSidebarSwipe({
+  clientX: 4 + SIDEBAR_SWIPE_OPEN_DISTANCE - 1,
+  clientY: 100,
+  pointerId: 20,
+  type: "pointerup",
+});
+assert.equal(state.sidebarOpen, false, "a short edge drag must not open the drawer");
+assert.equal(state.sidebarSwipePointerId, null);
+assert.equal(ui.sidebarSwipeEdge.pointerCaptures.has(20), false);
+
+startSidebarSwipe({ button: 0, clientX: 4, clientY: 100, pointerId: 21 });
+finishSidebarSwipe({
+  clientX: 4 + SIDEBAR_SWIPE_OPEN_DISTANCE + 20,
+  clientY: 170,
+  pointerId: 21,
+  type: "pointerup",
+});
+assert.equal(
+  state.sidebarOpen,
+  false,
+  "a mostly vertical edge gesture must not open the drawer",
+);
+
+const closeFocusBeforeSwipe = ui.closeSidebar.focusCount;
+let swipePrevented = false;
+startSidebarSwipe({ button: 0, clientX: 4, clientY: 100, pointerId: 22 });
+moveSidebarSwipe({
+  clientX: 24,
+  clientY: 104,
+  pointerId: 22,
+  preventDefault() { swipePrevented = true; },
+});
+assert.equal(swipePrevented, true);
+assert.equal(state.sidebarOpen, false, "the drawer must not pop open during a drag");
+assert.equal(state.sidebarSwipeDragging, true);
+assert.equal(ui.sidebar.classList.contains("sidebar-swiping"), true);
+assert.equal(ui.sidebarScrim.classList.contains("sidebar-swiping"), true);
+assert.equal(ui.sidebarScrim.hidden, false);
+assert.equal(ui.sidebarScrim.inert, true);
+const earlySwipeTranslate = Number.parseFloat(
+  ui.sidebar.style.getPropertyValue("--sidebar-swipe-translate"),
+);
+const earlyScrimOpacity = Number.parseFloat(
+  ui.sidebarScrim.style.getPropertyValue("--sidebar-swipe-opacity"),
+);
+
+moveSidebarSwipe({
+  clientX: 4 + SIDEBAR_SWIPE_OPEN_DISTANCE,
+  clientY: 108,
+  pointerId: 22,
+  preventDefault() {},
+});
+assert.equal(state.sidebarOpen, false, "crossing the threshold should still track the drag");
+assert.ok(
+  Number.parseFloat(ui.sidebar.style.getPropertyValue("--sidebar-swipe-translate"))
+    > earlySwipeTranslate,
+  "the drawer should move right with the pointer",
+);
+assert.ok(
+  Number.parseFloat(ui.sidebarScrim.style.getPropertyValue("--sidebar-swipe-opacity"))
+    > earlyScrimOpacity,
+  "the scrim should fade in with the pointer",
+);
+finishSidebarSwipe({
+  clientX: 4 + SIDEBAR_SWIPE_OPEN_DISTANCE,
+  clientY: 108,
+  pointerId: 22,
+  type: "pointerup",
+  preventDefault() {},
+});
+assert.equal(state.sidebarOpen, true, "release should settle a completed swipe open");
+assert.equal(state.sidebarSwipePointerId, null);
+assert.equal(ui.sidebarSwipeEdge.pointerCaptures.has(22), false);
+assert.equal(ui.sidebarSwipeEdge.hidden, true);
+assert.equal(ui.sidebar.classList.contains("sidebar-swiping"), false);
+assert.equal(ui.sidebarScrim.classList.contains("sidebar-swiping"), false);
+assert.equal(ui.sidebar.style.getPropertyValue("--sidebar-swipe-translate"), "");
+assert.equal(ui.sidebarScrim.style.getPropertyValue("--sidebar-swipe-opacity"), "");
+assert.equal(ui.closeSidebar.focusCount, closeFocusBeforeSwipe + 1);
+
+const menuFocusBeforeScrimClick = ui.menu.focusCount;
+let scrimClickPrevented = false;
+handleSidebarScrimPointerDown({
+  button: 0,
+  isPrimary: true,
+  preventDefault() { scrimClickPrevented = true; },
+});
+assert.equal(scrimClickPrevented, true);
+assert.equal(state.sidebarOpen, false, "the first outside pointerdown should close it");
+assert.equal(ui.sidebarScrim.hidden, true);
+assert.equal(ui.sidebarSwipeEdge.hidden, false);
+assert.equal(ui.menu.focusCount, menuFocusBeforeScrimClick + 1);
+handleSidebarScrimClick({ preventDefault() {} });
+assert.equal(
+  ui.menu.focusCount,
+  menuFocusBeforeScrimClick + 1,
+  "a follow-up click must not trigger a second close",
+);
+
+startSidebarSwipe({ button: 0, clientX: 4, clientY: 100, pointerId: 23 });
+moveSidebarSwipe({
+  clientX: 30,
+  clientY: 102,
+  pointerId: 23,
+  preventDefault() {},
+});
+finishSidebarSwipe({
+  clientX: 4 + SIDEBAR_SWIPE_OPEN_DISTANCE + 10,
+  clientY: 100,
+  pointerId: 23,
+  type: "pointercancel",
+});
+assert.equal(state.sidebarOpen, false, "a cancelled swipe must not open the drawer");
+assert.equal(ui.sidebar.classList.contains("sidebar-swiping"), false);
+assert.equal(ui.sidebarScrim.hidden, true);
+
+startSidebarSwipe({ button: 0, clientX: 4, clientY: 100, pointerId: 24 });
+ui.sidebarSwipeEdge.pointerCaptures.delete(24);
+handleSidebarSwipeCaptureLoss({ pointerId: 24 });
+assert.equal(state.sidebarSwipePointerId, null);
+cancelSidebarSwipe();
 
 ui.searchMenu.focus();
 state.searchOpen = true;
