@@ -252,6 +252,10 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('id="shell"', body)
             self.assertIn('id="menu"', body)
             self.assertIn('aria-controls="sidebar"', body)
+            self.assertIn('id="sidebar-toggle"', body)
+            self.assertIn('aria-controls="sidebar-content"', body)
+            self.assertIn('class="sidebar-toggle-icon"', body)
+            self.assertIn('id="sidebar-content"', body)
             self.assertIn('id="sidebar-resizer"', body)
             self.assertIn('role="separator"', body)
             self.assertIn('aria-orientation="vertical"', body)
@@ -880,8 +884,14 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertIn("height: 100dvh", stylesheet)
             self.assertIn("--sidebar-width: 260px", stylesheet)
+            self.assertIn("--sidebar-rail-width: 64px", stylesheet)
             self.assertIn(".sidebar-resizer {", stylesheet)
             self.assertIn(".shell.sidebar-collapsed", stylesheet)
+            self.assertIn(
+                "grid-template-columns: var(--sidebar-rail-width) minmax(0, 1fr)",
+                stylesheet,
+            )
+            self.assertIn(".sidebar-content[hidden] { display: none; }", stylesheet)
             self.assertIn("cursor: col-resize", stylesheet)
             self.assertIn(".sidebar.open { transform: translateX(0); }", stylesheet)
             self.assertIn(

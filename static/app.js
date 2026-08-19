@@ -39,6 +39,8 @@ const ui = {
   shell: el("shell"),
   chat: el("chat"),
   sidebar: el("sidebar"),
+  sidebarContent: el("sidebar-content"),
+  sidebarToggle: el("sidebar-toggle"),
   sidebarResizer: el("sidebar-resizer"),
   sidebarScrim: el("sidebar-scrim"),
   menu: el("menu"),
@@ -193,7 +195,15 @@ function setPreferencesOpen(open, moveFocus = true) {
   } else {
     ui.preferencesDialog.removeAttribute("open");
   }
-  if (moveFocus) ui.preferencesToggle.focus();
+  if (moveFocus) focusPreferencesReturnTarget();
+}
+
+function focusPreferencesReturnTarget() {
+  if (sidebarIsMobile() && !state.sidebarOpen) {
+    (state.searchOpen ? ui.searchMenu : ui.menu).focus();
+    return;
+  }
+  ui.preferencesToggle.focus();
 }
 
 function notice(text = "") {
@@ -740,6 +750,7 @@ function renderSidebarWidth(width) {
   state.sidebarWidth = width;
   ui.shell.style.setProperty("--sidebar-width", `${width}px`);
   ui.sidebarResizer.setAttribute("aria-valuenow", String(width));
+  ui.sidebarResizer.setAttribute("aria-valuetext", `${width} pixels`);
   ui.sidebarResizer.setAttribute("aria-valuemax", String(sidebarMaxWidth()));
   return width;
 }
@@ -758,33 +769,53 @@ function applyPreferredSidebarWidth() {
 
 function syncSidebarVisibility() {
   const mobile = sidebarIsMobile();
-  const expanded = mobile ? state.sidebarOpen : !state.sidebarCollapsed;
+  const sidebarHidden = mobile && !state.sidebarOpen;
+  const contentCollapsed = !mobile && state.sidebarCollapsed;
   ui.sidebar.classList.toggle("open", mobile && state.sidebarOpen);
   ui.shell.classList.toggle(
     "sidebar-collapsed",
     !mobile && state.sidebarCollapsed,
   );
   ui.sidebarScrim.hidden = !(mobile && state.sidebarOpen);
-  ui.sidebar.inert = !expanded;
+  ui.sidebar.inert = sidebarHidden;
   ui.chat.inert = mobile && state.sidebarOpen;
-  if (expanded) ui.sidebar.removeAttribute("aria-hidden");
-  else ui.sidebar.setAttribute("aria-hidden", "true");
+  if (sidebarHidden) ui.sidebar.setAttribute("aria-hidden", "true");
+  else ui.sidebar.removeAttribute("aria-hidden");
+  ui.sidebarContent.hidden = contentCollapsed;
+  ui.sidebarContent.inert = contentCollapsed;
+  if (contentCollapsed) ui.sidebarContent.setAttribute("aria-hidden", "true");
+  else ui.sidebarContent.removeAttribute("aria-hidden");
   ui.sidebarResizer.hidden = mobile || state.sidebarCollapsed;
   ui.sidebarResizer.setAttribute("aria-hidden", String(ui.sidebarResizer.hidden));
   ui.sidebarResizer.setAttribute(
     "tabindex",
     ui.sidebarResizer.hidden ? "-1" : "0",
   );
+  ui.sidebarToggle.hidden = mobile;
+  ui.sidebarToggle.setAttribute("aria-hidden", String(mobile));
+  ui.sidebarToggle.setAttribute("tabindex", mobile ? "-1" : "0");
+  ui.sidebarToggle.setAttribute(
+    "aria-expanded",
+    String(!state.sidebarCollapsed),
+  );
+  const toggleLabel = state.sidebarCollapsed
+    ? "Expand conversations sidebar"
+    : "Collapse conversations sidebar";
+  ui.sidebarToggle.setAttribute("aria-label", toggleLabel);
+  ui.sidebarToggle.title = toggleLabel;
   for (const button of [ui.menu, ui.searchMenu]) {
-    button.setAttribute("aria-expanded", String(expanded));
+    button.hidden = !mobile;
+    button.setAttribute("aria-hidden", String(!mobile));
+    button.setAttribute("tabindex", mobile ? "0" : "-1");
+    button.setAttribute("aria-expanded", String(state.sidebarOpen));
     button.setAttribute(
       "aria-label",
-      expanded ? "Hide conversations" : "Show conversations",
+      state.sidebarOpen ? "Close conversations" : "Open conversations",
     );
-    button.title = expanded ? "Hide conversations" : "Show conversations";
-    button.textContent = mobile
-      ? "Chats"
-      : (expanded ? "Hide chats" : "Show chats");
+    button.title = state.sidebarOpen
+      ? "Close conversations"
+      : "Open conversations";
+    button.textContent = "Chats";
   }
 }
 
@@ -798,6 +829,20 @@ function setSidebarOpen(open, moveFocus = true) {
 }
 
 function setSidebarCollapsed(collapsed, persist = true) {
+  const activeElement = globalThis.document?.activeElement;
+  const focusWillHide = Boolean(
+    collapsed
+    && activeElement
+    && (
+      activeElement === ui.sidebarResizer
+      || activeElement === ui.newThread
+      || activeElement === ui.searchChats
+      || activeElement === ui.threads
+      || ui.threads.contains(activeElement)
+      || ui.sidebarContent.contains(activeElement)
+    ),
+  );
+  if (focusWillHide) ui.sidebarToggle.focus();
   state.sidebarCollapsed = Boolean(collapsed);
   if (persist) {
     sidebarStorageSet(SIDEBAR_COLLAPSED_STORAGE_KEY, state.sidebarCollapsed);
@@ -920,6 +965,9 @@ function syncSidebarBreakpoint() {
     && (
       activeElement === ui.sidebarResizer
       || activeElement === ui.closeSidebar
+      || activeElement === ui.sidebarToggle
+      || activeElement === ui.menu
+      || activeElement === ui.searchMenu
       || ui.sidebar.contains(activeElement)
     )
   );
@@ -927,7 +975,12 @@ function syncSidebarBreakpoint() {
   state.sidebarOpen = false;
   applyPreferredSidebarWidth();
   syncSidebarVisibility();
-  if (moveFocus) (state.searchOpen ? ui.searchMenu : ui.menu).focus();
+  if (moveFocus) {
+    (sidebarIsMobile()
+      ? (state.searchOpen ? ui.searchMenu : ui.menu)
+      : ui.sidebarToggle
+    ).focus();
+  }
 }
 
 function setSearchOpen(open, moveFocus = true) {
@@ -942,7 +995,9 @@ function setSearchOpen(open, moveFocus = true) {
     return;
   }
   const mobile = sidebarIsMobile();
-  (mobile || state.sidebarCollapsed ? ui.menu : ui.searchChats).focus();
+  if (mobile) ui.menu.focus();
+  else if (state.sidebarCollapsed) ui.sidebarToggle.focus();
+  else ui.searchChats.focus();
 }
 
 function setSearchStatus(text, kind = "") {
@@ -2662,7 +2717,7 @@ if (globalThis.CODEX_WEB_TEST) {
   ui.preferencesDialog.addEventListener("close", () => {
     if (ui.preferencesToggle.getAttribute("aria-expanded") === "true") {
       ui.preferencesToggle.setAttribute("aria-expanded", "false");
-      ui.preferencesToggle.focus();
+      focusPreferencesReturnTarget();
     }
   });
   ui.messages.addEventListener("scroll", handleMessagesScroll, { passive: true });
@@ -2683,6 +2738,9 @@ if (globalThis.CODEX_WEB_TEST) {
   ui.cwd.addEventListener("change", refreshPermissionProfiles);
   ui.menu.addEventListener("click", toggleSidebar);
   ui.searchMenu.addEventListener("click", toggleSidebar);
+  ui.sidebarToggle.addEventListener("click", () => {
+    setSidebarCollapsed(!state.sidebarCollapsed);
+  });
   ui.closeSidebar.addEventListener("click", () => {
     if (sidebarIsMobile()) setSidebarOpen(false);
     else setSidebarCollapsed(true);

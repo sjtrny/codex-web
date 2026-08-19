@@ -14,21 +14,28 @@
       <aside id="sidebar" class="sidebar" aria-label="Conversations">
         <div class="brand">
           <strong>Codex</strong>
+          <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-controls="sidebar-content" aria-expanded="true" aria-label="Collapse conversations sidebar" title="Collapse conversations sidebar">
+            <svg class="sidebar-toggle-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="m15 18-6-6 6-6"></path>
+            </svg>
+          </button>
           <button id="preferences-toggle" class="settings-cog" type="button" aria-controls="preferences-dialog" aria-expanded="false" aria-haspopup="dialog" aria-label="Open settings" title="Settings">⚙</button>
           <button id="close-sidebar" class="close-sidebar" type="button" aria-label="Close conversations">×</button>
         </div>
-        <button id="new-thread" class="wide">+ New thread</button>
-        <button id="search-chats" class="wide sidebar-action" type="button" aria-controls="search-view" aria-pressed="false">
-          <span aria-hidden="true">⌕</span>
-          <span>Search chats</span>
-        </button>
-        <nav id="threads" aria-label="Threads"></nav>
+        <div id="sidebar-content" class="sidebar-content">
+          <button id="new-thread" class="wide">+ New thread</button>
+          <button id="search-chats" class="wide sidebar-action" type="button" aria-controls="search-view" aria-pressed="false">
+            <span aria-hidden="true">⌕</span>
+            <span>Search chats</span>
+          </button>
+          <nav id="threads" aria-label="Threads"></nav>
+        </div>
       </aside>
       <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-label="Resize conversations sidebar" aria-controls="sidebar" aria-orientation="vertical" aria-valuemin="220" aria-valuemax="520" aria-valuenow="260" tabindex="0" title="Drag to resize conversations"></div>
 
       <section id="chat" class="chat">
         <header class="topbar">
-          <button id="menu" class="menu-button" type="button" aria-controls="sidebar" aria-expanded="true" aria-label="Hide conversations">Hide chats</button>
+          <button id="menu" class="menu-button" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="Open conversations">Chats</button>
           <strong id="thread-title">New thread</strong>
           <label class="cwd-label">
             <span>cwd</span>
@@ -98,7 +105,7 @@
 
         <section id="search-view" class="search-view" aria-labelledby="search-title" hidden>
           <header class="search-topbar">
-            <button id="search-menu" class="menu-button" type="button" aria-controls="sidebar" aria-expanded="true" aria-label="Hide conversations">Hide chats</button>
+            <button id="search-menu" class="menu-button" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="Open conversations">Chats</button>
             <div class="search-heading">
               <h1 id="search-title">Search chat history</h1>
               <p>Find a message across the conversations in your chat list. Dates use the containing turn's time.</p>

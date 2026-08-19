@@ -569,24 +569,73 @@ setSidebarWidth(320, true);
 assert.equal(state.sidebarWidth, 320);
 assert.equal(ui.shell.style.getPropertyValue("--sidebar-width"), "320px");
 assert.equal(ui.sidebarResizer.getAttribute("aria-valuenow"), "320");
+assert.equal(ui.sidebarResizer.getAttribute("aria-valuetext"), "320 pixels");
 assert.equal(storedValues.get(SIDEBAR_WIDTH_STORAGE_KEY), "320");
 
 setSidebarCollapsed(true, false);
 assert.equal(state.sidebarCollapsed, true);
 assert.equal(ui.shell.classList.contains("sidebar-collapsed"), true);
-assert.equal(ui.sidebar.inert, true);
-assert.equal(ui.sidebar.getAttribute("aria-hidden"), "true");
+assert.equal(ui.sidebar.inert, false);
+assert.equal(ui.sidebar.getAttribute("aria-hidden"), null);
+assert.equal(ui.sidebarContent.hidden, true);
+assert.equal(ui.sidebarContent.inert, true);
+assert.equal(ui.sidebarContent.getAttribute("aria-hidden"), "true");
 assert.equal(ui.sidebarResizer.hidden, true);
-assert.equal(ui.menu.getAttribute("aria-expanded"), "false");
-assert.equal(ui.searchMenu.getAttribute("aria-expanded"), "false");
-assert.equal(ui.menu.textContent, "Show chats");
+assert.equal(ui.sidebarToggle.hidden, false);
+assert.equal(ui.sidebarToggle.getAttribute("aria-expanded"), "false");
+assert.equal(
+  ui.sidebarToggle.getAttribute("aria-label"),
+  "Expand conversations sidebar",
+);
+assert.equal(ui.sidebarToggle.title, "Expand conversations sidebar");
+assert.equal(ui.menu.hidden, true);
+assert.equal(ui.menu.textContent, "Chats");
 setSidebarCollapsed(false, false);
 assert.equal(ui.shell.classList.contains("sidebar-collapsed"), false);
 assert.equal(ui.sidebar.inert, false);
 assert.equal(ui.sidebar.getAttribute("aria-hidden"), null);
+assert.equal(ui.sidebarContent.hidden, false);
+assert.equal(ui.sidebarContent.inert, false);
+assert.equal(ui.sidebarContent.getAttribute("aria-hidden"), null);
 assert.equal(ui.sidebarResizer.hidden, false);
-assert.equal(ui.menu.getAttribute("aria-expanded"), "true");
-assert.equal(ui.menu.textContent, "Hide chats");
+assert.equal(ui.sidebarToggle.getAttribute("aria-expanded"), "true");
+assert.equal(
+  ui.sidebarToggle.getAttribute("aria-label"),
+  "Collapse conversations sidebar",
+);
+assert.equal(ui.sidebarToggle.title, "Collapse conversations sidebar");
+assert.equal(ui.menu.hidden, true);
+
+ui.searchChats.focus();
+const toggleFocusBeforeContentCollapse = ui.sidebarToggle.focusCount;
+setSidebarCollapsed(true, false);
+assert.equal(
+  ui.sidebarToggle.focusCount,
+  toggleFocusBeforeContentCollapse + 1,
+  "collapsing must move focus out of the hidden conversation content",
+);
+setSidebarCollapsed(false, false);
+
+ui.sidebarResizer.focus();
+const toggleFocusBeforeResizerCollapse = ui.sidebarToggle.focusCount;
+setSidebarCollapsed(true, false);
+assert.equal(
+  ui.sidebarToggle.focusCount,
+  toggleFocusBeforeResizerCollapse + 1,
+  "collapsing must move focus off the hidden resize separator",
+);
+setSidebarCollapsed(false, false);
+
+setSearchOpen(true, false);
+const searchChatsFocusBeforeClose = ui.searchChats.focusCount;
+setSearchOpen(false);
+assert.equal(ui.searchChats.focusCount, searchChatsFocusBeforeClose + 1);
+setSidebarCollapsed(true, false);
+setSearchOpen(true, false);
+const railFocusBeforeSearchClose = ui.sidebarToggle.focusCount;
+setSearchOpen(false);
+assert.equal(ui.sidebarToggle.focusCount, railFocusBeforeSearchClose + 1);
+setSidebarCollapsed(false, false);
 
 let prevented = false;
 resizeSidebarFromKeyboard({
@@ -653,6 +702,9 @@ assert.equal(state.sidebarWidth, MIN_SIDEBAR_WIDTH);
 assert.equal(state.sidebarPreferredWidth, 500);
 assert.equal(storedValues.get(SIDEBAR_WIDTH_STORAGE_KEY), "500");
 assert.equal(ui.sidebarResizer.hidden, true);
+assert.equal(ui.sidebarToggle.hidden, true);
+assert.equal(ui.menu.hidden, false);
+assert.equal(ui.sidebarContent.hidden, false);
 setSidebarOpen(true);
 assert.equal(state.sidebarOpen, true);
 assert.equal(ui.sidebar.classList.contains("open"), true);
@@ -661,7 +713,7 @@ assert.equal(ui.chat.inert, true);
 assert.equal(ui.menu.getAttribute("aria-expanded"), "true");
 assert.equal(ui.menu.textContent, "Chats");
 assert.equal(ui.closeSidebar.focusCount, 1);
-const menuFocusBeforeBreakpoint = ui.menu.focusCount;
+const sidebarToggleFocusBeforeBreakpoint = ui.sidebarToggle.focusCount;
 mobileViewport = false;
 globalThis.window.innerWidth = 1280;
 syncSidebarBreakpoint();
@@ -671,7 +723,12 @@ assert.equal(ui.sidebarScrim.hidden, true);
 assert.equal(ui.chat.inert, false);
 assert.equal(state.sidebarWidth, 500);
 assert.equal(state.sidebarPreferredWidth, 500);
-assert.equal(ui.menu.focusCount, menuFocusBeforeBreakpoint + 1);
+assert.equal(
+  ui.sidebarToggle.focusCount,
+  sidebarToggleFocusBeforeBreakpoint + 1,
+);
+assert.equal(ui.sidebarToggle.hidden, false);
+assert.equal(ui.menu.hidden, true);
 assert.equal(
   ui.shell.classList.contains("sidebar-collapsed"),
   true,
@@ -679,7 +736,7 @@ assert.equal(
 );
 setSidebarCollapsed(false, false);
 
-ui.sidebarResizer.focus();
+ui.sidebarToggle.focus();
 const menuFocusBeforeMobile = ui.menu.focusCount;
 mobileViewport = true;
 globalThis.window.innerWidth = 390;
@@ -690,6 +747,37 @@ setSidebarOpen(true);
 setSidebarOpen(false);
 assert.equal(ui.menu.getAttribute("aria-expanded"), "false");
 assert.equal(ui.menu.focusCount, menuFocusBeforeMobile + 2);
+
+ui.searchMenu.focus();
+state.searchOpen = true;
+const railFocusBeforeSearchBreakpoint = ui.sidebarToggle.focusCount;
+mobileViewport = false;
+globalThis.window.innerWidth = 1280;
+syncSidebarBreakpoint();
+assert.equal(
+  ui.sidebarToggle.focusCount,
+  railFocusBeforeSearchBreakpoint + 1,
+  "a mobile Chats control must not retain focus when it becomes hidden",
+);
+state.searchOpen = false;
+mobileViewport = true;
+globalThis.window.innerWidth = 390;
+syncSidebarBreakpoint();
+
+setSidebarOpen(true, false);
+setPreferencesOpen(true, false);
+ui.preferencesClose.focus();
+setSidebarOpen(false, false);
+const menuFocusBeforeMobilePreferencesClose = ui.menu.focusCount;
+const preferencesFocusBeforeMobileClose = ui.preferencesToggle.focusCount;
+setPreferencesOpen(false);
+assert.equal(ui.menu.focusCount, menuFocusBeforeMobilePreferencesClose + 1);
+assert.equal(
+  ui.preferencesToggle.focusCount,
+  preferencesFocusBeforeMobileClose,
+  "closing settings must not restore focus inside a closed mobile drawer",
+);
+
 mobileViewport = false;
 globalThis.window.innerWidth = 1280;
 syncSidebarBreakpoint();
