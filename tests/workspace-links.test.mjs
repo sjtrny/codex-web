@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 
 import {
+  localImageUrl,
+  rewriteLocalImages,
   rewriteWorkspaceLinks,
   setWorkspaceRoot,
   workspaceFileUrl,
@@ -24,6 +26,18 @@ assert.equal(
 );
 assert.equal(workspaceFileUrl("https://example.com/report.pdf"), null);
 assert.equal(workspaceFileUrl("/etc/passwd"), null);
+assert.equal(
+  localImageUrl("/tmp/freelens-illumination/synthetic_comparison.png"),
+  "/api/host-images?path=%2Ftmp%2Ffreelens-illumination%2Fsynthetic_comparison.png",
+);
+assert.equal(
+  localImageUrl("file:///tmp/freelens-illumination/field%200001.webp#preview"),
+  "/api/host-images?path=%2Ftmp%2Ffreelens-illumination%2Ffield+0001.webp",
+);
+assert.equal(localImageUrl("https://example.com/image.png"), null);
+assert.equal(localImageUrl("//example.com/image.png"), null);
+assert.equal(localImageUrl("/tmp/not-an-image.txt"), null);
+assert.equal(localImageUrl("/api/host-images?path=%2Ftmp%2Fimage.png"), null);
 
 const attributes = new Map([["href", "/workspaces/example-project/result.txt:9"]]);
 const link = {
@@ -42,6 +56,34 @@ assert.equal(
 );
 assert.equal(attributes.get("data-workspace-file"), "true");
 assert.equal(link.title, "Open workspace file");
+
+const imageAttributes = new Map([
+  ["src", "/workspaces/cairo-visuals/preview_codex_web.png"],
+]);
+const image = {
+  getAttribute(name) {
+    return imageAttributes.get(name) ?? null;
+  },
+  setAttribute(name, value) {
+    imageAttributes.set(name, String(value));
+  },
+};
+rewriteLocalImages({ querySelectorAll: () => [image] });
+assert.equal(
+  imageAttributes.get("src"),
+  "/api/files?path=%2Fworkspaces%2Fcairo-visuals%2Fpreview_codex_web.png",
+);
+assert.equal(imageAttributes.get("data-local-image"), "true");
+
+imageAttributes.set(
+  "src",
+  "/tmp/freelens-illumination/field_0001_comparison.png",
+);
+rewriteLocalImages({ querySelectorAll: () => [image] });
+assert.equal(
+  imageAttributes.get("src"),
+  "/api/host-images?path=%2Ftmp%2Ffreelens-illumination%2Ffield_0001_comparison.png",
+);
 
 assert.equal(setWorkspaceRoot("/srv/code/"), true);
 assert.equal(

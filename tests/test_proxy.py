@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib
 import json
 import os
@@ -127,18 +128,57 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
         self.search_list_pages = None
         self.search_thread_reads = {}
         self.search_thread_behaviors = {}
+        self.host_image_reads = {}
 
         backend = web.Application()
 
         async def echo(request: web.Request) -> web.WebSocketResponse:
             socket = web.WebSocketResponse()
             await socket.prepare(request)
+            host_image_client = False
             async for message in socket:
                 if message.type is WSMsgType.TEXT:
                     payload = json.loads(message.data)
                     self.backend_messages.append(payload)
+                    method = payload.get("method")
+                    if method == "initialize" and (
+                        payload.get("params", {}).get("clientInfo", {}).get("name")
+                        == "codex_web_host_image"
+                    ):
+                        host_image_client = True
+                        await socket.send_json(
+                            {"id": payload["id"], "result": {"userAgent": "test"}}
+                        )
+                        continue
+                    if host_image_client and method == "initialized":
+                        continue
+                    if host_image_client and method == "fs/readFile":
+                        result = self.host_image_reads.get(payload["params"]["path"])
+                        if isinstance(result, dict) and "error" in result:
+                            await socket.send_json(
+                                {"id": payload["id"], "error": result["error"]}
+                            )
+                        elif isinstance(result, bytes):
+                            await socket.send_json(
+                                {
+                                    "id": payload["id"],
+                                    "result": {
+                                        "dataBase64": base64.b64encode(result).decode()
+                                    },
+                                }
+                            )
+                        else:
+                            await socket.send_json(
+                                {
+                                    "id": payload["id"],
+                                    "error": {
+                                        "code": -32603,
+                                        "message": "No such file",
+                                    },
+                                }
+                            )
+                        continue
                     if self.search_list_pages is not None:
-                        method = payload.get("method")
                         if method == "initialize":
                             await socket.send_json(
                                 {
@@ -289,6 +329,11 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("/static/vendor/markdown.css", body)
             self.assertIn("/static/vendor/markdown.js", body)
             self.assertIn("/static/theme.js", body)
+            self.assertIn('rel="manifest" href="/manifest.webmanifest"', body)
+            self.assertIn('name="mobile-web-app-capable" content="yes"', body)
+            self.assertIn('name="apple-mobile-web-app-capable" content="yes"', body)
+            self.assertIn('name="apple-mobile-web-app-title" content="Codex Web"', body)
+            self.assertIn('rel="apple-touch-icon" sizes="180x180"', body)
             self.assertLess(
                 body.index("/static/theme.js"),
                 body.index("/static/style.css"),
@@ -844,6 +889,60 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("codex-web-theme-v1", body)
             self.assertIn("prefers-color-scheme", body)
 
+    async def test_pwa_manifest_worker_and_icons_are_self_hosted(self) -> None:
+        async with ClientSession() as session:
+            async with session.get(
+                f"http://127.0.0.1:{self.port}/manifest.webmanifest"
+            ) as response:
+                manifest = await response.json()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.content_type, "application/manifest+json")
+            self.assertEqual(manifest["id"], "/")
+            self.assertEqual(manifest["start_url"], "/")
+            self.assertEqual(manifest["scope"], "/")
+            self.assertEqual(manifest["display"], "standalone")
+            self.assertEqual(
+                [icon["sizes"] for icon in manifest["icons"]],
+                ["192x192", "512x512"],
+            )
+
+            async with session.get(
+                f"http://127.0.0.1:{self.port}/service-worker.js"
+            ) as response:
+                worker = await response.text()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.content_type, "text/javascript")
+                self.assertEqual(response.headers["Service-Worker-Allowed"], "/")
+            self.assertIn('self.addEventListener("install"', worker)
+            self.assertIn("self.skipWaiting()", worker)
+            self.assertIn("self.clients.claim()", worker)
+            self.assertNotIn("caches.open", worker)
+
+            async with session.get(
+                f"http://127.0.0.1:{self.port}/static/app.js"
+            ) as response:
+                app_script = await response.text()
+                self.assertEqual(response.status, 200)
+            self.assertIn(
+                'navigator.serviceWorker?.register("/service-worker.js"',
+                app_script,
+            )
+
+            for icon_path, expected_size in (
+                ("apple-touch-icon.png", 180),
+                ("icon-192.png", 192),
+                ("icon-512.png", 512),
+            ):
+                async with session.get(
+                    f"http://127.0.0.1:{self.port}/static/icons/{icon_path}"
+                ) as response:
+                    icon = await response.read()
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.content_type, "image/png")
+                self.assertEqual(icon[:8], b"\x89PNG\r\n\x1a\n")
+                self.assertEqual(int.from_bytes(icon[16:20]), expected_size)
+                self.assertEqual(int.from_bytes(icon[20:24]), expected_size)
+
     async def test_layout_constrains_large_message_history(self) -> None:
         async with (
             ClientSession() as session,
@@ -974,6 +1073,58 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(
                     response.headers["Content-Disposition"].startswith("attachment;")
                 )
+
+    async def test_reads_host_images_through_the_app_server(self) -> None:
+        path = "/tmp/freelens-illumination/synthetic_comparison.png"
+        png = b"\x89PNG\r\n\x1a\n" + (b"\x00" * 32)
+        self.host_image_reads[path] = png
+
+        async with (
+            ClientSession() as session,
+            session.get(
+                f"http://127.0.0.1:{self.port}/api/host-images",
+                params={"path": path},
+            ) as response,
+        ):
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.content_type, "image/png")
+            self.assertEqual(await response.read(), png)
+            self.assertTrue(
+                response.headers["Content-Disposition"].startswith("inline;")
+            )
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+        image_requests = [
+            message
+            for message in self.backend_messages
+            if message.get("method") in {"initialize", "initialized", "fs/readFile"}
+        ]
+        self.assertEqual(
+            [message["method"] for message in image_requests],
+            ["initialize", "initialized", "fs/readFile"],
+        )
+        self.assertTrue(
+            image_requests[0]["params"]["capabilities"]["experimentalApi"]
+        )
+        self.assertEqual(image_requests[2]["params"], {"path": path})
+
+    async def test_host_image_route_rejects_invalid_or_non_image_content(self) -> None:
+        text_path = "/tmp/freelens-illumination/not-really.png"
+        self.host_image_reads[text_path] = b"not an image"
+        async with ClientSession() as session:
+            for path, expected in (
+                ("relative.png", 400),
+                ("/tmp/../etc/secret.png", 400),
+                ("//remote.example/image.png", 400),
+                ("/tmp/notes.txt", 415),
+                (text_path, 415),
+                ("/tmp/freelens-illumination/missing.png", 404),
+            ):
+                async with session.get(
+                    f"http://127.0.0.1:{self.port}/api/host-images",
+                    params={"path": path},
+                ) as response:
+                    self.assertEqual(response.status, expected, path)
 
     async def test_workspace_file_route_rejects_outside_and_non_files(self) -> None:
         outside = Path(self.tempdir.name) / "outside.txt"

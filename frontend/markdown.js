@@ -5,6 +5,8 @@ import markedKatex from "marked-katex-extension";
 import { enhanceCodeBlocks } from "./code-copy.mjs";
 import standardLatex from "./standard-latex.mjs";
 import {
+  localImageUrl,
+  rewriteLocalImages,
   rewriteWorkspaceLinks,
   setWorkspaceRoot,
   workspaceFileUrl,
@@ -39,8 +41,10 @@ markdown.use(standardLatex(katexOptions));
 
 const purifier = createDOMPurify(window);
 purifier.addHook("uponSanitizeAttribute", (_node, data) => {
-  if (data.attrName !== "href") return;
-  const rewritten = workspaceFileUrl(data.attrValue);
+  if (data.attrName !== "href" && data.attrName !== "src") return;
+  const rewritten = data.attrName === "src"
+    ? localImageUrl(data.attrValue)
+    : workspaceFileUrl(data.attrValue);
   if (rewritten) data.attrValue = rewritten;
 });
 const sanitizeOptions = Object.freeze({
@@ -61,6 +65,7 @@ function render(value) {
     const html = markdown.parse(source);
     const fragment = purifier.sanitize(html, sanitizeOptions);
     rewriteWorkspaceLinks(fragment);
+    rewriteLocalImages(fragment);
     for (const link of fragment.querySelectorAll("a[href]")) {
       if (!link.getAttribute("href").startsWith("#")) {
         link.target = "_blank";

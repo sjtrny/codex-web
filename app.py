@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import math
@@ -32,6 +34,7 @@ APP_VERSION = "0.9.3"
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 MAX_MESSAGE_BYTES = 16 * 1024 * 1024
+MAX_HOST_IMAGE_BYTES = 10 * 1024 * 1024
 DEFAULT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 DEFAULT_MAX_UPLOAD_TOTAL_BYTES = 200 * 1024 * 1024
 DEFAULT_MAX_UPLOAD_FILES = 12
@@ -51,6 +54,7 @@ ACTIVE_DOCUMENT_MIMES = {
     "text/html",
     "text/xml",
 }
+HOST_IMAGE_SUFFIXES = {".gif", ".jpeg", ".jpg", ".png", ".webp"}
 
 
 class BackendRPCError(Exception):
@@ -216,6 +220,23 @@ async def index(_: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC / "index.html")
 
 
+async def pwa_manifest(_: web.Request) -> web.FileResponse:
+    return web.FileResponse(
+        STATIC / "manifest.webmanifest",
+        headers={"Content-Type": "application/manifest+json"},
+    )
+
+
+async def service_worker(_: web.Request) -> web.FileResponse:
+    return web.FileResponse(
+        STATIC / "service-worker.js",
+        headers={
+            "Content-Type": "text/javascript; charset=utf-8",
+            "Service-Worker-Allowed": "/",
+        },
+    )
+
+
 async def app_config(_: web.Request) -> web.Response:
     max_bytes, max_total_bytes, max_files = upload_limits()
     return web.json_response(
@@ -331,6 +352,103 @@ async def workspace_file(request: web.Request) -> web.FileResponse:
     return web.FileResponse(
         path,
         headers=headers,
+    )
+
+
+def host_image_path(raw_path: str) -> str:
+    if not raw_path or "\0" in raw_path:
+        raise web.HTTPBadRequest(text="A host image path is required")
+    if raw_path.startswith("//"):
+        raise web.HTTPBadRequest(text="Host image paths must be local")
+
+    requested = Path(raw_path)
+    if not requested.is_absolute():
+        raise web.HTTPBadRequest(text="Host image paths must be absolute")
+    if raw_path != os.path.normpath(raw_path):
+        raise web.HTTPBadRequest(text="Host image paths must be normalized")
+    if requested.suffix.lower() not in HOST_IMAGE_SUFFIXES:
+        raise web.HTTPUnsupportedMediaType(text="Unsupported host image type")
+    return raw_path
+
+
+async def host_image(request: web.Request) -> web.Response:
+    path = host_image_path(request.query.get("path", ""))
+    session: ClientSession | None = None
+    upstream = None
+    try:
+        session, upstream, _ = await connect_backend()
+        await backend_rpc(
+            upstream,
+            1,
+            "initialize",
+            {
+                "clientInfo": {
+                    "name": "codex_web_host_image",
+                    "title": "Codex Web Host Image",
+                    "version": APP_VERSION,
+                },
+                "capabilities": {"experimentalApi": True},
+            },
+        )
+        await upstream.send_str(
+            json.dumps(
+                {"method": "initialized", "params": {}},
+                separators=(",", ":"),
+            )
+        )
+        result = await backend_rpc(upstream, 2, "fs/readFile", {"path": path})
+    except BackendRPCError as exc:
+        if exc.code == -32601:
+            raise web.HTTPNotImplemented(
+                text="The Codex app-server does not support host image reads"
+            ) from exc
+        raise web.HTTPNotFound(text="Host image unavailable") from exc
+    except RuntimeError as exc:
+        raise web.HTTPServiceUnavailable(text=str(exc)) from exc
+    except TimeoutError as exc:
+        raise web.HTTPGatewayTimeout(text="Host image read timed out") from exc
+    except (BackendProtocolError, ClientError, OSError) as exc:
+        raise web.HTTPBadGateway(text="Could not read the host image") from exc
+    finally:
+        if upstream is not None and not upstream.closed:
+            try:
+                await upstream.close()
+            except (ClientError, OSError, RuntimeError):
+                pass
+        if session is not None:
+            await session.close()
+
+    if not isinstance(result, dict) or not isinstance(result.get("dataBase64"), str):
+        raise web.HTTPBadGateway(text="Codex returned an invalid host image")
+    encoded = result["dataBase64"]
+    max_encoded_bytes = 4 * ((MAX_HOST_IMAGE_BYTES + 2) // 3)
+    if len(encoded) > max_encoded_bytes:
+        raise web.HTTPRequestEntityTooLarge(
+            max_size=MAX_HOST_IMAGE_BYTES,
+            actual_size=(len(encoded) * 3) // 4,
+        )
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise web.HTTPBadGateway(text="Codex returned an invalid host image") from exc
+    if len(data) > MAX_HOST_IMAGE_BYTES:
+        raise web.HTTPRequestEntityTooLarge(
+            max_size=MAX_HOST_IMAGE_BYTES,
+            actual_size=len(data),
+        )
+    mime = image_mime(data[:16])
+    if mime is None:
+        raise web.HTTPUnsupportedMediaType(text="Unsupported host image type")
+
+    return web.Response(
+        body=data,
+        content_type=mime,
+        headers={
+            "Content-Disposition": content_disposition_header(
+                "inline",
+                filename=Path(path).name,
+            ),
+        },
     )
 
 
@@ -1032,8 +1150,11 @@ def create_app() -> web.Application:
     application.add_routes(
         [
             web.get("/", index),
+            web.get("/manifest.webmanifest", pwa_manifest),
+            web.get("/service-worker.js", service_worker),
             web.get("/api/config", app_config),
             web.get("/api/files", workspace_file),
+            web.get("/api/host-images", host_image),
             web.post("/api/search", search_chat_history),
             web.post("/api/uploads", upload_files),
             web.get("/healthz", health),

@@ -3237,6 +3237,10 @@ if (globalThis.CODEX_WEB_TEST) {
     cancelSidebarResize(true);
     cancelSidebarSwipe();
   });
+  window.addEventListener("load", () => {
+    navigator.serviceWorker?.register("/service-worker.js", { scope: "/" })
+      .catch((error) => globalThis.console?.warn?.("Service worker registration failed:", error));
+  }, { once: true });
   initializeSidebarLayout();
   setSearchOpen(false, false);
   setSettingsOpen(false, false);
