@@ -9,8 +9,8 @@ app-server share conversations.
 
 ### 1. App server
 
-Run app-server where Codex should access files and tools: the host OS, a VS Code
-development container, or another container. That environment is where Codex
+Run the app-server where Codex should access files and tools: the host OS, a VS 
+Codedevelopment container, or another container. That environment is where Codex
 does the work.
 
 Install and sign in to [Codex CLI](https://developers.openai.com/codex/cli) in
@@ -24,8 +24,8 @@ codex app-server --listen unix:///absolute/shared/path/app.sock
 ```
 
 Keep it running with a service manager. The socket directory must be visible to
-each client. App-server is
-[experimental](https://developers.openai.com/codex/developer-commands).
+each client. [`codex app-server` is experimental and unsupported for production
+workloads.](https://developers.openai.com/codex/app-server)
 
 ### 2. Terminal (optional)
 
@@ -35,7 +35,7 @@ Connect from any shell:
 codex --remote unix:///absolute/shared/path/app.sock
 ```
 
-For default Bash routing, add this to `~/.bashrc`:
+So that codex CLI connects to the socket, add this to `~/.bashrc`:
 
 ```bash
 export CODEX_APP_SERVER_SOCKET=/absolute/shared/path/app.sock
@@ -75,14 +75,3 @@ HOST=0.0.0.0 PORT=8765 .venv/bin/python app.py
 
 The UI is unauthenticated and listens on all interfaces. Keep it behind a VPN
 or firewall.
-
-## Test
-
-```bash
-npm ci && npm run build
-npm run test:markdown && npm run test:links
-npm run test:copy && npm run test:theme
-node tests/render.test.js && node --check static/app.js
-.venv/bin/python -m unittest discover -s tests -v
-docker compose config --quiet
-```
