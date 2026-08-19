@@ -38,4 +38,59 @@ assert.match(html, /<code>\\\(not math\\\)<\/code>/);
 assert.match(html, /<code class="language-tex">\\\[also not math\\\]/);
 assert.match(html, /V_{\\mathrm\{offset\}}/);
 
+const paragraphAdjacentSource = [
+  String.raw`For \(0\le D\le2r\), the final answer is`,
+  String.raw`\[`,
+  String.raw`V=\frac{16r^3}{3|\sin\alpha|}`,
+  String.raw`\left[(2-m)E(m)-2(1-m)K(m)\right].`,
+  String.raw`\]`,
+  "Following prose remains outside the display.",
+  String.raw`Here \(m\) is the elliptic-integral parameter:`,
+  String.raw`  \[`,
+  String.raw`K(m)=\int_0^{\pi/2}\frac{dt}{\sqrt{1-m\sin^2t}},`,
+  String.raw`\qquad`,
+  String.raw`E(m)=\int_0^{\pi/2}\sqrt{1-m\sin^2t}\,dt.`,
+  String.raw`  \]`,
+].join("\n");
+const paragraphAdjacentHtml = markdown.parse(paragraphAdjacentSource);
+assert.equal(
+  (paragraphAdjacentHtml.match(/class="katex-display"/g) || []).length,
+  2,
+  "standalone display delimiters should interrupt a preceding paragraph",
+);
+assert.match(
+  paragraphAdjacentHtml,
+  /Following prose remains outside the display/,
+);
+assert.doesNotMatch(paragraphAdjacentHtml, /<br>\s*\[/);
+
+const adjacentDisplays = markdown.parse([
+  "Adjacent displays:",
+  String.raw`\[x^2\]`,
+  String.raw`\[y^2\]`,
+  "After both displays.",
+].join("\n"));
+assert.equal(
+  (adjacentDisplays.match(/class="katex-display"/g) || []).length,
+  2,
+);
+assert.match(adjacentDisplays, /After both displays/);
+
+const fourSpaceCode = markdown.parse([
+  "Four-space indentation remains code:",
+  "",
+  String.raw`    \[`,
+  "    x^2",
+  String.raw`    \]`,
+].join("\n"));
+assert.equal((fourSpaceCode.match(/class="katex-display"/g) || []).length, 0);
+assert.match(fourSpaceCode, /<code>\\\[/);
+
+const malformedDisplay = markdown.parse([
+  "An unclosed delimiter stays text:",
+  String.raw`\[`,
+  "x^2",
+].join("\n"));
+assert.equal((malformedDisplay.match(/class="katex-display"/g) || []).length, 0);
+
 console.log("standard-latex-delimiters=ok");

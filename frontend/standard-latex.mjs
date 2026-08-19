@@ -1,7 +1,8 @@
 import katex from "katex";
 
 const inlineRule = /^\\\(([^\n]*?)\\\)/;
-const blockRule = /^\\\[[ \t]*(?:\r?\n)?([\s\S]*?)(?:\r?\n)?[ \t]*\\\][ \t]*(?:\r?\n|$)/;
+const blockRule = /^ {0,3}\\\[[ \t]*(?:\r?\n)?([\s\S]*?)(?:\r?\n)?[ \t]*\\\][ \t]*(?:\r?\n|$)/;
+const blockStartRule = /(?:^|\n) {0,3}\\\[/;
 
 function renderer(options, displayMode, newlineAfter = false) {
   return (token) => katex.renderToString(token.text, {
@@ -35,6 +36,11 @@ function blockLatex(options) {
   return {
     name: "blockBracketKatex",
     level: "block",
+    start(source) {
+      const match = blockStartRule.exec(source);
+      if (!match) return undefined;
+      return match.index + (match[0].startsWith("\n") ? 1 : 0);
+    },
     tokenizer(source) {
       const match = source.match(blockRule);
       if (!match) return undefined;
