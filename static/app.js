@@ -12,6 +12,13 @@ const THREAD_LIST_PARAMS = Object.freeze({
 });
 const CHAT_SETTINGS_STORAGE_KEY = "codex-web-chat-settings-v1";
 const SEARCH_MATCH_HIGHLIGHT_MS = 4000;
+const SIDEBAR_WIDTH_STORAGE_KEY = "codex-web-sidebar-width-v1";
+const SIDEBAR_COLLAPSED_STORAGE_KEY = "codex-web-sidebar-collapsed-v1";
+const DEFAULT_SIDEBAR_WIDTH = 260;
+const MIN_SIDEBAR_WIDTH = 220;
+const MAX_SIDEBAR_WIDTH = 520;
+const MIN_CHAT_WIDTH = 440;
+const SIDEBAR_KEYBOARD_STEP = 16;
 const CHAT_SETTING_FIELDS = [
   "model",
   "effort",
@@ -28,8 +35,10 @@ function emptyChatSettings() {
 
 const el = (id) => document.getElementById(id);
 const ui = {
+  shell: el("shell"),
   chat: el("chat"),
   sidebar: el("sidebar"),
+  sidebarResizer: el("sidebar-resizer"),
   sidebarScrim: el("sidebar-scrim"),
   menu: el("menu"),
   closeSidebar: el("close-sidebar"),
@@ -114,6 +123,10 @@ const state = {
   uploading: false,
   uploadLimits: null,
   sidebarOpen: false,
+  sidebarCollapsed: false,
+  sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
+  sidebarPreferredWidth: DEFAULT_SIDEBAR_WIDTH,
+  sidebarResizePointerId: null,
   searchOpen: false,
   searchRequestId: 0,
   searchAbortController: null,
@@ -632,22 +645,246 @@ async function loadChatSettingsCatalog() {
   }
 }
 
+function sidebarIsMobile() {
+  return Boolean(
+    globalThis.window?.matchMedia?.("(max-width: 760px)")?.matches,
+  );
+}
+
+function sidebarViewportWidth() {
+  const width = Number(globalThis.window?.innerWidth);
+  return Number.isFinite(width) && width > 0 ? width : 1280;
+}
+
+function sidebarMaxWidth(viewportWidth = sidebarViewportWidth()) {
+  const available = Number(viewportWidth) - MIN_CHAT_WIDTH;
+  return Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, available));
+}
+
+function clampSidebarWidth(value, viewportWidth = sidebarViewportWidth()) {
+  const parsed = Number(value);
+  const width = Number.isFinite(parsed) ? parsed : DEFAULT_SIDEBAR_WIDTH;
+  return Math.round(
+    Math.max(MIN_SIDEBAR_WIDTH, Math.min(sidebarMaxWidth(viewportWidth), width)),
+  );
+}
+
+function normalizeSidebarPreferredWidth(value) {
+  const parsed = Number(value);
+  const width = Number.isFinite(parsed) ? parsed : DEFAULT_SIDEBAR_WIDTH;
+  return Math.round(
+    Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, width)),
+  );
+}
+
+function sidebarStorageGet(key) {
+  try {
+    return globalThis.localStorage?.getItem(key) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function sidebarStorageSet(key, value) {
+  try {
+    globalThis.localStorage?.setItem(key, String(value));
+  } catch {
+    // Layout controls still work when storage is unavailable.
+  }
+}
+
+function renderSidebarWidth(width) {
+  state.sidebarWidth = width;
+  ui.shell.style.setProperty("--sidebar-width", `${width}px`);
+  ui.sidebarResizer.setAttribute("aria-valuenow", String(width));
+  ui.sidebarResizer.setAttribute("aria-valuemax", String(sidebarMaxWidth()));
+  return width;
+}
+
+function setSidebarWidth(value, persist = false) {
+  const width = clampSidebarWidth(value);
+  state.sidebarPreferredWidth = width;
+  renderSidebarWidth(width);
+  if (persist) sidebarStorageSet(SIDEBAR_WIDTH_STORAGE_KEY, width);
+  return width;
+}
+
+function applyPreferredSidebarWidth() {
+  return renderSidebarWidth(clampSidebarWidth(state.sidebarPreferredWidth));
+}
+
+function syncSidebarVisibility() {
+  const mobile = sidebarIsMobile();
+  const expanded = mobile ? state.sidebarOpen : !state.sidebarCollapsed;
+  ui.sidebar.classList.toggle("open", mobile && state.sidebarOpen);
+  ui.shell.classList.toggle(
+    "sidebar-collapsed",
+    !mobile && state.sidebarCollapsed,
+  );
+  ui.sidebarScrim.hidden = !(mobile && state.sidebarOpen);
+  ui.sidebar.inert = !expanded;
+  ui.chat.inert = mobile && state.sidebarOpen;
+  if (expanded) ui.sidebar.removeAttribute("aria-hidden");
+  else ui.sidebar.setAttribute("aria-hidden", "true");
+  ui.sidebarResizer.hidden = mobile || state.sidebarCollapsed;
+  ui.sidebarResizer.setAttribute("aria-hidden", String(ui.sidebarResizer.hidden));
+  ui.sidebarResizer.setAttribute(
+    "tabindex",
+    ui.sidebarResizer.hidden ? "-1" : "0",
+  );
+  for (const button of [ui.menu, ui.searchMenu]) {
+    button.setAttribute("aria-expanded", String(expanded));
+    button.setAttribute(
+      "aria-label",
+      expanded ? "Hide conversations" : "Show conversations",
+    );
+    button.title = expanded ? "Hide conversations" : "Show conversations";
+    button.textContent = mobile
+      ? "Chats"
+      : (expanded ? "Hide chats" : "Show chats");
+  }
+}
+
 function setSidebarOpen(open, moveFocus = true) {
   state.sidebarOpen = Boolean(open);
-  ui.sidebar.classList.toggle("open", state.sidebarOpen);
-  ui.sidebarScrim.hidden = !state.sidebarOpen;
-  ui.menu.setAttribute("aria-expanded", String(state.sidebarOpen));
-  ui.searchMenu.setAttribute("aria-expanded", String(state.sidebarOpen));
-  const drawerHidden = !globalThis.CODEX_WEB_TEST
-    && window.matchMedia("(max-width: 760px)").matches
-    && !state.sidebarOpen;
-  ui.sidebar.inert = drawerHidden;
-  if (drawerHidden) ui.sidebar.setAttribute("aria-hidden", "true");
-  else ui.sidebar.removeAttribute("aria-hidden");
-  if (moveFocus) {
+  syncSidebarVisibility();
+  if (moveFocus && sidebarIsMobile()) {
     const returnTarget = state.searchOpen ? ui.searchMenu : ui.menu;
     (state.sidebarOpen ? ui.closeSidebar : returnTarget).focus();
   }
+}
+
+function setSidebarCollapsed(collapsed, persist = true) {
+  state.sidebarCollapsed = Boolean(collapsed);
+  if (persist) {
+    sidebarStorageSet(SIDEBAR_COLLAPSED_STORAGE_KEY, state.sidebarCollapsed);
+  }
+  syncSidebarVisibility();
+}
+
+function toggleSidebar() {
+  if (sidebarIsMobile()) {
+    setSidebarOpen(!state.sidebarOpen);
+  } else {
+    setSidebarCollapsed(!state.sidebarCollapsed);
+  }
+}
+
+function sidebarPointerWidth(event) {
+  const left = ui.shell.getBoundingClientRect?.().left || 0;
+  return Number(event.clientX) - left;
+}
+
+function startSidebarResize(event) {
+  if (
+    sidebarIsMobile()
+    || state.sidebarCollapsed
+    || (event.button !== undefined && event.button !== 0)
+  ) {
+    return;
+  }
+  event.preventDefault?.();
+  state.sidebarResizePointerId = event.pointerId ?? 1;
+  ui.shell.classList.add("sidebar-resizing");
+  if (event.pointerId !== undefined) {
+    ui.sidebarResizer.setPointerCapture?.(event.pointerId);
+  }
+  setSidebarWidth(sidebarPointerWidth(event));
+}
+
+function moveSidebarResize(event) {
+  if (
+    state.sidebarResizePointerId === null
+    || (event.pointerId ?? 1) !== state.sidebarResizePointerId
+  ) {
+    return;
+  }
+  event.preventDefault?.();
+  setSidebarWidth(sidebarPointerWidth(event));
+}
+
+function finishSidebarResize(event) {
+  if (
+    state.sidebarResizePointerId === null
+    || (event.pointerId ?? 1) !== state.sidebarResizePointerId
+  ) {
+    return;
+  }
+  if (event.type !== "pointercancel") {
+    setSidebarWidth(sidebarPointerWidth(event));
+  }
+  cancelSidebarResize(true);
+}
+
+function cancelSidebarResize(persist = false) {
+  if (state.sidebarResizePointerId === null) return;
+  const pointerId = state.sidebarResizePointerId;
+  state.sidebarResizePointerId = null;
+  ui.shell.classList.remove("sidebar-resizing");
+  try {
+    if (
+      typeof ui.sidebarResizer.hasPointerCapture !== "function"
+      || ui.sidebarResizer.hasPointerCapture(pointerId)
+    ) {
+      ui.sidebarResizer.releasePointerCapture?.(pointerId);
+    }
+  } catch {
+    // Capture may already be gone when the browser dispatches lostpointercapture.
+  }
+  if (persist) {
+    sidebarStorageSet(SIDEBAR_WIDTH_STORAGE_KEY, state.sidebarPreferredWidth);
+  }
+}
+
+function handleSidebarCaptureLoss(event) {
+  if (
+    state.sidebarResizePointerId !== null
+    && (event.pointerId ?? 1) === state.sidebarResizePointerId
+  ) {
+    cancelSidebarResize(true);
+  }
+}
+
+function resizeSidebarFromKeyboard(event) {
+  if (sidebarIsMobile() || state.sidebarCollapsed) return;
+  const widths = {
+    ArrowLeft: state.sidebarWidth - SIDEBAR_KEYBOARD_STEP,
+    ArrowRight: state.sidebarWidth + SIDEBAR_KEYBOARD_STEP,
+    Home: MIN_SIDEBAR_WIDTH,
+    End: sidebarMaxWidth(),
+  };
+  if (!(event.key in widths)) return;
+  event.preventDefault?.();
+  setSidebarWidth(widths[event.key], true);
+}
+
+function initializeSidebarLayout() {
+  const savedWidth = sidebarStorageGet(SIDEBAR_WIDTH_STORAGE_KEY);
+  state.sidebarPreferredWidth = normalizeSidebarPreferredWidth(
+    savedWidth ?? DEFAULT_SIDEBAR_WIDTH,
+  );
+  applyPreferredSidebarWidth();
+  state.sidebarCollapsed = (
+    sidebarStorageGet(SIDEBAR_COLLAPSED_STORAGE_KEY) === "true"
+  );
+  syncSidebarVisibility();
+}
+
+function syncSidebarBreakpoint() {
+  const activeElement = globalThis.document?.activeElement;
+  const moveFocus = Boolean(
+    activeElement
+    && (
+      activeElement === ui.sidebarResizer
+      || activeElement === ui.closeSidebar
+      || ui.sidebar.contains(activeElement)
+    )
+  );
+  cancelSidebarResize(true);
+  state.sidebarOpen = false;
+  applyPreferredSidebarWidth();
+  syncSidebarVisibility();
+  if (moveFocus) (state.searchOpen ? ui.searchMenu : ui.menu).focus();
 }
 
 function setSearchOpen(open, moveFocus = true) {
@@ -661,8 +898,8 @@ function setSearchOpen(open, moveFocus = true) {
     ui.searchQuery.focus();
     return;
   }
-  const mobile = globalThis.window?.matchMedia?.("(max-width: 760px)").matches;
-  (mobile ? ui.menu : ui.searchChats).focus();
+  const mobile = sidebarIsMobile();
+  (mobile || state.sidebarCollapsed ? ui.menu : ui.searchChats).focus();
 }
 
 function setSearchStatus(text, kind = "") {
@@ -2121,6 +2358,11 @@ if (globalThis.CODEX_WEB_TEST) {
     PRESENT_THRESHOLD_PX,
     THREAD_CACHE_LIMIT,
     THREAD_LIST_PARAMS,
+    DEFAULT_SIDEBAR_WIDTH,
+    MIN_SIDEBAR_WIDTH,
+    MAX_SIDEBAR_WIDTH,
+    SIDEBAR_WIDTH_STORAGE_KEY,
+    SIDEBAR_COLLAPSED_STORAGE_KEY,
     buildTurnInput,
     inputText,
     pendingPromptText,
@@ -2145,7 +2387,22 @@ if (globalThis.CODEX_WEB_TEST) {
     selectedThreadBusy,
     selectedTurnId,
     setThreadActivity,
+    cancelSidebarResize,
+    clampSidebarWidth,
+    applyPreferredSidebarWidth,
+    finishSidebarResize,
+    handleSidebarCaptureLoss,
+    initializeSidebarLayout,
+    moveSidebarResize,
+    resizeSidebarFromKeyboard,
+    setSidebarCollapsed,
     setSidebarOpen,
+    setSidebarWidth,
+    sidebarMaxWidth,
+    startSidebarResize,
+    syncSidebarBreakpoint,
+    syncSidebarVisibility,
+    toggleSidebar,
     setSearchOpen,
     setPreferencesOpen,
     normalizeSearchResponse,
@@ -2193,10 +2450,22 @@ if (globalThis.CODEX_WEB_TEST) {
     select.addEventListener("change", saveChatSettingsFromControls);
   }
   ui.cwd.addEventListener("change", refreshPermissionProfiles);
-  ui.menu.addEventListener("click", () => setSidebarOpen(!state.sidebarOpen));
-  ui.searchMenu.addEventListener("click", () => setSidebarOpen(!state.sidebarOpen));
-  ui.closeSidebar.addEventListener("click", () => setSidebarOpen(false));
+  ui.menu.addEventListener("click", toggleSidebar);
+  ui.searchMenu.addEventListener("click", toggleSidebar);
+  ui.closeSidebar.addEventListener("click", () => {
+    if (sidebarIsMobile()) setSidebarOpen(false);
+    else setSidebarCollapsed(true);
+  });
   ui.sidebarScrim.addEventListener("click", () => setSidebarOpen(false));
+  ui.sidebarResizer.addEventListener("pointerdown", startSidebarResize);
+  ui.sidebarResizer.addEventListener("pointermove", moveSidebarResize);
+  ui.sidebarResizer.addEventListener("pointerup", finishSidebarResize);
+  ui.sidebarResizer.addEventListener("pointercancel", finishSidebarResize);
+  ui.sidebarResizer.addEventListener(
+    "lostpointercapture",
+    handleSidebarCaptureLoss,
+  );
+  ui.sidebarResizer.addEventListener("keydown", resizeSidebarFromKeyboard);
   ui.searchChats.addEventListener("click", () => {
     setSidebarOpen(false, false);
     setSearchOpen(true);
@@ -2221,19 +2490,18 @@ if (globalThis.CODEX_WEB_TEST) {
     if (event.key !== "Escape") return;
     if (ui.preferencesDialog.open) return;
     if (state.settingsOpen) setSettingsOpen(false);
-    else if (state.sidebarOpen) setSidebarOpen(false);
+    else if (sidebarIsMobile() && state.sidebarOpen) setSidebarOpen(false);
     else if (state.searchOpen) setSearchOpen(false);
   });
   const mobileLayout = window.matchMedia("(max-width: 760px)");
-  const closeDrawerOnDesktop = (event) => {
-    if (!event.matches) setSidebarOpen(false, false);
-  };
   if (mobileLayout.addEventListener) {
-    mobileLayout.addEventListener("change", closeDrawerOnDesktop);
+    mobileLayout.addEventListener("change", syncSidebarBreakpoint);
   } else {
-    mobileLayout.addListener(closeDrawerOnDesktop);
+    mobileLayout.addListener(syncSidebarBreakpoint);
   }
-  setSidebarOpen(false, false);
+  window.addEventListener("resize", applyPreferredSidebarWidth, { passive: true });
+  window.addEventListener("blur", () => cancelSidebarResize(true));
+  initializeSidebarLayout();
   setSearchOpen(false, false);
   setSettingsOpen(false, false);
   ui.fileInput.addEventListener("change", () => uploadFiles(ui.fileInput.files));

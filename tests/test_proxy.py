@@ -249,8 +249,12 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
         ):
             body = await response.text()
             self.assertEqual(response.status, 200)
+            self.assertIn('id="shell"', body)
             self.assertIn('id="menu"', body)
             self.assertIn('aria-controls="sidebar"', body)
+            self.assertIn('id="sidebar-resizer"', body)
+            self.assertIn('role="separator"', body)
+            self.assertIn('aria-orientation="vertical"', body)
             self.assertIn('id="settings-toggle"', body)
             self.assertIn('id="setting-model"', body)
             self.assertIn('id="setting-permissions"', body)
@@ -869,6 +873,10 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
                 stylesheet,
             )
             self.assertIn("height: 100dvh", stylesheet)
+            self.assertIn("--sidebar-width: 260px", stylesheet)
+            self.assertIn(".sidebar-resizer {", stylesheet)
+            self.assertIn(".shell.sidebar-collapsed", stylesheet)
+            self.assertIn("cursor: col-resize", stylesheet)
             self.assertIn(".sidebar.open { transform: translateX(0); }", stylesheet)
             self.assertIn(
                 ".thread.running { border-left-color: var(--success); }", stylesheet

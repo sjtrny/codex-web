@@ -24,6 +24,15 @@ class FakeElement {
     this.attributes = new Map();
     this.focusCount = 0;
     this.inert = false;
+    this.title = "";
+    this._left = 0;
+    this.pointerCaptures = new Set();
+    const styles = new Map();
+    this.style = {
+      setProperty: (name, value) => styles.set(name, String(value)),
+      getPropertyValue: (name) => styles.get(name) ?? "",
+      removeProperty: (name) => styles.delete(name),
+    };
     this.classList = {
       add: (...names) => {
         const classes = new Set(this.className.split(/\s+/).filter(Boolean));
@@ -94,6 +103,11 @@ class FakeElement {
     this.parentNode = null;
   }
 
+  contains(node) {
+    if (this === node) return true;
+    return this.children.some((child) => child.contains(node));
+  }
+
   addEventListener(name, handler) {
     this.listeners.set(name, handler);
   }
@@ -112,6 +126,23 @@ class FakeElement {
 
   focus() {
     this.focusCount += 1;
+    globalThis.document.activeElement = this;
+  }
+
+  getBoundingClientRect() {
+    return { left: this._left };
+  }
+
+  setPointerCapture(pointerId) {
+    this.pointerCaptures.add(pointerId);
+  }
+
+  releasePointerCapture(pointerId) {
+    this.pointerCaptures.delete(pointerId);
+  }
+
+  hasPointerCapture(pointerId) {
+    return this.pointerCaptures.has(pointerId);
   }
 
   showModal() {
@@ -147,7 +178,10 @@ class FakeElement {
 }
 
 const elements = new Map();
+let mobileViewport = false;
+const storedValues = new Map();
 globalThis.document = {
+  activeElement: null,
   getElementById(id) {
     if (!elements.has(id)) elements.set(id, new FakeElement(id));
     return elements.get(id);
@@ -157,6 +191,25 @@ globalThis.document = {
   },
   createDocumentFragment() {
     return new FakeElement("fragment", true);
+  },
+};
+globalThis.window = {
+  innerWidth: 1280,
+  matchMedia() {
+    return { matches: mobileViewport };
+  },
+  setTimeout,
+  clearTimeout,
+};
+globalThis.localStorage = {
+  getItem(key) {
+    return storedValues.get(key) ?? null;
+  },
+  setItem(key, value) {
+    storedValues.set(key, String(value));
+  },
+  removeItem(key) {
+    storedValues.delete(key);
   },
 };
 globalThis.CODEX_WEB_TEST = true;
@@ -169,6 +222,11 @@ const {
   PRESENT_THRESHOLD_PX,
   THREAD_CACHE_LIMIT,
   THREAD_LIST_PARAMS,
+  DEFAULT_SIDEBAR_WIDTH,
+  MIN_SIDEBAR_WIDTH,
+  MAX_SIDEBAR_WIDTH,
+  SIDEBAR_WIDTH_STORAGE_KEY,
+  SIDEBAR_COLLAPSED_STORAGE_KEY,
   beginNewThread,
   buildTurnInput,
   cacheItemUpdate,
@@ -193,8 +251,23 @@ const {
   renderThreads,
   selectedThreadBusy,
   selectedTurnId,
+  applyPreferredSidebarWidth,
+  cancelSidebarResize,
+  clampSidebarWidth,
+  finishSidebarResize,
+  handleSidebarCaptureLoss,
+  initializeSidebarLayout,
+  moveSidebarResize,
+  resizeSidebarFromKeyboard,
+  setSidebarCollapsed,
   setThreadActivity,
   setSidebarOpen,
+  setSidebarWidth,
+  sidebarMaxWidth,
+  startSidebarResize,
+  syncSidebarBreakpoint,
+  syncSidebarVisibility,
+  toggleSidebar,
   setSearchOpen,
   setPreferencesOpen,
   sortThreadsByActivity,
@@ -389,17 +462,149 @@ assert.deepEqual(threadSettingsParams(chatSettings), {
 });
 assert.deepEqual(turnSettingsParams(normalizeChatSettings(null)), {});
 
+assert.equal(DEFAULT_SIDEBAR_WIDTH, 260);
+assert.equal(clampSidebarWidth(100, 1280), MIN_SIDEBAR_WIDTH);
+assert.equal(clampSidebarWidth(999, 1280), MAX_SIDEBAR_WIDTH);
+assert.equal(sidebarMaxWidth(761), 321, "desktop width must leave room for chat");
+assert.equal(clampSidebarWidth(500, 761), 321);
+
+setSidebarWidth(320, true);
+assert.equal(state.sidebarWidth, 320);
+assert.equal(ui.shell.style.getPropertyValue("--sidebar-width"), "320px");
+assert.equal(ui.sidebarResizer.getAttribute("aria-valuenow"), "320");
+assert.equal(storedValues.get(SIDEBAR_WIDTH_STORAGE_KEY), "320");
+
+setSidebarCollapsed(true, false);
+assert.equal(state.sidebarCollapsed, true);
+assert.equal(ui.shell.classList.contains("sidebar-collapsed"), true);
+assert.equal(ui.sidebar.inert, true);
+assert.equal(ui.sidebar.getAttribute("aria-hidden"), "true");
+assert.equal(ui.sidebarResizer.hidden, true);
+assert.equal(ui.menu.getAttribute("aria-expanded"), "false");
+assert.equal(ui.searchMenu.getAttribute("aria-expanded"), "false");
+assert.equal(ui.menu.textContent, "Show chats");
+setSidebarCollapsed(false, false);
+assert.equal(ui.shell.classList.contains("sidebar-collapsed"), false);
+assert.equal(ui.sidebar.inert, false);
+assert.equal(ui.sidebar.getAttribute("aria-hidden"), null);
+assert.equal(ui.sidebarResizer.hidden, false);
+assert.equal(ui.menu.getAttribute("aria-expanded"), "true");
+assert.equal(ui.menu.textContent, "Hide chats");
+
+let prevented = false;
+resizeSidebarFromKeyboard({
+  key: "ArrowRight",
+  preventDefault: () => { prevented = true; },
+});
+assert.equal(prevented, true);
+assert.equal(state.sidebarWidth, 336);
+resizeSidebarFromKeyboard({ key: "Home", preventDefault() {} });
+assert.equal(state.sidebarWidth, MIN_SIDEBAR_WIDTH);
+resizeSidebarFromKeyboard({ key: "End", preventDefault() {} });
+assert.equal(state.sidebarWidth, MAX_SIDEBAR_WIDTH);
+
+ui.shell._left = 20;
+let pointerPrevented = false;
+startSidebarResize({
+  button: 0,
+  clientX: 360,
+  pointerId: 7,
+  preventDefault: () => { pointerPrevented = true; },
+});
+assert.equal(pointerPrevented, true);
+assert.equal(state.sidebarWidth, 340);
+assert.equal(ui.shell.classList.contains("sidebar-resizing"), true);
+assert.equal(ui.sidebarResizer.pointerCaptures.has(7), true);
+moveSidebarResize({ clientX: 400, pointerId: 7, preventDefault() {} });
+assert.equal(state.sidebarWidth, 380);
+finishSidebarResize({ clientX: 410, pointerId: 7, type: "pointerup" });
+assert.equal(state.sidebarWidth, 390);
+assert.equal(ui.shell.classList.contains("sidebar-resizing"), false);
+assert.equal(ui.sidebarResizer.pointerCaptures.has(7), false);
+assert.equal(storedValues.get(SIDEBAR_WIDTH_STORAGE_KEY), "390");
+
+startSidebarResize({ button: 0, clientX: 400, pointerId: 8, preventDefault() {} });
+cancelSidebarResize();
+assert.equal(state.sidebarResizePointerId, null);
+assert.equal(ui.shell.classList.contains("sidebar-resizing"), false);
+assert.equal(ui.sidebarResizer.pointerCaptures.has(8), false);
+
+startSidebarResize({ button: 0, clientX: 400, pointerId: 9, preventDefault() {} });
+ui.sidebarResizer.pointerCaptures.delete(9);
+handleSidebarCaptureLoss({ pointerId: 9 });
+assert.equal(state.sidebarResizePointerId, null);
+assert.equal(ui.shell.classList.contains("sidebar-resizing"), false);
+assert.equal(
+  storedValues.get(SIDEBAR_WIDTH_STORAGE_KEY),
+  String(state.sidebarPreferredWidth),
+  "losing capture must clean up and persist the last usable width",
+);
+
+setSidebarCollapsed(true);
+assert.equal(storedValues.get(SIDEBAR_COLLAPSED_STORAGE_KEY), "true");
+toggleSidebar();
+assert.equal(state.sidebarCollapsed, false);
+assert.equal(storedValues.get(SIDEBAR_COLLAPSED_STORAGE_KEY), "false");
+
+globalThis.window.innerWidth = 1280;
+setSidebarWidth(500, true);
+setSidebarCollapsed(true, false);
+mobileViewport = true;
+globalThis.window.innerWidth = 390;
+syncSidebarBreakpoint();
+assert.equal(state.sidebarWidth, MIN_SIDEBAR_WIDTH);
+assert.equal(state.sidebarPreferredWidth, 500);
+assert.equal(storedValues.get(SIDEBAR_WIDTH_STORAGE_KEY), "500");
+assert.equal(ui.sidebarResizer.hidden, true);
 setSidebarOpen(true);
 assert.equal(state.sidebarOpen, true);
 assert.equal(ui.sidebar.classList.contains("open"), true);
 assert.equal(ui.sidebarScrim.hidden, false);
+assert.equal(ui.chat.inert, true);
 assert.equal(ui.menu.getAttribute("aria-expanded"), "true");
+assert.equal(ui.menu.textContent, "Chats");
 assert.equal(ui.closeSidebar.focusCount, 1);
-setSidebarOpen(false);
+const menuFocusBeforeBreakpoint = ui.menu.focusCount;
+mobileViewport = false;
+globalThis.window.innerWidth = 1280;
+syncSidebarBreakpoint();
+assert.equal(state.sidebarOpen, false);
 assert.equal(ui.sidebar.classList.contains("open"), false);
 assert.equal(ui.sidebarScrim.hidden, true);
+assert.equal(ui.chat.inert, false);
+assert.equal(state.sidebarWidth, 500);
+assert.equal(state.sidebarPreferredWidth, 500);
+assert.equal(ui.menu.focusCount, menuFocusBeforeBreakpoint + 1);
+assert.equal(
+  ui.shell.classList.contains("sidebar-collapsed"),
+  true,
+  "the desktop collapse preference must survive a mobile drawer session",
+);
+setSidebarCollapsed(false, false);
+
+ui.sidebarResizer.focus();
+const menuFocusBeforeMobile = ui.menu.focusCount;
+mobileViewport = true;
+globalThis.window.innerWidth = 390;
+syncSidebarBreakpoint();
+assert.equal(ui.menu.focusCount, menuFocusBeforeMobile + 1);
+assert.equal(ui.sidebarResizer.hidden, true);
+setSidebarOpen(true);
+setSidebarOpen(false);
 assert.equal(ui.menu.getAttribute("aria-expanded"), "false");
-assert.equal(ui.menu.focusCount, 1);
+assert.equal(ui.menu.focusCount, menuFocusBeforeMobile + 2);
+mobileViewport = false;
+globalThis.window.innerWidth = 1280;
+syncSidebarBreakpoint();
+assert.equal(state.sidebarWidth, 500);
+assert.equal(ui.shell.classList.contains("sidebar-collapsed"), false);
+
+storedValues.set(SIDEBAR_WIDTH_STORAGE_KEY, "not-a-width");
+storedValues.set(SIDEBAR_COLLAPSED_STORAGE_KEY, "true");
+initializeSidebarLayout();
+assert.equal(state.sidebarWidth, DEFAULT_SIDEBAR_WIDTH);
+assert.equal(state.sidebarCollapsed, true);
+setSidebarCollapsed(false, false);
 
 state.ready = true;
 state.threadId = "thread-a";

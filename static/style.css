@@ -46,6 +46,7 @@
   --shadow: rgb(31 35 40 / 20%);
   --floating-shadow: rgb(31 35 40 / 25%);
   --scrim: rgb(31 35 40 / 45%);
+  --sidebar-width: 260px;
   background: var(--page-bg);
   color: var(--text);
 }
@@ -120,16 +121,48 @@ button {
 button:hover:not(:disabled) { background: var(--button-hover); }
 button:disabled { cursor: default; opacity: .45; }
 
-.shell { display: grid; grid-template-columns: 260px minmax(0, 1fr); min-width: 0; min-height: 0; height: 100vh; height: 100dvh; overflow: hidden; }
+.shell { position: relative; display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); min-width: 0; min-height: 0; height: 100vh; height: 100dvh; overflow: hidden; }
 
-.menu-button, .close-sidebar, .sidebar-scrim { display: none; }
+.menu-button { display: inline-flex; align-items: center; justify-content: center; }
+.close-sidebar, .sidebar-scrim { display: none; }
 
 .sidebar {
+  grid-column: 1;
   min-width: 0;
   padding: 14px;
   border-right: 1px solid var(--border-subtle);
   background: var(--sidebar-bg);
   overflow: auto;
+}
+
+.chat { grid-column: 2; }
+
+.sidebar-resizer {
+  position: absolute;
+  z-index: 20;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--sidebar-width) - 6px);
+  width: 12px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+.sidebar-resizer::after { content: ""; position: absolute; inset: 0 auto 0 5px; width: 1px; background: var(--border-subtle); }
+.sidebar-resizer:hover::after,
+.sidebar-resizer:focus-visible::after { left: 4px; width: 3px; background: var(--focus); }
+.sidebar-resizer:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.sidebar-resizer[hidden] { display: none; }
+.shell.sidebar-resizing,
+.shell.sidebar-resizing * { cursor: col-resize !important; user-select: none; }
+
+@media (min-width: 761px) {
+  .shell.sidebar-collapsed { grid-template-columns: 0 minmax(0, 1fr); }
+  .shell.sidebar-collapsed .sidebar,
+  .shell.sidebar-collapsed .sidebar-resizer { display: none; }
 }
 
 .brand, .topbar { display: flex; align-items: center; gap: 10px; }
@@ -457,6 +490,7 @@ button:disabled { cursor: default; opacity: .45; }
     -webkit-overflow-scrolling: touch;
   }
   .sidebar.open { transform: translateX(0); }
+  .sidebar-resizer { display: none; }
   .sidebar-scrim {
     position: fixed;
     z-index: 29;
