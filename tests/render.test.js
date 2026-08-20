@@ -243,6 +243,7 @@ const {
   cacheTurnUpdate,
   cachedThread,
   mergeOrderedById,
+  mergeProvisionalThreads,
   mergeThreadSnapshot,
   handleNotification,
   handleMessagesScroll,
@@ -255,6 +256,7 @@ const {
   parseSearchDate,
   pendingPromptText,
   renderSearchResults,
+  renderedItemKey,
   promptKeydown,
   renderThreadHistory,
   renderThinkingIndicator,
@@ -282,6 +284,7 @@ const {
   setSidebarOpen,
   setSidebarWidth,
   setThreadPromptHistory,
+  showStartedThread,
   sidebarMaxWidth,
   startSidebarResize,
   startSidebarSwipe,
@@ -358,7 +361,7 @@ assert.equal(ui.thinkingIndicator.hidden, true, "idle history should not show th
 assert.equal(ui.messages.getAttribute("aria-busy"), "false");
 assert.equal(ui.messages.scrollWrites, 1, "history should trigger one final scroll");
 assert.equal(ui.jumpPresent.hidden, true, "history starts at the present");
-const command = state.items.get("command");
+const command = state.items.get(renderedItemKey("command", "history-thread", "turn"));
 assert.ok(command.body.textContent.includes("characters omitted"));
 assert.ok(command.body.textContent.length < MAX_ACTIVITY_CHARS + 100);
 
@@ -1036,6 +1039,47 @@ ui.threads.children[0].listeners.get("click")({
 });
 assert.equal(modifiedClickPrevented, false, "modified clicks must retain native new-window behavior");
 
+const startedThread = {
+  id: "thread-new",
+  name: "Instantly visible",
+  createdAt: 600,
+  updatedAt: 600,
+  recencyAt: 600,
+  status: { type: "idle" },
+};
+const selectedThreadBeforeStart = state.threadId;
+state.threadId = startedThread.id;
+state.submittingThreads.add(startedThread.id);
+assert.equal(showStartedThread(startedThread), true);
+assert.equal(state.threads[0].id, startedThread.id);
+assert.equal(ui.threads.children[0].getAttribute("href"), "/?thread=thread-new");
+assert.equal(ui.threads.children[0].classList.contains("active"), true);
+assert.equal(ui.threads.children[0].classList.contains("running"), true);
+assert.equal(state.provisionalThreads.get(startedThread.id), startedThread);
+
+const staleListMerge = mergeProvisionalThreads(unsortedThreads);
+assert.equal(
+  staleListMerge.some((thread) => thread.id === startedThread.id),
+  true,
+  "a stale thread/list response must not remove a locally started thread",
+);
+assert.equal(state.provisionalThreads.has(startedThread.id), true);
+const confirmedThread = { ...startedThread, name: "Confirmed by server" };
+const confirmedListMerge = mergeProvisionalThreads([confirmedThread, ...unsortedThreads]);
+assert.equal(
+  confirmedListMerge.filter((thread) => thread.id === startedThread.id).length,
+  1,
+  "server confirmation must not duplicate the optimistic thread",
+);
+assert.equal(
+  confirmedListMerge.find((thread) => thread.id === startedThread.id).name,
+  "Confirmed by server",
+);
+assert.equal(state.provisionalThreads.has(startedThread.id), false);
+state.submittingThreads.delete(startedThread.id);
+state.threadId = selectedThreadBeforeStart;
+renderThreads(unsortedThreads);
+
 state.ready = false;
 handleNotification("turn/started", {
   threadId: "thread-b",
@@ -1182,8 +1226,11 @@ assert.deepEqual(
 state.threadId = "reconcile-thread";
 renderThreadHistory(reconciled.thread);
 assert.ok(
-  ui.messages.children.indexOf(state.items.get("reconcile-user").node)
-    < ui.messages.children.indexOf(state.items.get("reconcile-command").node),
+  ui.messages.children.indexOf(
+    state.items.get(renderedItemKey("reconcile-user", "reconcile-thread", "reconcile-turn")).node,
+  ) < ui.messages.children.indexOf(
+    state.items.get(renderedItemKey("reconcile-command", "reconcile-thread", "reconcile-turn")).node,
+  ),
   "the repaired user message should render before the command that followed it",
 );
 
@@ -1225,7 +1272,132 @@ handleNotification("item/started", {
 assert.equal(state.pendingUser, null, "the canonical item should replace its correlated optimistic prompt");
 assert.equal(pendingNode.parentNode, null);
 assert.equal(state.items.has("pending-correlation"), false);
-assert.equal(state.items.has("canonical-correlation-user"), true);
+assert.equal(
+  state.items.has(renderedItemKey(
+    "canonical-correlation-user",
+    "reconcile-thread",
+    "correlation-turn",
+  )),
+  true,
+);
+
+cacheThreadSnapshot({
+  id: "aliased-items-thread",
+  status: { type: "active", activeFlags: [] },
+  turns: [{
+    id: "aliased-items-turn",
+    status: "inProgress",
+    items: [
+      {
+        id: "client-user-uuid",
+        type: "userMessage",
+        content: [{ type: "text", text: "Hello" }],
+      },
+      {
+        id: "msg-streamed-id",
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "Hello! What would you like to work on?",
+      },
+    ],
+  }],
+});
+const aliasedItems = mergeThreadSnapshot({
+  id: "aliased-items-thread",
+  status: { type: "idle" },
+  turns: [{
+    id: "aliased-items-turn",
+    status: "completed",
+    items: [
+      {
+        id: "item-1",
+        type: "userMessage",
+        content: [{ type: "text", text: "Hello", text_elements: [] }],
+      },
+      {
+        id: "item-2",
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "Hello! What would you like to work on?",
+      },
+    ],
+  }],
+});
+assert.deepEqual(
+  aliasedItems.thread.turns[0].items.map((item) => item.id),
+  ["item-1", "item-2"],
+  "snapshot IDs must replace equivalent streamed IDs without duplicating the messages",
+);
+state.threadId = "aliased-items-thread";
+renderThreadHistory(aliasedItems.thread);
+assert.equal(state.items.size, 2, "reconciled aliases should render one user/agent pair");
+handleNotification("item/completed", {
+  threadId: "aliased-items-thread",
+  turnId: "aliased-items-turn",
+  item: {
+    id: "msg-streamed-id",
+    type: "agentMessage",
+    phase: "final_answer",
+    text: "Hello! What would you like to work on?",
+  },
+});
+assert.deepEqual(
+  cachedThread("aliased-items-thread").thread.turns[0].items.map((item) => item.id),
+  ["item-1", "item-2"],
+  "later notifications using a streamed alias must update the canonical item",
+);
+assert.equal(state.items.size, 2, "an aliased completion must not append another message node");
+
+const reusedIdsThread = {
+  id: "reused-ids-thread",
+  status: { type: "active", activeFlags: [] },
+  turns: [
+    {
+      id: "old-turn",
+      status: "completed",
+      items: [
+        {
+          id: "item-1",
+          type: "userMessage",
+          content: [{ type: "text", text: "old prompt" }],
+        },
+        { id: "item-2", type: "agentMessage", text: "old response" },
+      ],
+    },
+    { id: "new-turn", status: "inProgress", items: [] },
+  ],
+};
+cacheThreadSnapshot(reusedIdsThread);
+state.threadId = reusedIdsThread.id;
+renderThreadHistory(reusedIdsThread);
+const oldUserKey = renderedItemKey("item-1", reusedIdsThread.id, "old-turn");
+const oldAgentKey = renderedItemKey("item-2", reusedIdsThread.id, "old-turn");
+handleNotification("item/started", {
+  threadId: reusedIdsThread.id,
+  turnId: "new-turn",
+  item: {
+    id: "item-1",
+    type: "userMessage",
+    content: [{ type: "text", text: "new prompt" }],
+  },
+});
+handleNotification("item/completed", {
+  threadId: reusedIdsThread.id,
+  turnId: "new-turn",
+  item: { id: "item-2", type: "agentMessage", text: "new response" },
+});
+const newUserKey = renderedItemKey("item-1", reusedIdsThread.id, "new-turn");
+const newAgentKey = renderedItemKey("item-2", reusedIdsThread.id, "new-turn");
+assert.equal(state.items.size, 4, "item IDs reused in a later turn must create distinct nodes");
+assert.equal(state.items.get(oldUserKey).body.textContent, "old prompt");
+assert.equal(state.items.get(oldAgentKey).body.textContent, "old response");
+assert.equal(state.items.get(newUserKey).body.textContent, "new prompt");
+assert.equal(state.items.get(newAgentKey).body.textContent, "new response");
+assert.ok(
+  ui.messages.children.indexOf(state.items.get(oldAgentKey).node)
+    < ui.messages.children.indexOf(state.items.get(newUserKey).node),
+  "a reused item ID must not move a later turn into an older node's position",
+);
 
 for (let index = 0; index < THREAD_CACHE_LIMIT + 2; index += 1) {
   cacheThreadSnapshot({ id: `lru-${index}`, turns: [] });

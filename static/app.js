@@ -107,6 +107,7 @@ const state = {
   submittingViews: new Set(),
   selectionId: 0,
   threads: [],
+  provisionalThreads: new Map(),
   threadRefreshId: 0,
   threadCache: new Map(),
   threadReconciliations: new Map(),
@@ -340,6 +341,106 @@ function mergeOrderedById(authoritative = [], live = [], mergeItem = null) {
   return merged;
 }
 
+function threadItemText(item) {
+  switch (item?.type) {
+    case "userMessage":
+      return inputText(item.content);
+    case "agentMessage":
+    case "plan":
+      return typeof item.text === "string" ? item.text : "";
+    case "reasoning":
+      return reasoningText(item.summary);
+    default:
+      return null;
+  }
+}
+
+function threadItemMatchScore(authoritative, live) {
+  if (!authoritative?.type || authoritative.type !== live?.type) return 0;
+  if (
+    authoritative.type === "agentMessage"
+    && authoritative.phase
+    && live.phase
+    && authoritative.phase !== live.phase
+  ) return 0;
+  const sourceText = threadItemText(authoritative);
+  const liveText = threadItemText(live);
+  if (sourceText === null || liveText === null || !sourceText || !liveText) return 0;
+  if (sourceText === liveText) return 2;
+  if (!["agentMessage", "plan"].includes(authoritative.type)) return 0;
+  if (Math.min(sourceText.length, liveText.length) < 12) return 0;
+  return sourceText.startsWith(liveText) || liveText.startsWith(sourceText) ? 1 : 0;
+}
+
+function canonicalizeStreamedItems(authoritative = [], live = [], onItemAlias = null) {
+  const canonical = Array.isArray(authoritative) ? authoritative : [];
+  const streamed = Array.isArray(live) ? live : [];
+  const canonicalUserIndexes = canonical.flatMap((item, index) => (
+    item?.type === "userMessage" ? [index] : []
+  ));
+  const streamedUserCount = streamed.filter((item) => item?.type === "userMessage").length;
+  const canonicalIds = new Map(canonical.flatMap((item, index) => (
+    item?.id == null ? [] : [[String(item.id), index]]
+  )));
+  const exactStreamedIds = new Set(
+    streamed.flatMap((item) => item?.id == null ? [] : [String(item.id)]),
+  );
+  const claimed = new Set();
+  const normalized = [];
+  const normalizedIndexes = new Map();
+
+  for (const item of streamed) {
+    if (!item || typeof item !== "object") continue;
+    const itemId = item.id == null ? null : String(item.id);
+    let canonicalIndex = itemId == null ? undefined : canonicalIds.get(itemId);
+    if (canonicalIndex === undefined) {
+      const matches = canonical
+        .map((candidate, index) => ({
+          candidate,
+          index,
+          score: threadItemMatchScore(candidate, item),
+        }))
+        .filter(({ score }) => score > 0)
+        .sort((left, right) => right.score - left.score || left.index - right.index);
+      canonicalIndex = matches.find(({ candidate, index }) => (
+        !claimed.has(index) && !exactStreamedIds.has(String(candidate.id))
+      ))?.index;
+      if (canonicalIndex === undefined) {
+        canonicalIndex = matches.find(({ candidate }) => (
+          exactStreamedIds.has(String(candidate.id))
+        ))?.index;
+      }
+      if (
+        canonicalIndex === undefined
+        && item.type === "userMessage"
+        && canonicalUserIndexes.length === 1
+        && streamedUserCount === 1
+      ) {
+        canonicalIndex = canonicalUserIndexes[0];
+      }
+    }
+
+    const source = canonicalIndex === undefined ? null : canonical[canonicalIndex];
+    const normalizedItem = source ? { ...item, id: source.id } : { ...item };
+    const normalizedId = normalizedItem.id == null ? null : String(normalizedItem.id);
+    if (source) {
+      claimed.add(canonicalIndex);
+      if (itemId !== normalizedId) onItemAlias?.(source, item);
+    }
+    const existingIndex = normalizedId == null ? undefined : normalizedIndexes.get(normalizedId);
+    if (existingIndex === undefined) {
+      if (normalizedId !== null) normalizedIndexes.set(normalizedId, normalized.length);
+      normalized.push(normalizedItem);
+    } else {
+      normalized[existingIndex] = mergeThreadItem(
+        normalized[existingIndex],
+        normalizedItem,
+      );
+    }
+  }
+  return normalized;
+}
+
 function mergeThreadItem(authoritative, live) {
   if (!live) return { ...authoritative };
   const merged = { ...live, ...authoritative };
@@ -370,7 +471,12 @@ function mergeThreadItem(authoritative, live) {
   return merged;
 }
 
-function mergeTurnSnapshot(authoritative, live) {
+function mergeTurnSnapshot(
+  authoritative,
+  live,
+  onItemAlias = null,
+  canonicalizeAliases = true,
+) {
   if (!live) {
     return {
       ...authoritative,
@@ -378,7 +484,14 @@ function mergeTurnSnapshot(authoritative, live) {
     };
   }
   const merged = { ...live, ...authoritative };
-  merged.items = mergeOrderedById(authoritative?.items, live?.items, mergeThreadItem);
+  const liveItems = canonicalizeAliases
+    ? canonicalizeStreamedItems(authoritative?.items, live?.items, onItemAlias)
+    : live?.items;
+  merged.items = mergeOrderedById(
+    authoritative?.items,
+    liveItems,
+    mergeThreadItem,
+  );
   if (
     authoritative?.status === "inProgress"
     && live?.status
@@ -389,7 +502,7 @@ function mergeTurnSnapshot(authoritative, live) {
   return merged;
 }
 
-function mergeThreadData(authoritative, live) {
+function mergeThreadData(authoritative, live, onItemAlias = null) {
   if (!live) {
     return {
       ...authoritative,
@@ -397,7 +510,15 @@ function mergeThreadData(authoritative, live) {
     };
   }
   const merged = { ...live, ...authoritative };
-  merged.turns = mergeOrderedById(authoritative?.turns, live?.turns, mergeTurnSnapshot);
+  merged.turns = mergeOrderedById(
+    authoritative?.turns,
+    live?.turns,
+    (source, cached) => mergeTurnSnapshot(
+      source,
+      cached,
+      (canonical, streamed) => onItemAlias?.(source.id, canonical, streamed),
+    ),
+  );
   return merged;
 }
 
@@ -431,6 +552,7 @@ function cacheThreadSnapshot(thread) {
     scrollTop: previous?.scrollTop || 0,
     followPresent: previous?.followPresent ?? true,
     pendingUser: previous?.pendingUser || null,
+    itemAliases: previous?.itemAliases || new Map(),
   };
   state.threadCache.set(thread.id, entry);
   pruneThreadCache();
@@ -441,9 +563,13 @@ function mergeThreadSnapshot(thread) {
   if (!thread?.id) return null;
   const previous = state.threadCache.get(thread.id);
   if (!previous) return cacheThreadSnapshot(thread);
+  const itemAliases = previous.itemAliases || new Map();
   const entry = {
     ...previous,
-    thread: mergeThreadData(thread, previous.thread),
+    thread: mergeThreadData(thread, previous.thread, (turnId, canonical, streamed) => {
+      rememberCachedItemAlias({ itemAliases }, turnId, canonical, streamed);
+    }),
+    itemAliases,
     generation: state.connectionGeneration,
     lastAccess: Date.now(),
   };
@@ -459,6 +585,37 @@ function cachedThread(threadId, touch = true) {
   const entry = state.threadCache.get(threadId) || null;
   if (entry && touch) entry.lastAccess = Date.now();
   return entry;
+}
+
+function cachedItemAliasKey(turnId, itemId) {
+  return JSON.stringify([String(turnId), String(itemId)]);
+}
+
+function rememberCachedItemAlias(entry, turnId, canonical, streamed) {
+  if (turnId == null || canonical?.id == null || streamed?.id == null) return;
+  if (!entry.itemAliases) entry.itemAliases = new Map();
+  entry.itemAliases.set(
+    cachedItemAliasKey(turnId, streamed.id),
+    String(canonical.id),
+  );
+}
+
+function resolvedCachedItemId(entry, turnId, itemId) {
+  if (itemId == null) return itemId;
+  if (turnId == null) return String(itemId);
+  let resolved = String(itemId);
+  const visited = new Set([resolved]);
+  while (entry?.itemAliases?.has(cachedItemAliasKey(turnId, resolved))) {
+    const next = entry.itemAliases.get(cachedItemAliasKey(turnId, resolved));
+    if (visited.has(next)) break;
+    resolved = next;
+    visited.add(resolved);
+  }
+  return resolved;
+}
+
+function resolvedThreadItemId(threadId, turnId, itemId) {
+  return resolvedCachedItemId(cachedThread(threadId, false), turnId, itemId);
 }
 
 function saveCurrentThreadView() {
@@ -525,7 +682,7 @@ function cacheTurnUpdate(threadId, turn, fallbackStatus = "inProgress") {
     };
     entry.thread.turns.push(cached);
   } else {
-    const merged = mergeTurnSnapshot(turn, cached);
+    const merged = mergeTurnSnapshot(turn, cached, null, false);
     Object.assign(cached, merged);
   }
   entry.lastAccess = Date.now();
@@ -546,9 +703,10 @@ function cacheItemUpdate(params) {
   }
   if (!turn) return;
   if (!Array.isArray(turn.items)) turn.items = [];
-  const index = turn.items.findIndex((candidate) => candidate.id === item.id);
-  if (index >= 0) Object.assign(turn.items[index], item);
-  else turn.items.push({ ...item });
+  const itemId = resolvedCachedItemId(entry, params.turnId, item.id);
+  const index = turn.items.findIndex((candidate) => String(candidate.id) === itemId);
+  if (index >= 0) Object.assign(turn.items[index], item, { id: itemId });
+  else turn.items.push({ ...item, id: itemId });
   if (
     item.type === "userMessage"
     && pendingUserMatches(entry.pendingUser, item, params.threadId, params.turnId)
@@ -570,9 +728,10 @@ function cachedItem(threadId, turnId, itemId, type) {
   }
   if (!turn) return null;
   if (!Array.isArray(turn.items)) turn.items = [];
-  let item = turn.items.find((candidate) => candidate.id === itemId);
+  const resolvedItemId = resolvedCachedItemId(entry, turnId, itemId);
+  let item = turn.items.find((candidate) => String(candidate.id) === resolvedItemId);
   if (!item) {
-    item = { id: itemId, type };
+    item = { id: resolvedItemId, type };
     turn.items.push(item);
   }
   return item;
@@ -1585,8 +1744,16 @@ function searchItemText(item) {
 }
 
 function locateSearchItem(result, query) {
-  if (result.itemId && state.items.has(result.itemId)) {
-    return { itemId: result.itemId, exact: true };
+  if (result.itemId) {
+    const exactKey = result.turnId
+      ? renderedItemKey(result.itemId, result.threadId, result.turnId)
+      : [...state.items.entries()].find(([, item]) => (
+        String(item.itemId) === String(result.itemId)
+        && String(item.threadId) === String(result.threadId)
+      ))?.[0];
+    if (exactKey && state.items.has(exactKey)) {
+      return { itemKey: exactKey, exact: true };
+    }
   }
   const entry = cachedThread(result.threadId, false);
   if (!entry) return null;
@@ -1595,24 +1762,29 @@ function locateSearchItem(result, query) {
     const matchingTurn = turns.find((turn) => String(turn.id) === result.turnId);
     if (matchingTurn) turns = [matchingTurn];
   }
-  let candidates = turns.flatMap((turn) => turn.items || []).filter((item) => (
-    item?.id && state.items.has(item.id) && ["userMessage", "agentMessage"].includes(item.type)
+  let candidates = turns.flatMap((turn) => (turn.items || []).map((item) => ({
+    item,
+    itemKey: renderedItemKey(item?.id, result.threadId, turn.id),
+  }))).filter(({ item, itemKey }) => (
+    item?.id && state.items.has(itemKey) && ["userMessage", "agentMessage"].includes(item.type)
   ));
   const type = result.role === "user"
     ? "userMessage"
     : (result.role === "assistant" ? "agentMessage" : "");
-  const roleCandidates = type ? candidates.filter((item) => item.type === type) : [];
+  const roleCandidates = type
+    ? candidates.filter(({ item }) => item.type === type)
+    : [];
   if (roleCandidates.length) candidates = roleCandidates;
   const needle = String(query || "").trim().toLocaleLowerCase();
   const textMatch = needle
-    ? candidates.find((item) => searchItemText(item).toLocaleLowerCase().includes(needle))
+    ? candidates.find(({ item }) => searchItemText(item).toLocaleLowerCase().includes(needle))
     : null;
   const selected = textMatch || candidates[0];
-  return selected ? { itemId: String(selected.id), exact: false } : null;
+  return selected ? { itemKey: selected.itemKey, exact: false } : null;
 }
 
-function focusSearchItem(itemId) {
-  const node = state.items.get(itemId)?.node;
+function focusSearchItem(itemKey) {
+  const node = state.items.get(itemKey)?.node;
   if (!node) return false;
   node.setAttribute("tabindex", "-1");
   node.classList.add("search-match");
@@ -1648,7 +1820,7 @@ async function openSearchResult(result, query, button) {
       return;
     }
     const match = locateSearchItem(result, query);
-    if (match && focusSearchItem(match.itemId)) {
+    if (match && focusSearchItem(match.itemKey)) {
       notice(match.exact ? "" : "Opened the matching turn; the exact message position was unavailable.");
     } else {
       notice("Opened the conversation; the exact matching message could not be positioned.");
@@ -2118,6 +2290,7 @@ function handleNotification(method, params) {
       notice(params.message || "Proxy error");
       return;
     case "thread/started":
+      if (params.thread?.id) showStartedThread(params.thread);
       refreshThreads();
       return;
     case "thread/name/updated":
@@ -2127,9 +2300,11 @@ function handleNotification(method, params) {
       refreshThreads();
       return;
     case "thread/archived":
+      state.provisionalThreads.delete(params.threadId);
       refreshThreads();
       return;
     case "thread/deleted":
+      state.provisionalThreads.delete(params.threadId);
       state.threadCache.delete(params.threadId);
       state.threadReconciliations.delete(params.threadId);
       state.composerDrafts.delete(threadComposerKey(params.threadId));
@@ -2190,22 +2365,58 @@ function handleNotification(method, params) {
     case "item/agentMessage/delta":
       appendCachedText(params, "agentMessage");
       reconcileMissingTurnPrefix(params);
-      if (params.threadId === state.threadId) upsertMessage(params.itemId, "agent", params.delta, true);
+      if (params.threadId === state.threadId) {
+        upsertMessage(
+          resolvedThreadItemId(params.threadId, params.turnId, params.itemId),
+          "agent",
+          params.delta,
+          true,
+          params.threadId,
+          params.turnId,
+        );
+      }
       return;
     case "item/plan/delta":
       appendCachedText(params, "plan");
       reconcileMissingTurnPrefix(params);
-      if (params.threadId === state.threadId) upsertActivity(params.itemId, "plan", params.delta, true);
+      if (params.threadId === state.threadId) {
+        upsertActivity(
+          resolvedThreadItemId(params.threadId, params.turnId, params.itemId),
+          "plan",
+          params.delta,
+          true,
+          params.threadId,
+          params.turnId,
+        );
+      }
       return;
     case "item/reasoning/summaryTextDelta":
       appendCachedReasoning(params);
       reconcileMissingTurnPrefix(params);
-      if (params.threadId === state.threadId) upsertActivity(params.itemId, "reasoning", params.delta, true);
+      if (params.threadId === state.threadId) {
+        upsertActivity(
+          resolvedThreadItemId(params.threadId, params.turnId, params.itemId),
+          "reasoning",
+          params.delta,
+          true,
+          params.threadId,
+          params.turnId,
+        );
+      }
       return;
     case "item/commandExecution/outputDelta":
       appendCachedText(params, "commandExecution", "aggregatedOutput");
       reconcileMissingTurnPrefix(params);
-      if (params.threadId === state.threadId) upsertActivity(params.itemId, "command", params.delta, true);
+      if (params.threadId === state.threadId) {
+        upsertActivity(
+          resolvedThreadItemId(params.threadId, params.turnId, params.itemId),
+          "command",
+          params.delta,
+          true,
+          params.threadId,
+          params.turnId,
+        );
+      }
       return;
     case "serverRequest/resolved":
       removeRequest(params.requestId);
@@ -2275,6 +2486,13 @@ function appendMessageNode(node) {
   }
 }
 
+function renderedItemKey(itemId, threadId = state.threadId, turnId = null) {
+  // App-server item counters can restart, so an item ID is only safe within
+  // its turn. Scoping the DOM key prevents a new turn from updating an old node.
+  if (threadId == null || turnId == null) return String(itemId);
+  return JSON.stringify([String(threadId), String(turnId), String(itemId)]);
+}
+
 function renderMessageBody(entry) {
   const renderMarkdown = globalThis.CodexMarkdown?.render;
   if (typeof renderMarkdown !== "function") {
@@ -2298,10 +2516,18 @@ function renderMessageBody(entry) {
   entry.renderFrame = window.requestAnimationFrame(commit);
 }
 
-function upsertMessage(id, role, text, append = false) {
+function upsertMessage(
+  id,
+  role,
+  text,
+  append = false,
+  threadId = state.threadId,
+  turnId = null,
+) {
   const shouldFollow = state.followPresent && messagesAtPresent();
   removeEmpty();
-  let entry = state.items.get(id);
+  const itemKey = renderedItemKey(id, threadId, turnId);
+  let entry = state.items.get(itemKey);
   if (!entry || entry.kind !== "message") {
     const node = document.createElement("article");
     node.className = `message ${role}`;
@@ -2312,8 +2538,17 @@ function upsertMessage(id, role, text, append = false) {
     body.className = "body";
     node.append(label, body);
     appendMessageNode(node);
-    entry = { kind: "message", node, body, text: "", renderFrame: null };
-    state.items.set(id, entry);
+    entry = {
+      kind: "message",
+      node,
+      body,
+      text: "",
+      renderFrame: null,
+      itemId: String(id),
+      threadId,
+      turnId,
+    };
+    state.items.set(itemKey, entry);
   }
   entry.text = append ? entry.text + (text || "") : (text || "");
   renderMessageBody(entry);
@@ -2321,10 +2556,18 @@ function upsertMessage(id, role, text, append = false) {
   return entry.node;
 }
 
-function upsertActivity(id, title, text, append = false) {
+function upsertActivity(
+  id,
+  title,
+  text,
+  append = false,
+  threadId = state.threadId,
+  turnId = null,
+) {
   const shouldFollow = state.followPresent && messagesAtPresent();
   removeEmpty();
-  let entry = state.items.get(id);
+  const itemKey = renderedItemKey(id, threadId, turnId);
+  let entry = state.items.get(itemKey);
   if (!entry || entry.kind !== "activity") {
     const node = document.createElement("details");
     node.className = "activity";
@@ -2332,8 +2575,18 @@ function upsertActivity(id, title, text, append = false) {
     const body = document.createElement("pre");
     node.append(summary, body);
     appendMessageNode(node);
-    entry = { kind: "activity", node, summary, body, text: "", totalChars: 0 };
-    state.items.set(id, entry);
+    entry = {
+      kind: "activity",
+      node,
+      summary,
+      body,
+      text: "",
+      totalChars: 0,
+      itemId: String(id),
+      threadId,
+      turnId,
+    };
+    state.items.set(itemKey, entry);
   }
   entry.summary.textContent = title;
   const incoming = typeof text === "string" ? text : (text == null ? "" : String(text));
@@ -2484,6 +2737,7 @@ function fileChangeText(item) {
 
 function renderItem(item, completed, threadId = state.threadId, turnId = null) {
   if (!item?.id || !item.type) return;
+  const itemId = resolvedThreadItemId(threadId, turnId, item.id);
   switch (item.type) {
     case "userMessage":
       if (pendingUserMatches(state.pendingUser, item, threadId, turnId)) {
@@ -2491,40 +2745,86 @@ function renderItem(item, completed, threadId = state.threadId, turnId = null) {
         state.items.delete(state.pendingUser.id);
         state.pendingUser = null;
       }
-      upsertMessage(item.id, "user", inputText(item.content));
+      upsertMessage(itemId, "user", inputText(item.content), false, threadId, turnId);
       break;
     case "agentMessage":
-      upsertMessage(item.id, "agent", item.text || "");
+      upsertMessage(itemId, "agent", item.text || "", false, threadId, turnId);
       break;
     case "plan":
-      upsertActivity(item.id, "plan", item.text || "");
+      upsertActivity(itemId, "plan", item.text || "", false, threadId, turnId);
       break;
     case "reasoning": {
       const summary = reasoningText(item.summary);
-      if (summary) upsertActivity(item.id, "reasoning summary", summary);
+      if (summary) {
+        upsertActivity(itemId, "reasoning summary", summary, false, threadId, turnId);
+      }
       break;
     }
     case "commandExecution": {
       const status = completed ? item.status : `${item.status || "running"}…`;
-      upsertActivity(item.id, `$ ${item.command} · ${status}`, item.aggregatedOutput || "");
+      upsertActivity(
+        itemId,
+        `$ ${item.command} · ${status}`,
+        item.aggregatedOutput || "",
+        false,
+        threadId,
+        turnId,
+      );
       break;
     }
     case "fileChange":
-      upsertActivity(item.id, `files · ${item.status || "pending"}`, fileChangeText(item));
+      upsertActivity(
+        itemId,
+        `files · ${item.status || "pending"}`,
+        fileChangeText(item),
+        false,
+        threadId,
+        turnId,
+      );
       break;
     case "mcpToolCall":
-      upsertActivity(item.id, `${item.server}/${item.tool} · ${item.status}`, JSON.stringify(item.result || item.error || item.arguments || {}, null, 2));
+      upsertActivity(
+        itemId,
+        `${item.server}/${item.tool} · ${item.status}`,
+        JSON.stringify(item.result || item.error || item.arguments || {}, null, 2),
+        false,
+        threadId,
+        turnId,
+      );
       break;
     case "dynamicToolCall":
-      upsertActivity(item.id, `${item.tool} · ${item.status}`, JSON.stringify(item.contentItems || item.arguments || {}, null, 2));
+      upsertActivity(
+        itemId,
+        `${item.tool} · ${item.status}`,
+        JSON.stringify(item.contentItems || item.arguments || {}, null, 2),
+        false,
+        threadId,
+        turnId,
+      );
       break;
     case "webSearch":
-      upsertActivity(item.id, `search · ${item.query}`, "");
+      upsertActivity(
+        itemId,
+        `search · ${item.query}`,
+        "",
+        false,
+        threadId,
+        turnId,
+      );
       break;
     case "contextCompaction":
       break;
     default:
-      if (completed) upsertActivity(item.id, item.type, JSON.stringify(item, null, 2));
+      if (completed) {
+        upsertActivity(
+          itemId,
+          item.type,
+          JSON.stringify(item, null, 2),
+          false,
+          threadId,
+          turnId,
+        );
+      }
   }
 }
 
@@ -2670,13 +2970,35 @@ function renderThreads(threads, reconcileActivity = false) {
   }
 }
 
+function showStartedThread(thread) {
+  if (!thread?.id) return false;
+  state.provisionalThreads.set(thread.id, thread);
+  renderThreads([
+    thread,
+    ...state.threads.filter((candidate) => candidate.id !== thread.id),
+  ]);
+  return true;
+}
+
+function mergeProvisionalThreads(threads) {
+  const listed = Array.isArray(threads) ? threads : [];
+  const listedIds = new Set(listed.map((thread) => thread?.id).filter(Boolean));
+  for (const threadId of listedIds) state.provisionalThreads.delete(threadId);
+  return [
+    ...listed,
+    ...[...state.provisionalThreads.values()].filter(
+      (thread) => !listedIds.has(thread.id),
+    ),
+  ];
+}
+
 async function refreshThreads() {
   if (!state.ready) return;
   const refreshId = ++state.threadRefreshId;
   try {
     const result = await rpc("thread/list", THREAD_LIST_PARAMS);
     if (refreshId !== state.threadRefreshId) return;
-    renderThreads(result?.data || [], true);
+    renderThreads(mergeProvisionalThreads(result?.data), true);
   } catch (error) {
     notice(error.message);
   }
@@ -2828,8 +3150,8 @@ async function submitPrompt(event) {
         ui.title.textContent = threadLabel(started.thread);
         replaceThreadLocation(targetThreadId);
         renderChatSettings();
-        renderThreads(state.threads);
       }
+      showStartedThread(started.thread);
     }
     const result = await rpc("turn/start", {
       threadId: targetThreadId,
@@ -3089,7 +3411,9 @@ if (globalThis.CODEX_WEB_TEST) {
     cacheTurnUpdate,
     cachedThread,
     mergeOrderedById,
+    mergeProvisionalThreads,
     mergeThreadSnapshot,
+    renderedItemKey,
     handleNotification,
     handleMessagesScroll,
     isSearchSelectionCurrent,
@@ -3102,6 +3426,7 @@ if (globalThis.CODEX_WEB_TEST) {
     selectedThreadBusy,
     selectedTurnId,
     setThreadActivity,
+    showStartedThread,
     cancelSidebarSwipe,
     cancelSidebarResize,
     clampSidebarWidth,
