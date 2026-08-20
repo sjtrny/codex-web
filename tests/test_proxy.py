@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from aiohttp import ClientSession, FormData, WSMsgType, web
 
@@ -107,6 +108,13 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
                 "CODEX_APP_SERVER_SOCKET",
                 "CODEX_APP_SERVER_URL",
                 "CODEX_WORKSPACE_ROOT",
+                "CODEX_DEFAULT_MODEL",
+                "CODEX_DEFAULT_REASONING_EFFORT",
+                "CODEX_DEFAULT_SERVICE_TIER",
+                "CODEX_DEFAULT_PERSONALITY",
+                "CODEX_DEFAULT_REASONING_SUMMARY",
+                "CODEX_DEFAULT_APPROVAL_POLICY",
+                "CODEX_DEFAULT_PERMISSION_PROFILE",
                 "CODEX_UPLOAD_DIR",
                 "CODEX_UPLOAD_HOST_DIR",
                 "CODEX_UPLOAD_MAX_BYTES",
@@ -114,6 +122,8 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
                 "CODEX_UPLOAD_TOTAL_BYTES",
             )
         }
+        for name in codex_web.CHAT_SETTING_ENV_VARS.values():
+            os.environ.pop(name, None)
         os.environ["CODEX_APP_SERVER_SOCKET"] = self.socket_path
         os.environ.pop("CODEX_APP_SERVER_URL", None)
         self.workspace_path = Path(self.tempdir.name) / "workspaces"
@@ -357,6 +367,38 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 200)
             self.assertEqual(config["workspaceRoot"], str(self.workspace_path))
             self.assertEqual(config["version"], "0.9.3")
+            self.assertEqual(config["chatDefaults"], codex_web.DEFAULT_CHAT_SETTINGS)
+
+    async def test_config_exposes_chat_default_environment_overrides(self) -> None:
+        configured = {
+            "CODEX_DEFAULT_MODEL": "gpt-5.6-sol",
+            "CODEX_DEFAULT_REASONING_EFFORT": "max",
+            "CODEX_DEFAULT_SERVICE_TIER": "priority",
+            "CODEX_DEFAULT_PERSONALITY": "friendly",
+            "CODEX_DEFAULT_REASONING_SUMMARY": "detailed",
+            "CODEX_DEFAULT_APPROVAL_POLICY": "never",
+            "CODEX_DEFAULT_PERMISSION_PROFILE": ":danger-full-access",
+        }
+        with patch.dict(os.environ, configured):
+            async with (
+                ClientSession() as session,
+                session.get(f"http://127.0.0.1:{self.port}/api/config") as response,
+            ):
+                config = await response.json()
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(
+            config["chatDefaults"],
+            {
+                "model": "gpt-5.6-sol",
+                "effort": "max",
+                "serviceTier": "priority",
+                "personality": "friendly",
+                "summary": "detailed",
+                "approvalPolicy": "never",
+                "permissions": ":danger-full-access",
+            },
+        )
 
     async def test_searches_all_thread_pages_and_filters_message_dates(self) -> None:
         self.search_list_pages = {

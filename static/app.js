@@ -32,6 +32,36 @@ const CHAT_SETTING_FIELDS = [
   "approvalPolicy",
   "permissions",
 ];
+const APPROVAL_POLICY_LABELS = Object.freeze({
+  untrusted: "Only untrusted commands",
+  "on-request": "Ask when needed",
+  never: "Never ask",
+});
+const PERMISSION_PROFILE_LABELS = Object.freeze({
+  ":read-only": "Read only",
+  ":workspace": "Workspace access",
+  ":danger-full-access": "Full access",
+});
+const PERSONALITY_LABELS = Object.freeze({
+  none: "None",
+  friendly: "Friendly",
+  pragmatic: "Pragmatic",
+});
+const SUMMARY_LABELS = Object.freeze({
+  auto: "Automatic",
+  concise: "Concise",
+  detailed: "Detailed",
+  none: "Off",
+});
+const UNSET_CHAT_SETTING_LABELS = Object.freeze({
+  model: "App-server model",
+  effort: "Model default",
+  serviceTier: "Standard",
+  personality: "App-server setting",
+  summary: "App-server setting",
+  approvalPolicy: "App-server policy",
+  permissions: "App-server profile",
+});
 
 function emptyChatSettings() {
   return Object.fromEntries(CHAT_SETTING_FIELDS.map((field) => [field, ""]));
@@ -118,6 +148,7 @@ const state = {
   configRequirements: null,
   permissionProfiles: [],
   permissionProfilesLoaded: false,
+  chatDefaults: emptyChatSettings(),
   settingsByThread: new Map(),
   newThreadSettings: emptyChatSettings(),
   settingsOpen: false,
@@ -801,6 +832,15 @@ function normalizeChatSettings(value = {}) {
   return normalized;
 }
 
+function effectiveChatSettings(value = {}) {
+  const overrides = normalizeChatSettings(value);
+  const effective = normalizeChatSettings(state.chatDefaults);
+  for (const field of CHAT_SETTING_FIELDS) {
+    if (overrides[field]) effective[field] = overrides[field];
+  }
+  return effective;
+}
+
 function currentChatSettings() {
   if (!state.threadId) return state.newThreadSettings;
   if (!state.settingsByThread.has(state.threadId)) {
@@ -837,10 +877,35 @@ function persistChatSettings() {
 }
 
 function modelForSettings(settings) {
-  const modelId = settings.model
+  const effective = effectiveChatSettings(settings);
+  const modelId = effective.model
     || state.configDefaults.model
     || state.models.find((model) => model.isDefault)?.model;
   return state.models.find((model) => model.model === modelId || model.id === modelId) || null;
+}
+
+function chatSettingValueLabel(field, value) {
+  if (!value) return UNSET_CHAT_SETTING_LABELS[field] || "App-server setting";
+  if (field === "model") {
+    return state.models.find((model) => model.model === value || model.id === value)?.displayName
+      || value;
+  }
+  if (field === "serviceTier") {
+    const model = modelForSettings(state.chatDefaults);
+    return model?.serviceTiers?.find((tier) => tier.id === value)?.name || value;
+  }
+  if (field === "personality") return PERSONALITY_LABELS[value] || value;
+  if (field === "summary") return SUMMARY_LABELS[value] || value;
+  if (field === "approvalPolicy") return APPROVAL_POLICY_LABELS[value] || value;
+  if (field === "permissions") return PERMISSION_PROFILE_LABELS[value] || value;
+  return value;
+}
+
+function defaultChatSettingOption(field) {
+  return {
+    value: "",
+    label: `Instance default — ${chatSettingValueLabel(field, state.chatDefaults[field])}`,
+  };
 }
 
 function fillSelect(select, options, selectedValue) {
@@ -857,32 +922,22 @@ function fillSelect(select, options, selectedValue) {
 }
 
 function approvalOptions() {
-  const labels = {
-    untrusted: "Only untrusted commands",
-    "on-request": "Ask when needed",
-    never: "Never ask",
-  };
   const allowed = state.configRequirements?.allowedApprovalPolicies;
   const values = Array.isArray(allowed)
     ? allowed.filter((value) => typeof value === "string")
-    : Object.keys(labels);
+    : Object.keys(APPROVAL_POLICY_LABELS);
   return [
-    { value: "", label: "Inherit current thread" },
-    ...values.map((value) => ({ value, label: labels[value] || value })),
+    defaultChatSettingOption("approvalPolicy"),
+    ...values.map((value) => ({ value, label: APPROVAL_POLICY_LABELS[value] || value })),
   ];
 }
 
 function permissionOptions() {
-  const labels = {
-    ":read-only": "Read only",
-    ":workspace": "Workspace access",
-    ":danger-full-access": "Full access",
-  };
   return [
-    { value: "", label: "Inherit current thread" },
+    defaultChatSettingOption("permissions"),
     ...state.permissionProfiles.map((profile) => ({
       value: profile.id,
-      label: labels[profile.id] || profile.id,
+      label: PERMISSION_PROFILE_LABELS[profile.id] || profile.id,
       description: profile.description,
       disabled: !profile.allowed,
     })),
@@ -899,7 +954,7 @@ function renderChatSettings() {
     settings.model = "";
   }
   const modelOptions = [
-    { value: "", label: "Inherit current thread" },
+    defaultChatSettingOption("model"),
     ...state.models.map((model) => ({
       value: model.model,
       label: model.displayName,
@@ -911,7 +966,7 @@ function renderChatSettings() {
   const model = modelForSettings(settings);
   const efforts = model?.supportedReasoningEfforts || [];
   const effortOptions = [
-    { value: "", label: "Inherit current thread" },
+    defaultChatSettingOption("effort"),
     ...efforts.map((entry) => ({
       value: entry.reasoningEffort,
       label: entry.reasoningEffort,
@@ -932,7 +987,7 @@ function renderChatSettings() {
     settings.serviceTier = "";
   }
   fillSelect(ui.settingServiceTier, [
-    { value: "", label: "Inherit current thread" },
+    defaultChatSettingOption("serviceTier"),
     ...tiers.map((tier) => ({ value: tier.id, label: tier.name, description: tier.description })),
   ], settings.serviceTier);
   ui.settingServiceTier.disabled = tiers.length === 0;
@@ -940,19 +995,14 @@ function renderChatSettings() {
   const personalitySupported = !model || model.supportsPersonality !== false;
   if (!personalitySupported) settings.personality = "";
   fillSelect(ui.settingPersonality, [
-    { value: "", label: "Inherit current thread" },
-    { value: "none", label: "None" },
-    { value: "friendly", label: "Friendly" },
-    { value: "pragmatic", label: "Pragmatic" },
+    defaultChatSettingOption("personality"),
+    ...Object.entries(PERSONALITY_LABELS).map(([value, label]) => ({ value, label })),
   ], settings.personality);
   ui.settingPersonality.disabled = !personalitySupported;
 
   fillSelect(ui.settingSummary, [
-    { value: "", label: "Inherit current thread" },
-    { value: "auto", label: "Automatic" },
-    { value: "concise", label: "Concise" },
-    { value: "detailed", label: "Detailed" },
-    { value: "none", label: "Off" },
+    defaultChatSettingOption("summary"),
+    ...Object.entries(SUMMARY_LABELS).map(([value, label]) => ({ value, label })),
   ], settings.summary);
   fillSelect(ui.settingApproval, approvalOptions(), settings.approvalPolicy);
   if (
@@ -968,7 +1018,7 @@ function renderChatSettings() {
 
   const count = CHAT_SETTING_FIELDS.filter((field) => settings[field]).length;
   const unavailable = !personalitySupported ? " Personality is unavailable for this model." : "";
-  ui.settingsNote.textContent = `${count || "No"} override${count === 1 ? "" : "s"} set. Changes apply to the next message and remain with this thread.${unavailable}`;
+  ui.settingsNote.textContent = `${count || "No"} override${count === 1 ? "" : "s"} set. Instance defaults apply wherever Default is selected. Changes apply to the next message and remain with this chat.${unavailable}`;
   persistChatSettings();
 }
 
@@ -3096,7 +3146,8 @@ async function submitPrompt(event) {
   const submissionComposerKey = state.composerKey;
   let targetComposerKey = submissionComposerKey;
   const cwd = ui.cwd.value || state.defaultCwd;
-  const chatSettings = { ...currentChatSettings() };
+  const chatSettingOverrides = { ...currentChatSettings() };
+  const chatSettings = effectiveChatSettings(chatSettingOverrides);
   let targetThreadId = state.threadId;
   clearComposerDraft(submissionComposerKey);
   state.attachments = [];
@@ -3137,7 +3188,7 @@ async function submitPrompt(event) {
       if (state.pendingUser?.id === pendingId) {
         state.pendingUser.threadId = targetThreadId;
       }
-      state.settingsByThread.set(targetThreadId, { ...chatSettings });
+      state.settingsByThread.set(targetThreadId, chatSettingOverrides);
       persistChatSettings();
       state.submittingThreads.add(targetThreadId);
       if (
@@ -3355,8 +3406,10 @@ async function boot() {
       workspaceRoot: config.workspaceRoot,
     });
     state.defaultCwd = config.defaultCwd || state.defaultCwd;
+    state.chatDefaults = normalizeChatSettings(config.chatDefaults);
     state.uploadLimits = config.uploads || null;
     ui.cwd.value = state.defaultCwd;
+    renderChatSettings();
   } catch (error) {
     notice(`Configuration error: ${error.message}`);
   }
@@ -3402,7 +3455,10 @@ if (globalThis.CODEX_WEB_TEST) {
     threadComposerKey,
     threadHref,
     threadIdFromSearch,
+    defaultChatSettingOption,
+    effectiveChatSettings,
     normalizeChatSettings,
+    renderChatSettings,
     threadSettingsParams,
     turnSettingsParams,
     beginNewThread,

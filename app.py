@@ -46,6 +46,24 @@ SEARCH_THREAD_PAGE_SIZE = 100
 SEARCH_TIMEOUT_SECONDS = 120
 SEARCH_RPC_TIMEOUT_SECONDS = 20
 CHAT_SOURCE_KINDS = ["cli", "vscode", "appServer"]
+DEFAULT_CHAT_SETTINGS = {
+    "model": "gpt-5.6-terra",
+    "effort": "medium",
+    "serviceTier": "",
+    "personality": "none",
+    "summary": "auto",
+    "approvalPolicy": "on-request",
+    "permissions": ":workspace",
+}
+CHAT_SETTING_ENV_VARS = {
+    "model": "CODEX_DEFAULT_MODEL",
+    "effort": "CODEX_DEFAULT_REASONING_EFFORT",
+    "serviceTier": "CODEX_DEFAULT_SERVICE_TIER",
+    "personality": "CODEX_DEFAULT_PERSONALITY",
+    "summary": "CODEX_DEFAULT_REASONING_SUMMARY",
+    "approvalPolicy": "CODEX_DEFAULT_APPROVAL_POLICY",
+    "permissions": "CODEX_DEFAULT_PERMISSION_PROFILE",
+}
 LOG = logging.getLogger("codex-web")
 ACTIVE_DOCUMENT_MIMES = {
     "application/xhtml+xml",
@@ -82,6 +100,13 @@ def env_int(name: str, default: int) -> int:
     if value < 1:
         raise RuntimeError(f"{name} must be positive")
     return value
+
+
+def chat_defaults() -> dict[str, str]:
+    return {
+        field: env(variable, DEFAULT_CHAT_SETTINGS[field])
+        for field, variable in CHAT_SETTING_ENV_VARS.items()
+    }
 
 
 def upload_limits() -> tuple[int, int, int]:
@@ -243,6 +268,7 @@ async def app_config(_: web.Request) -> web.Response:
         {
             "defaultCwd": env("CODEX_DEFAULT_CWD", "/workspaces"),
             "workspaceRoot": str(workspace_root()),
+            "chatDefaults": chat_defaults(),
             "uploads": {
                 "maxBytes": max_bytes,
                 "maxFiles": max_files,

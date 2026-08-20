@@ -73,6 +73,33 @@ CODEX_UPLOAD_DIR="$PWD/uploads" CODEX_UPLOAD_HOST_DIR="$PWD/uploads" \
 HOST=0.0.0.0 PORT=8765 .venv/bin/python app.py
 ```
 
+### Tune defaults
+
+Unset **Tune** fields use these instance defaults. Set them in `.env` for Docker
+Compose, or export them when running directly.
+
+| Environment variable | Built-in default |
+| --- | --- |
+| `CODEX_DEFAULT_MODEL` | `gpt-5.6-terra` |
+| `CODEX_DEFAULT_REASONING_EFFORT` | `medium` |
+| `CODEX_DEFAULT_SERVICE_TIER` | empty (standard service) |
+| `CODEX_DEFAULT_PERSONALITY` | `none` |
+| `CODEX_DEFAULT_REASONING_SUMMARY` | `auto` |
+| `CODEX_DEFAULT_APPROVAL_POLICY` | `on-request` |
+| `CODEX_DEFAULT_PERMISSION_PROFILE` | `:workspace` |
+
+Example: Sol, max reasoning, Fast, never ask, and full access:
+
+```dotenv
+CODEX_DEFAULT_MODEL=gpt-5.6-sol
+CODEX_DEFAULT_REASONING_EFFORT=max
+CODEX_DEFAULT_SERVICE_TIER=priority
+CODEX_DEFAULT_APPROVAL_POLICY=never
+CODEX_DEFAULT_PERMISSION_PROFILE=:danger-full-access
+```
+
+Values are app-server protocol IDs. Restart the web service after changing them.
+
 ## Security
 
 The UI is unauthenticated and listens on all interfaces. Keep it behind a VPN

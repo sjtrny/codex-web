@@ -252,6 +252,8 @@ const {
   isSearchSelectionCurrent,
   jumpToPresent,
   normalizeSearchResponse,
+  defaultChatSettingOption,
+  effectiveChatSettings,
   normalizeChatSettings,
   parseSearchDate,
   pendingPromptText,
@@ -261,6 +263,7 @@ const {
   renderThreadHistory,
   renderThinkingIndicator,
   renderLocalPrompt,
+  renderChatSettings,
   renderThemeControl,
   renderThreads,
   selectedThreadBusy,
@@ -571,6 +574,75 @@ assert.deepEqual(threadSettingsParams(chatSettings), {
   permissions: ":workspace",
 });
 assert.deepEqual(turnSettingsParams(normalizeChatSettings(null)), {});
+
+state.chatDefaults = normalizeChatSettings({
+  model: "gpt-5.6-sol",
+  effort: "max",
+  serviceTier: "priority",
+  personality: "none",
+  summary: "auto",
+  approvalPolicy: "never",
+  permissions: ":danger-full-access",
+});
+const effectiveSettings = effectiveChatSettings(normalizeChatSettings({
+  effort: "high",
+  summary: "detailed",
+}));
+assert.deepEqual(effectiveSettings, {
+  model: "gpt-5.6-sol",
+  effort: "high",
+  serviceTier: "priority",
+  personality: "none",
+  summary: "detailed",
+  approvalPolicy: "never",
+  permissions: ":danger-full-access",
+});
+assert.deepEqual(turnSettingsParams(effectiveSettings), effectiveSettings);
+
+state.models = [{
+  model: "gpt-5.6-sol",
+  displayName: "GPT-5.6-Sol",
+  isDefault: true,
+  supportedReasoningEfforts: [
+    { reasoningEffort: "medium" },
+    { reasoningEffort: "high" },
+    { reasoningEffort: "max" },
+  ],
+  serviceTiers: [{ id: "priority", name: "Fast" }],
+  supportsPersonality: true,
+}];
+state.modelsLoaded = true;
+state.permissionProfiles = [
+  { id: ":workspace", allowed: true },
+  { id: ":danger-full-access", allowed: true },
+];
+state.permissionProfilesLoaded = true;
+state.configRequirements = {
+  allowedApprovalPolicies: ["on-request", "never"],
+};
+state.settingsByThread.set(state.threadId, normalizeChatSettings({}));
+renderChatSettings();
+assert.equal(defaultChatSettingOption("model").label, "Instance default — GPT-5.6-Sol");
+assert.equal(ui.settingModel.children[0].textContent, "Instance default — GPT-5.6-Sol");
+assert.equal(ui.settingEffort.children[0].textContent, "Instance default — max");
+assert.equal(ui.settingServiceTier.children[0].textContent, "Instance default — Fast");
+assert.equal(ui.settingApproval.children[0].textContent, "Instance default — Never ask");
+assert.equal(ui.settingPermissions.children[0].textContent, "Instance default — Full access");
+for (const select of [
+  ui.settingModel,
+  ui.settingEffort,
+  ui.settingServiceTier,
+  ui.settingPersonality,
+  ui.settingSummary,
+  ui.settingApproval,
+  ui.settingPermissions,
+]) {
+  assert.equal(
+    select.children.some((option) => option.textContent.includes("Inherit current thread")),
+    false,
+  );
+}
+assert.match(ui.settingsNote.textContent, /Instance defaults apply wherever Default is selected/);
 
 assert.equal(DEFAULT_SIDEBAR_WIDTH, 260);
 assert.equal(clampSidebarWidth(100, 1280), MIN_SIDEBAR_WIDTH);
