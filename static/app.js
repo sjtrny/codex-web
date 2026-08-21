@@ -1062,6 +1062,12 @@ function setSettingsOpen(open, moveFocus = true) {
   if (moveFocus) (state.settingsOpen ? ui.settingModel : ui.settingsToggle).focus();
 }
 
+function closeSettingsForChatChange(threadId) {
+  if (threadId !== state.threadId && state.settingsOpen) {
+    setSettingsOpen(false, false);
+  }
+}
+
 async function refreshPermissionProfiles() {
   if (!state.ready) return;
   try {
@@ -3235,6 +3241,7 @@ async function refreshThreads() {
 }
 
 async function openThread(threadId, showErrors = true) {
+  closeSettingsForChatChange(threadId);
   if (!state.ready) return;
   saveCurrentThreadView();
   saveComposerDraft();
@@ -3281,6 +3288,7 @@ async function openThread(threadId, showErrors = true) {
 }
 
 function beginNewThread() {
+  closeSettingsForChatChange(null);
   saveCurrentThreadView();
   saveComposerDraft();
   setSearchOpen(false, false);
@@ -3660,9 +3668,11 @@ if (globalThis.CODEX_WEB_TEST) {
     effectiveChatSettings,
     normalizeChatSettings,
     renderChatSettings,
+    setSettingsOpen,
     threadSettingsParams,
     turnSettingsParams,
     beginNewThread,
+    openThread,
     cacheItemUpdate,
     cacheThreadSnapshot,
     cacheTurnUpdate,

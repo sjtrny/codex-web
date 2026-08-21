@@ -259,6 +259,7 @@ const {
   defaultChatSettingOption,
   effectiveChatSettings,
   normalizeChatSettings,
+  openThread,
   parseSearchDate,
   pendingPromptText,
   renderSearchResults,
@@ -299,6 +300,7 @@ const {
   syncSidebarVisibility,
   toggleSidebar,
   setSearchOpen,
+  setSettingsOpen,
   setPreferencesOpen,
   sortThreadsByActivity,
   state,
@@ -1263,6 +1265,18 @@ ui.threads.children[0].listeners.get("click")({
 });
 assert.equal(modifiedClickPrevented, false, "modified clicks must retain native new-window behavior");
 
+state.ready = false;
+state.threadId = "thread-b";
+setSettingsOpen(true, false);
+openThread("thread-a");
+assert.equal(state.settingsOpen, false, "switching chats should close chat settings");
+assert.equal(ui.settingsPanel.hidden, true);
+assert.equal(ui.settingsToggle.getAttribute("aria-expanded"), "false");
+setSettingsOpen(true, false);
+openThread("thread-b");
+assert.equal(state.settingsOpen, true, "reopening the selected chat should preserve chat settings");
+setSettingsOpen(false, false);
+
 const startedThread = {
   id: "thread-new",
   name: "Instantly visible",
@@ -1321,9 +1335,11 @@ assert.equal(state.activeTurns.get("thread-a"), "turn-a", "other active turns mu
 
 state.threadId = "thread-a";
 const previousSelection = state.selectionId;
+setSettingsOpen(true, false);
 beginNewThread();
 assert.equal(state.selectionId, previousSelection + 1);
 assert.equal(state.threadId, null, "New thread must be available during background work");
+assert.equal(state.settingsOpen, false, "starting a new chat should close chat settings");
 assert.equal(state.activeTurns.get("thread-a"), "turn-a", "background turn must keep running");
 assert.equal(ui.notice.textContent, "", "no stop-before-switch warning should be shown");
 
