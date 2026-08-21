@@ -400,6 +400,16 @@ button:disabled { cursor: default; opacity: .45; }
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
 }
+.message-attachments { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; margin-top: 10px; }
+.message-attachments[hidden] { display: none; }
+.message-attachment { text-decoration: none; }
+.message-attachment .attachment-label { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.message-attachment.image-attachment { flex-direction: column; align-items: stretch; width: min(360px, 100%); padding: 0; overflow: hidden; }
+.message-attachment.image-attachment .attachment-label { padding: 6px 8px; }
+.attachment-preview { display: block; width: 100%; max-height: 320px; object-fit: contain; background: var(--panel-bg); }
+.message-attachment:hover { border-color: var(--jump-border); background: var(--button-hover); }
+.message-attachment:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.message-attachment .attachment-download { color: var(--muted-strong); font-size: .9rem; line-height: 1; }
 .message.user { margin-left: 13%; padding: 12px 14px; border-radius: 10px; background: var(--user-bg); }
 .message.agent { margin-right: 6%; }
 
@@ -420,7 +430,7 @@ button:disabled { cursor: default; opacity: .45; }
 .attachments { grid-area: attachments; display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
 .attachments[hidden] { display: none; }
 .attachment { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; padding: 5px 7px; border: 1px solid var(--border); border-radius: 7px; background: var(--control-bg); color: var(--attachment-text); font-size: .78rem; }
-.attachment .attachment-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment .attachment-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attachment .attachment-kind { color: var(--success-text); text-transform: uppercase; font-size: .64rem; letter-spacing: .06em; }
 .attachment button { border: 0; padding: 0 2px; background: transparent; color: var(--muted-strong); }
 .file-picker { grid-area: attach; align-self: end; display: inline-flex; align-items: center; min-height: 38px; padding: .48rem .72rem; border: 1px solid var(--border); border-radius: 7px; background: var(--button-bg); cursor: pointer; }

@@ -13,6 +13,7 @@ const THREAD_LIST_PARAMS = Object.freeze({
 const CHAT_SETTINGS_STORAGE_KEY = "codex-web-chat-settings-v1";
 const THREAD_QUERY_PARAM = "thread";
 const SEARCH_MATCH_HIGHLIGHT_MS = 4000;
+const ATTACHED_FILES_HEADING = "Attached files are available locally at these paths:";
 const SIDEBAR_WIDTH_STORAGE_KEY = "codex-web-sidebar-width-v1";
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "codex-web-sidebar-collapsed-v1";
 const DEFAULT_SIDEBAR_WIDTH = 260;
@@ -2145,16 +2146,24 @@ async function uploadFiles(fileList) {
 }
 
 function buildTurnInput(text, attachments) {
-  const files = attachments.filter((attachment) => !attachment.image);
+  // Text references preserve original filenames; localImage only retains a path.
+  const referencedAttachments = attachments;
   let prompt = text.trim();
-  if (files.length) {
-    const references = files
+  if (referencedAttachments.length) {
+    const references = referencedAttachments
       .map((attachment) => `- ${attachment.name}: ${attachment.path}`)
       .join("\n");
-    const heading = "Attached files are available locally at these paths:";
-    prompt = prompt
-      ? `${prompt}\n\n${heading}\n${references}`
-      : `Please inspect the attached file${files.length === 1 ? "" : "s"}.\n\n${heading}\n${references}`;
+    const plural = referencedAttachments.length === 1 ? "" : "s";
+    if (prompt) {
+      prompt = `${prompt}\n\n${ATTACHED_FILES_HEADING}\n${references}`;
+    } else {
+      prompt = [
+        `Please inspect the attached file${plural}.`,
+        "",
+        ATTACHED_FILES_HEADING,
+        references,
+      ].join("\n");
+    }
   }
 
   const input = [];
@@ -2165,11 +2174,8 @@ function buildTurnInput(text, attachments) {
   return input;
 }
 
-function pendingPromptText(text, attachments) {
-  const labels = attachments.map(
-    (attachment) => `[${attachment.image ? "Image" : "File"}: ${attachment.name}]`,
-  );
-  return [text.trim(), ...labels].filter(Boolean).join("\n");
+function pendingPromptText(text) {
+  return text.trim();
 }
 
 function send(message) {
@@ -2537,6 +2543,96 @@ function appendMessageNode(node) {
   }
 }
 
+function attachmentDownloadUrl(attachment) {
+  const params = new URLSearchParams({ path: String(attachment?.path || "") });
+  if (attachment?.name) params.set("name", String(attachment.name));
+  return `/api/attachments?${params.toString()}`;
+}
+
+function attachmentPreviewUrl(attachment) {
+  const params = new URLSearchParams({
+    path: String(attachment?.path || ""),
+    preview: "1",
+  });
+  if (attachment?.name) params.set("name", String(attachment.name));
+  return `/api/attachments?${params.toString()}`;
+}
+
+function attachmentNameFromPath(value, fallback = "attachment") {
+  let name = String(value || "").split(/[\\/]/).at(-1) || fallback;
+  try {
+    name = decodeURIComponent(name.replace(/%(?![0-9a-f]{2})/gi, "%25"));
+  } catch {
+    // Keep the path segment as-is if it is not valid percent-encoding.
+  }
+  return name.replace(/^[0-9a-f]{12}-/i, "") || fallback;
+}
+
+function normalizeMessageAttachments(attachments = []) {
+  const normalized = [];
+  const indexes = new Map();
+  for (const value of attachments || []) {
+    const path = String(value?.path || "");
+    if (!path) continue;
+    const attachment = {
+      image: Boolean(value?.image),
+      name: String(value?.name || attachmentNameFromPath(path)),
+      path,
+    };
+    const existingIndex = indexes.get(path);
+    if (existingIndex === undefined) {
+      indexes.set(path, normalized.length);
+      normalized.push(attachment);
+      continue;
+    }
+    const existing = normalized[existingIndex];
+    existing.image = existing.image || attachment.image;
+    if (!existing.name) existing.name = attachment.name;
+  }
+  return normalized;
+}
+
+function renderMessageAttachments(entry) {
+  entry.attachmentList.replaceChildren();
+  entry.attachmentList.hidden = entry.attachments.length === 0;
+  for (const attachment of entry.attachments) {
+    const link = document.createElement("a");
+    link.className = attachment.image
+      ? "attachment message-attachment image-attachment"
+      : "attachment message-attachment";
+    link.setAttribute("href", attachmentDownloadUrl(attachment));
+    link.setAttribute("download", attachment.name);
+    link.setAttribute("aria-label", `Download ${attachment.name}`);
+    link.title = `Download ${attachment.name}`;
+
+    if (attachment.image) {
+      const preview = document.createElement("img");
+      preview.className = "attachment-preview";
+      preview.setAttribute("src", attachmentPreviewUrl(attachment));
+      preview.setAttribute("alt", "");
+      preview.setAttribute("loading", "lazy");
+      preview.setAttribute("decoding", "async");
+      link.append(preview);
+    }
+
+    const label = document.createElement("span");
+    label.className = "attachment-label";
+    const kind = document.createElement("span");
+    kind.className = "attachment-kind";
+    kind.textContent = attachment.image ? "image" : "file";
+    const name = document.createElement("span");
+    name.className = "attachment-name";
+    name.textContent = attachment.name;
+    const action = document.createElement("span");
+    action.className = "attachment-download";
+    action.setAttribute("aria-hidden", "true");
+    action.textContent = "↓";
+    label.append(kind, name, action);
+    link.append(label);
+    entry.attachmentList.append(link);
+  }
+}
+
 function renderedItemKey(itemId, threadId = state.threadId, turnId = null) {
   // App-server item counters can restart, so an item ID is only safe within
   // its turn. Scoping the DOM key prevents a new turn from updating an old node.
@@ -2574,6 +2670,7 @@ function upsertMessage(
   append = false,
   threadId = state.threadId,
   turnId = null,
+  attachments = null,
 ) {
   const shouldFollow = state.followPresent && messagesAtPresent();
   removeEmpty();
@@ -2587,12 +2684,17 @@ function upsertMessage(
     label.textContent = role === "user" ? "You" : "Codex";
     const body = document.createElement("div");
     body.className = "body";
-    node.append(label, body);
+    const attachmentList = document.createElement("div");
+    attachmentList.className = "message-attachments";
+    attachmentList.hidden = true;
+    node.append(label, body, attachmentList);
     appendMessageNode(node);
     entry = {
       kind: "message",
       node,
       body,
+      attachmentList,
+      attachments: [],
       text: "",
       renderFrame: null,
       itemId: String(id),
@@ -2602,6 +2704,10 @@ function upsertMessage(
     state.items.set(itemKey, entry);
   }
   entry.text = append ? entry.text + (text || "") : (text || "");
+  if (attachments !== null) {
+    entry.attachments = normalizeMessageAttachments(attachments);
+    renderMessageAttachments(entry);
+  }
   renderMessageBody(entry);
   presentContentChanged(shouldFollow);
   return entry.node;
@@ -2672,6 +2778,64 @@ function inputText(content = []) {
     })
     .filter(Boolean)
     .join("\n");
+}
+
+function splitAttachedFileReferences(value) {
+  const text = String(value || "");
+  const marker = `${ATTACHED_FILES_HEADING}\n`;
+  const markerIndex = text.lastIndexOf(marker);
+  if (markerIndex < 0) return { text, attachments: [] };
+  const prefix = text.slice(0, markerIndex);
+  if (prefix && !prefix.endsWith("\n\n")) return { text, attachments: [] };
+
+  const lines = text.slice(markerIndex + marker.length).split(/\r?\n/);
+  if (!lines.length || lines.some((line) => !line)) {
+    return { text, attachments: [] };
+  }
+  const attachments = [];
+  for (const line of lines) {
+    const match = /^- (.*): (\/[^\r\n]+)$/.exec(line);
+    if (!match) return { text, attachments: [] };
+    attachments.push({
+      image: false,
+      name: match[1] || attachmentNameFromPath(match[2]),
+      path: match[2],
+    });
+  }
+
+  let visibleText = prefix.endsWith("\n\n") ? prefix.slice(0, -2) : prefix;
+  const syntheticPrompt = `Please inspect the attached file${attachments.length === 1 ? "" : "s"}.`;
+  if (visibleText === syntheticPrompt) visibleText = "";
+  return { text: visibleText, attachments };
+}
+
+function userMessagePresentation(content = []) {
+  if (!Array.isArray(content)) return { text: "", attachments: [] };
+  const textParts = [];
+  const localImages = [];
+  for (const part of content) {
+    if (part?.type === "text") {
+      textParts.push(part.text || "");
+    } else if (part?.type === "localImage") {
+      const path = String(part.path || "");
+      if (path) {
+        localImages.push({
+          image: true,
+          name: attachmentNameFromPath(path, "image"),
+          path,
+        });
+      }
+    } else if (part?.type === "image") {
+      textParts.push(`[Image: ${part.url || "remote image"}]`);
+    }
+  }
+
+  const parsed = splitAttachedFileReferences(textParts.filter(Boolean).join("\n"));
+  const attachments = normalizeMessageAttachments([
+    ...parsed.attachments,
+    ...localImages,
+  ]);
+  return { text: parsed.text, attachments };
 }
 
 function setThreadPromptHistory(thread) {
@@ -2796,7 +2960,18 @@ function renderItem(item, completed, threadId = state.threadId, turnId = null) {
         state.items.delete(state.pendingUser.id);
         state.pendingUser = null;
       }
-      upsertMessage(itemId, "user", inputText(item.content), false, threadId, turnId);
+      {
+        const presentation = userMessagePresentation(item.content);
+        upsertMessage(
+          itemId,
+          "user",
+          presentation.text,
+          false,
+          threadId,
+          turnId,
+          presentation.attachments,
+        );
+      }
       break;
     case "agentMessage":
       upsertMessage(itemId, "agent", item.text || "", false, threadId, turnId);
@@ -2921,7 +3096,15 @@ function renderCachedThread(entry) {
   }
   if (entry.pendingUser) {
     const pending = entry.pendingUser;
-    const node = upsertMessage(pending.id, "user", pending.text);
+    const node = upsertMessage(
+      pending.id,
+      "user",
+      pending.text,
+      false,
+      pending.threadId,
+      pending.turnId,
+      pending.attachments || [],
+    );
     state.pendingUser = { ...pending, node };
   }
 }
@@ -3127,10 +3310,25 @@ function beginNewThread() {
   updateControls();
 }
 
-function renderLocalPrompt(id, text, threadId, selectionId) {
+function renderLocalPrompt(id, text, threadId, selectionId, attachments = []) {
   jumpToPresent();
-  const node = upsertMessage(id, "user", text);
-  const pending = { id, text, threadId, selectionId, turnId: null };
+  const node = upsertMessage(
+    id,
+    "user",
+    text,
+    false,
+    threadId,
+    null,
+    attachments,
+  );
+  const pending = {
+    id,
+    text,
+    attachments,
+    threadId,
+    selectionId,
+    turnId: null,
+  };
   state.pendingUser = { ...pending, node };
   setCachedPendingUser(threadId, pending);
   return node;
@@ -3160,12 +3358,13 @@ async function submitPrompt(event) {
 
   const pendingId = globalThis.crypto?.randomUUID?.()
     || `pending-${Date.now()}-${selectionId}`;
-  const pendingText = pendingPromptText(text, attachments);
+  const pendingText = pendingPromptText(text);
   const pendingNode = renderLocalPrompt(
     pendingId,
     pendingText,
     targetThreadId,
     selectionId,
+    attachments,
   );
 
   try {
@@ -3181,6 +3380,7 @@ async function submitPrompt(event) {
       const pending = {
         id: pendingId,
         text: pendingText,
+        attachments,
         threadId: targetThreadId,
         selectionId,
         turnId: null,
@@ -3440,11 +3640,15 @@ if (globalThis.CODEX_WEB_TEST) {
     SIDEBAR_COLLAPSED_STORAGE_KEY,
     SIDEBAR_SWIPE_OPEN_DISTANCE,
     THREAD_QUERY_PARAM,
+    attachmentDownloadUrl,
+    attachmentPreviewUrl,
     buildTurnInput,
     clearComposerDraft,
     currentPromptHistory,
     handlePromptInput,
     inputText,
+    splitAttachedFileReferences,
+    userMessagePresentation,
     navigatePromptHistory,
     pendingPromptText,
     promptKeydown,

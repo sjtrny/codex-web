@@ -236,6 +236,8 @@ const {
   SIDEBAR_COLLAPSED_STORAGE_KEY,
   SIDEBAR_SWIPE_OPEN_DISTANCE,
   THREAD_QUERY_PARAM,
+  attachmentDownloadUrl,
+  attachmentPreviewUrl,
   beginNewThread,
   buildTurnInput,
   cacheItemUpdate,
@@ -249,6 +251,8 @@ const {
   handleMessagesScroll,
   handlePromptInput,
   inputText,
+  splitAttachedFileReferences,
+  userMessagePresentation,
   isSearchSelectionCurrent,
   jumpToPresent,
   normalizeSearchResponse,
@@ -553,6 +557,7 @@ const attachments = [
 const turnInput = buildTurnInput("Inspect these", attachments);
 assert.equal(turnInput.length, 2);
 assert.equal(turnInput[0].type, "text");
+assert.ok(turnInput[0].text.includes(attachments[0].path));
 assert.ok(turnInput[0].text.includes(attachments[1].path));
 assert.deepEqual(turnInput[1], {
   type: "localImage",
@@ -564,8 +569,134 @@ assert.equal(
   "local image history should remain visible",
 );
 assert.equal(
-  pendingPromptText("Inspect these", attachments),
-  "Inspect these\n[Image: screen.png]\n[File: notes.txt]",
+  pendingPromptText("Inspect these"),
+  "Inspect these",
+);
+assert.equal(
+  attachmentDownloadUrl(attachments[1]),
+  "/api/attachments?path=%2Fworkspaces%2Fcodex-web%2Fuploads%2Fbatch%2Fnotes.txt&name=notes.txt",
+);
+assert.equal(
+  attachmentPreviewUrl(attachments[0]),
+  "/api/attachments?path=%2Fworkspaces%2Fcodex-web%2Fuploads%2Fbatch%2Fscreen.png&preview=1&name=screen.png",
+);
+assert.deepEqual(
+  splitAttachedFileReferences(turnInput[0].text),
+  {
+    text: "Inspect these",
+    attachments: attachments.map(({ image: _image, name, path }) => ({
+      image: false,
+      name,
+      path,
+    })),
+  },
+);
+assert.deepEqual(userMessagePresentation(turnInput), {
+  text: "Inspect these",
+  attachments: attachments.map(({ image, name, path }) => ({ image, name, path })),
+});
+const legacyAttachmentPath = [
+  "/workspaces/codex-web/uploads/0123456789abcdef0123456789abcdef",
+  "abcdef123456-screen_shot.png",
+].join("/");
+assert.deepEqual(
+  userMessagePresentation([{
+    type: "localImage",
+    path: legacyAttachmentPath,
+  }]),
+  {
+    text: "",
+    attachments: [{
+      image: true,
+      name: "screen_shot.png",
+      path: legacyAttachmentPath,
+    }],
+  },
+  "older image-only turns should gain download metadata from their stored path",
+);
+assert.deepEqual(
+  userMessagePresentation(buildTurnInput("", [attachments[0]])),
+  {
+    text: "",
+    attachments: [{ image: true, name: "screen.png", path: attachments[0].path }],
+  },
+  "attachment-only turns should render the file without synthetic prompt text",
+);
+
+renderThreadHistory({
+  id: "attachment-history",
+  status: { type: "idle" },
+  turns: [{
+    id: "attachment-turn",
+    status: "completed",
+    items: [{ id: "attachment-user", type: "userMessage", content: turnInput }],
+  }],
+});
+const attachmentMessage = state.items.get(
+  renderedItemKey("attachment-user", "attachment-history", "attachment-turn"),
+);
+assert.equal(attachmentMessage.body.textContent, "Inspect these");
+assert.equal(attachmentMessage.attachmentList.hidden, false);
+assert.equal(attachmentMessage.attachmentList.children.length, 2);
+assert.equal(
+  attachmentMessage.attachmentList.children[0].getAttribute("href"),
+  attachmentDownloadUrl(attachments[0]),
+);
+assert.equal(
+  attachmentMessage.attachmentList.children[0]
+    .querySelector(".attachment-preview")
+    .getAttribute("src"),
+  attachmentPreviewUrl(attachments[0]),
+  "historical local images should render an inline preview",
+);
+assert.equal(
+  attachmentMessage.attachmentList.children[1].getAttribute("download"),
+  "notes.txt",
+);
+
+const historicalClimateImage = {
+  image: true,
+  name: "image.png",
+  path: [
+    "/workspaces/codex-web/uploads/b31c7575ed934bc2941859e800dc7572",
+    "4051acc115e8-image.png",
+  ].join("/"),
+};
+renderThreadHistory({
+  id: "historical-climate-chat",
+  status: { type: "idle" },
+  turns: [{
+    id: "historical-climate-turn",
+    status: "completed",
+    items: [{
+      id: "historical-climate-message",
+      type: "userMessage",
+      content: [
+        {
+          type: "text",
+          text: "How do I make the proxy climate entity modal show the set point temperature even when off? Compare image attached.",
+        },
+        { type: "localImage", path: historicalClimateImage.path },
+      ],
+    }],
+  }],
+});
+const historicalClimateMessage = state.items.get(renderedItemKey(
+  "historical-climate-message",
+  "historical-climate-chat",
+  "historical-climate-turn",
+));
+assert.equal(historicalClimateMessage.attachmentList.children.length, 1);
+assert.equal(
+  historicalClimateMessage.attachmentList.children[0].getAttribute("href"),
+  attachmentDownloadUrl(historicalClimateImage),
+);
+assert.equal(
+  historicalClimateMessage.attachmentList.children[0]
+    .querySelector(".attachment-preview")
+    .getAttribute("src"),
+  attachmentPreviewUrl(historicalClimateImage),
+  "the reported historical climate screenshot should render from its localImage path",
 );
 
 const chatSettings = normalizeChatSettings({

@@ -1009,6 +1009,8 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
                 ".message .body .code-block pre { margin: 0; padding-right: 54px; }",
                 stylesheet,
             )
+            self.assertIn(".message-attachments { display: flex;", stylesheet)
+            self.assertIn(".message-attachment:focus-visible {", stylesheet)
             self.assertNotIn(".code-block pre { padding-top:", stylesheet)
             self.assertIn(':root[data-theme="dark"] {', stylesheet)
             self.assertIn(".preferences-dialog {", stylesheet)
@@ -1093,6 +1095,69 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("..", uploaded["storedName"])
             self.assertNotIn(" ", uploaded["storedName"])
 
+        manifest_path = (
+            next(self.upload_path.iterdir()) / codex_web.UPLOAD_MANIFEST_NAME
+        )
+        self.assertEqual(manifest_path.stat().st_mode & 0o777, 0o600)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            manifest["files"][image["storedName"]]["name"],
+            "screen shot.png",
+        )
+
+        async with (
+            ClientSession() as session,
+            session.get(
+                f"http://127.0.0.1:{self.port}/api/attachments",
+                params={"path": image["path"], "name": "wrong-name.bin"},
+            ) as response,
+        ):
+            self.assertEqual(response.status, 200)
+            self.assertEqual(await response.read(), png)
+            self.assertEqual(response.content_type, "image/png")
+            self.assertIn(
+                'filename="screen%20shot.png"',
+                response.headers["Content-Disposition"],
+            )
+
+        async with (
+            ClientSession() as session,
+            session.get(
+                f"http://127.0.0.1:{self.port}/api/attachments",
+                params={"path": image["path"], "preview": "1"},
+            ) as response,
+        ):
+            self.assertEqual(response.status, 200)
+            self.assertEqual(await response.read(), png)
+            self.assertEqual(response.content_type, "image/png")
+            self.assertTrue(
+                response.headers["Content-Disposition"].startswith("inline;")
+            )
+
+        async with (
+            ClientSession() as session,
+            session.get(
+                f"http://127.0.0.1:{self.port}/api/attachments",
+                params={"path": document["path"], "preview": "1"},
+            ) as response,
+        ):
+            self.assertEqual(response.status, 415)
+
+        manifest_path.unlink()
+        async with (
+            ClientSession() as session,
+            session.get(
+                f"http://127.0.0.1:{self.port}/api/attachments",
+                params={"path": document["path"], "name": document["name"]},
+            ) as response,
+        ):
+            self.assertEqual(response.status, 200)
+            self.assertEqual(await response.read(), b"notes")
+            self.assertIn(
+                'filename="notes.txt"',
+                response.headers["Content-Disposition"],
+            )
+
     async def test_opens_regular_workspace_files_and_supports_download(self) -> None:
         document = self.workspace_path / "result file.txt"
         document.write_text("generated result\n", encoding="utf-8")
@@ -1114,6 +1179,16 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status, 200)
                 self.assertTrue(
                     response.headers["Content-Disposition"].startswith("attachment;")
+                )
+            async with session.get(
+                f"http://127.0.0.1:{self.port}/api/attachments",
+                params={"path": str(document), "name": "original name.txt"},
+            ) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(await response.text(), "generated result\n")
+                self.assertIn(
+                    'filename="original%20name.txt"',
+                    response.headers["Content-Disposition"],
                 )
 
     async def test_reads_host_images_through_the_app_server(self) -> None:
@@ -1186,6 +1261,12 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
                     params={"path": path},
                 ) as response:
                     self.assertEqual(response.status, expected, path)
+
+            async with session.get(
+                f"http://127.0.0.1:{self.port}/api/attachments",
+                params={"path": "/workspaces/codex-web/uploads/not-a-batch/file.txt"},
+            ) as response:
+                self.assertEqual(response.status, 404)
 
     async def test_active_workspace_documents_are_download_only(self) -> None:
         document = self.workspace_path / "page.html"

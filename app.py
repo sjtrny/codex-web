@@ -38,6 +38,9 @@ MAX_HOST_IMAGE_BYTES = 10 * 1024 * 1024
 DEFAULT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 DEFAULT_MAX_UPLOAD_TOTAL_BYTES = 200 * 1024 * 1024
 DEFAULT_MAX_UPLOAD_FILES = 12
+UPLOAD_MANIFEST_NAME = ".codex-web-upload.json"
+UPLOAD_BATCH_PATTERN = re.compile(r"[0-9a-f]{32}")
+UPLOAD_FILE_PATTERN = re.compile(r"[0-9a-f]{12}-[A-Za-z0-9._-]+")
 DEFAULT_SEARCH_LIMIT = 100
 MAX_SEARCH_LIMIT = 200
 MAX_SEARCH_QUERY_CHARS = 256
@@ -204,6 +207,91 @@ def safe_upload_name(filename: str) -> str:
     return f"{stem or 'upload'}{suffix}"
 
 
+def upload_display_name(filename: str) -> str:
+    basename = unquote(filename).replace("\\", "/").rsplit("/", 1)[-1]
+    return re.sub(r"[\x00-\x1f\x7f]", "_", basename)[:200]
+
+
+def write_upload_manifest(
+    batch_dir: Path,
+    uploaded: list[dict[str, object]],
+) -> None:
+    manifest = {
+        "version": 1,
+        "files": {
+            str(item["storedName"]): {
+                "name": item["name"],
+                "mime": item["mime"],
+                "size": item["size"],
+            }
+            for item in uploaded
+        },
+    }
+    destination = batch_dir / UPLOAD_MANIFEST_NAME
+    descriptor = os.open(
+        destination,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+        json.dump(manifest, output, ensure_ascii=False, separators=(",", ":"))
+
+
+def resolve_uploaded_file(
+    raw_path: str,
+    storage_root: Path,
+    visible_root: Path,
+) -> Path | None:
+    if not raw_path or "\0" in raw_path:
+        raise web.HTTPBadRequest(text="An attachment path is required")
+    requested = Path(raw_path)
+    if not requested.is_absolute():
+        raise web.HTTPBadRequest(text="Attachment paths must be absolute")
+    if raw_path != os.path.normpath(raw_path):
+        raise web.HTTPBadRequest(text="Attachment paths must be normalized")
+    try:
+        relative = requested.relative_to(visible_root)
+    except ValueError:
+        return None
+    if (
+        len(relative.parts) != 2
+        or not UPLOAD_BATCH_PATTERN.fullmatch(relative.parts[0])
+        or not UPLOAD_FILE_PATTERN.fullmatch(relative.parts[1])
+    ):
+        raise web.HTTPNotFound(text="Attachment not found")
+
+    try:
+        resolved_root = storage_root.resolve(strict=True)
+        resolved = (storage_root / relative).resolve(strict=True)
+        resolved.relative_to(resolved_root)
+    except (FileNotFoundError, NotADirectoryError, ValueError):
+        raise web.HTTPNotFound(text="Attachment not found") from None
+    except OSError as exc:
+        raise web.HTTPBadRequest(text="Invalid attachment path") from exc
+    try:
+        metadata = resolved.stat()
+    except OSError as exc:
+        raise web.HTTPNotFound(text="Attachment not found") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise web.HTTPNotFound(text="Attachment not found")
+    return resolved
+
+
+def upload_manifest_entry(path: Path) -> dict[str, object]:
+    manifest_path = path.parent / UPLOAD_MANIFEST_NAME
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    files = manifest.get("files") if isinstance(manifest, dict) else None
+    entry = files.get(path.name) if isinstance(files, dict) else None
+    return entry if isinstance(entry, dict) else {}
+
+
+def stored_upload_display_name(path: Path) -> str:
+    return re.sub(r"^[0-9a-f]{12}-", "", path.name, count=1) or "attachment"
+
+
 def image_mime(header: bytes) -> str | None:
     if header.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
@@ -299,9 +387,7 @@ async def upload_files(request: web.Request) -> web.Response:
             if len(uploaded) >= max_files:
                 raise UploadRejected(413, f"At most {max_files} files are allowed")
 
-            display_name = (
-                unquote(part.filename).replace("\\", "/").rsplit("/", 1)[-1][:200]
-            )
+            display_name = upload_display_name(part.filename)
             stored_name = f"{uuid.uuid4().hex[:12]}-{safe_upload_name(part.filename)}"
             destination = batch_dir / stored_name
             size = 0
@@ -338,6 +424,8 @@ async def upload_files(request: web.Request) -> web.Response:
                     "storedName": stored_name,
                 }
             )
+        if uploaded:
+            write_upload_manifest(batch_dir, uploaded)
     except UploadRejected as exc:
         shutil.rmtree(batch_dir)
         return web.json_response({"error": str(exc)}, status=exc.status)
@@ -379,6 +467,61 @@ async def workspace_file(request: web.Request) -> web.FileResponse:
         path,
         headers=headers,
     )
+
+
+async def attachment_file(request: web.Request) -> web.FileResponse:
+    raw_path = request.query.get("path", "")
+    try:
+        storage_root, visible_root = upload_roots()
+        path = resolve_uploaded_file(raw_path, storage_root, visible_root)
+    except RuntimeError as exc:
+        raise web.HTTPServiceUnavailable(text=str(exc)) from exc
+
+    manifest_entry: dict[str, object] = {}
+    if path is not None:
+        manifest_entry = upload_manifest_entry(path)
+        fallback_name = stored_upload_display_name(path)
+    else:
+        try:
+            root = workspace_root()
+        except RuntimeError as exc:
+            raise web.HTTPServiceUnavailable(text=str(exc)) from exc
+        path = resolve_workspace_file(raw_path, root)
+        fallback_name = path.name
+
+    manifest_name = manifest_entry.get("name")
+    requested_name = upload_display_name(request.query.get("name", ""))
+    filename = (
+        manifest_name
+        if isinstance(manifest_name, str) and manifest_name
+        else requested_name or fallback_name
+    )
+    preview = request.query.get("preview", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    if preview:
+        try:
+            with path.open("rb") as source:
+                mime = image_mime(source.read(16))
+        except OSError as exc:
+            raise web.HTTPNotFound(text="Attachment not found") from exc
+        if mime is None:
+            raise web.HTTPUnsupportedMediaType(text="Attachment is not an image")
+        disposition = "inline"
+    else:
+        mime, _ = mimetypes.guess_type(filename)
+        disposition = "attachment"
+    headers = {
+        "Content-Disposition": content_disposition_header(
+            disposition,
+            filename=filename,
+        ),
+    }
+    if mime:
+        headers["Content-Type"] = mime
+    return web.FileResponse(path, headers=headers)
 
 
 def host_image_path(raw_path: str) -> str:
@@ -1180,6 +1323,7 @@ def create_app() -> web.Application:
             web.get("/service-worker.js", service_worker),
             web.get("/api/config", app_config),
             web.get("/api/files", workspace_file),
+            web.get("/api/attachments", attachment_file),
             web.get("/api/host-images", host_image),
             web.post("/api/search", search_chat_history),
             web.post("/api/uploads", upload_files),

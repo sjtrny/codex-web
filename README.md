@@ -100,6 +100,14 @@ CODEX_DEFAULT_PERMISSION_PROFILE=:danger-full-access
 
 Values are app-server protocol IDs. Restart the web service after changing them.
 
+## Attachment retention
+
+Uploaded files remain in `CODEX_UPLOAD_STORAGE_DIR` (Docker Compose) or
+`CODEX_UPLOAD_DIR` (direct runs), and each attachment in chat history links back
+to that retained copy. Retained images also render as inline previews that link
+to the original download. Keep this directory when upgrading or recreating the
+web service if historical downloads and previews should remain available.
+
 ## Security
 
 The UI is unauthenticated and listens on all interfaces. Keep it behind a VPN
