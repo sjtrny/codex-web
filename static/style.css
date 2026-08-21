@@ -164,14 +164,15 @@ button:disabled { cursor: default; opacity: .45; }
   .shell.sidebar-collapsed { grid-template-columns: var(--sidebar-rail-width) minmax(0, 1fr); }
   .shell.sidebar-collapsed .sidebar { padding: 14px; overflow: visible; }
   .shell.sidebar-collapsed .sidebar-resizer,
-  .shell.sidebar-collapsed .brand > strong { display: none; }
+  .shell.sidebar-collapsed .brand-home { display: none; }
   .shell.sidebar-collapsed .brand { display: grid; justify-content: center; justify-items: center; gap: 10px; margin: 0; }
   .shell.sidebar-collapsed .sidebar-toggle-icon { transform: rotate(180deg); }
 }
 
 .brand, .topbar { display: flex; align-items: center; gap: 10px; }
 .brand { justify-content: space-between; margin-bottom: 14px; }
-.brand > strong { margin-right: auto; }
+.brand-home { margin-right: auto; color: inherit; text-decoration: none; }
+.brand-home:hover { color: var(--link-hover); }
 .wide { width: 100%; margin-bottom: 12px; text-align: left; }
 .sidebar-content[hidden] { display: none; }
 .sidebar-action { display: flex; align-items: center; gap: 8px; }

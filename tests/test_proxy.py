@@ -310,6 +310,7 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('id="sidebar-swipe-edge"', body)
             self.assertIn('role="separator"', body)
             self.assertIn('aria-orientation="vertical"', body)
+            self.assertIn('<a class="brand-home" href="/"><strong>Codex</strong></a>', body)
             self.assertIn('id="settings-toggle"', body)
             self.assertIn('id="setting-model"', body)
             self.assertIn('id="setting-permissions"', body)
