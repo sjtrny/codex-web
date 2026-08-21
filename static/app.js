@@ -1853,12 +1853,12 @@ function isSearchSelectionCurrent(threadId, selectionId) {
   return state.threadId === threadId && state.selectionId === selectionId;
 }
 
-async function openSearchResult(result, query, button) {
+async function openSearchResult(result, query, link) {
   if (!state.ready) {
     setSearchStatus("Chats are reconnecting. Try opening this result again in a moment.", "error");
     return;
   }
-  button.disabled = true;
+  link.setAttribute("aria-disabled", "true");
   let selectionId = null;
   try {
     setSearchOpen(false, false);
@@ -1881,7 +1881,7 @@ async function openSearchResult(result, query, button) {
     if (selectionId !== null && !isSearchSelectionCurrent(result.threadId, selectionId)) return;
     notice(error.message || "Unable to open this search result.");
   } finally {
-    button.disabled = !result.threadId;
+    if (result.threadId) link.removeAttribute("aria-disabled");
   }
 }
 
@@ -1918,10 +1918,10 @@ function renderSearchResults(response, query) {
   for (const result of response.results) {
     const item = document.createElement("li");
     item.className = "search-result";
-    const button = document.createElement("button");
-    button.className = "search-result-button";
-    button.type = "button";
-    button.disabled = !result.threadId;
+    const link = document.createElement("a");
+    link.className = "search-result-button";
+    if (result.threadId) link.setAttribute("href", threadHref(result.threadId));
+    else link.setAttribute("aria-disabled", "true");
 
     const heading = document.createElement("span");
     heading.className = "search-result-heading";
@@ -1959,9 +1959,14 @@ function renderSearchResults(response, query) {
     }
     if (!result.threadId) meta.textContent += " · conversation unavailable";
 
-    button.append(heading, snippet, meta);
-    button.addEventListener("click", () => openSearchResult(result, query, button));
-    item.append(button);
+    link.append(heading, snippet, meta);
+    link.addEventListener("click", (event) => {
+      if (!plainPrimaryClick(event)) return;
+      event.preventDefault();
+      if (link.getAttribute("aria-disabled") === "true") return;
+      openSearchResult(result, query, link);
+    });
+    item.append(link);
     ui.searchResults.append(item);
   }
 }
