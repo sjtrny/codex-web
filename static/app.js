@@ -692,6 +692,7 @@ function moveComposerDraft(fromKey, toKey) {
 function handlePromptInput() {
   resetPromptHistoryNavigation();
   saveComposerDraft();
+  if (state.followPresent) jumpToPresent();
 }
 
 function findCachedTurn(entry, turnId) {

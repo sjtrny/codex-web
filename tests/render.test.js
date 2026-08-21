@@ -407,6 +407,27 @@ upsertMessage("live-agent", "agent", " and more", true);
 assert.equal(ui.messages.scrollTop, ui.messages.scrollHeight, "near-bottom output follows the present");
 assert.equal(ui.jumpPresent.hidden, true);
 
+ui.messages._scrollHeight = 1400;
+ui.messages._scrollTop = 1199;
+const typingScrollWrites = ui.messages.scrollWrites;
+ui.prompt.value = "typing at the present";
+handlePromptInput();
+assert.equal(
+  ui.messages.scrollTop,
+  ui.messages.scrollHeight,
+  "typing must keep followed history pinned to the present",
+);
+assert.equal(ui.messages.scrollWrites, typingScrollWrites + 1);
+
+state.followPresent = false;
+ui.messages._scrollTop = 300;
+const readingScrollWrites = ui.messages.scrollWrites;
+ui.prompt.value = "typing while reading history";
+handlePromptInput();
+assert.equal(ui.messages.scrollTop, 300, "typing must preserve an older reading position");
+assert.equal(ui.messages.scrollWrites, readingScrollWrites);
+state.followPresent = true;
+
 ui.messages._scrollHeight = null;
 ui.messages.clientHeight = 0;
 
