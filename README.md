@@ -49,14 +49,34 @@ Other subcommands and `codex-local` use the local executable.
 
 ### 3. Web (optional)
 
-With Docker Compose:
+A minimal `compose.yaml` is:
+
+```yaml
+services:
+  codex-web:
+    build: .
+    user: "${CODEX_WEB_UID:-1000}:${CODEX_WEB_GID:-1000}"
+    environment:
+      CODEX_DEFAULT_CWD: /absolute/path/to/projects
+      CODEX_WORKSPACE_ROOT: /absolute/path/to/projects
+      CODEX_UPLOAD_HOST_DIR: /absolute/path/to/codex-web/uploads
+    ports:
+      - "8765:8000"
+    volumes:
+      - /absolute/shared/path:/run/codex:ro
+      - /absolute/path/to/projects:/absolute/path/to/projects:ro
+      - ./uploads:/uploads
+```
+
+Start it with the host user's UID and GID so the container can access the
+app-server socket and upload directory:
 
 ```bash
-cd /absolute/path/to/codex-web
-cp .env.example .env
-# Edit .env, including your UID and GID.
-docker compose up --build -d
+CODEX_WEB_UID="$(id -u)" CODEX_WEB_GID="$(id -g)" docker compose up --build -d
 ```
+
+See the provided [`compose.yaml`](compose.yaml) for all configuration options;
+[`.env.example`](.env.example) lists the corresponding environment values.
 
 Open `http://HOST_IP:8765`.
 
