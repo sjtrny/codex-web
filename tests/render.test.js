@@ -1407,6 +1407,124 @@ assert.equal(
   "a sparse turn completion must not discard cached streamed items",
 );
 
+const completionOrderThreadId = "completion-order-thread";
+const completionOrderTurnId = "completion-order-turn";
+const completionSnapshotItems = [
+  {
+    id: "completion-user",
+    type: "userMessage",
+    content: [{ type: "text", text: "Commit and push" }],
+  },
+  {
+    id: "completion-reasoning-before",
+    type: "reasoning",
+    summary: [{ text: "Prepare changes\nInspect status" }],
+  },
+  {
+    id: "completion-commentary",
+    type: "agentMessage",
+    phase: "commentary",
+    text: "I will commit and push.",
+  },
+  {
+    id: "completion-reasoning-after",
+    type: "reasoning",
+    summary: [{ text: "Push main branch\nVerify clean status" }],
+  },
+  {
+    id: "completion-final",
+    type: "agentMessage",
+    phase: "final_answer",
+    text: "Committed and pushed.",
+  },
+];
+cacheThreadSnapshot({
+  id: completionOrderThreadId,
+  status: { type: "active", activeFlags: [] },
+  turns: [{
+    id: completionOrderTurnId,
+    status: "inProgress",
+    items: [
+      {
+        id: "live-completion-user",
+        type: "userMessage",
+        content: [{ type: "text", text: "Commit and push" }],
+      },
+      {
+        id: "live-completion-reasoning-before",
+        type: "reasoning",
+        summary: [{ text: "Prepare changes\nInspect status" }],
+      },
+      {
+        id: "live-completion-commentary",
+        type: "agentMessage",
+        phase: "commentary",
+        text: "I will commit and push.",
+      },
+      {
+        id: "live-completion-command-commit",
+        type: "commandExecution",
+        command: "git commit",
+        status: "completed",
+      },
+      {
+        id: "live-completion-reasoning-after",
+        type: "reasoning",
+        summary: [{ text: "Push main branch" }],
+      },
+      {
+        id: "live-completion-command-push",
+        type: "commandExecution",
+        command: "git push",
+        status: "completed",
+      },
+    ],
+  }],
+});
+state.ready = false;
+handleNotification("turn/completed", {
+  threadId: completionOrderThreadId,
+  turn: {
+    id: completionOrderTurnId,
+    status: "completed",
+    items: completionSnapshotItems,
+  },
+});
+assert.deepEqual(
+  cachedThread(completionOrderThreadId).thread.turns[0].items.map((item) => item.id),
+  [
+    "live-completion-user",
+    "live-completion-reasoning-before",
+    "live-completion-commentary",
+    "live-completion-command-commit",
+    "live-completion-reasoning-after",
+    "live-completion-command-push",
+  ],
+  "turn completion must preserve the item notification order",
+);
+const completionOrderReconciled = mergeThreadSnapshot({
+  id: completionOrderThreadId,
+  status: { type: "idle" },
+  turns: [{
+    id: completionOrderTurnId,
+    status: "completed",
+    items: completionSnapshotItems,
+  }],
+});
+assert.deepEqual(
+  completionOrderReconciled.thread.turns[0].items.map((item) => item.id),
+  [
+    "completion-user",
+    "completion-reasoning-before",
+    "completion-commentary",
+    "live-completion-command-commit",
+    "completion-reasoning-after",
+    "live-completion-command-push",
+    "completion-final",
+  ],
+  "reconciliation must keep live-only commands before the final answer",
+);
+
 assert.deepEqual(
   mergeOrderedById(
     [{ id: "user" }, { id: "commentary" }, { id: "final" }],

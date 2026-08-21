@@ -399,7 +399,7 @@ function threadItemMatchScore(authoritative, live) {
   const liveText = threadItemText(live);
   if (sourceText === null || liveText === null || !sourceText || !liveText) return 0;
   if (sourceText === liveText) return 2;
-  if (!["agentMessage", "plan"].includes(authoritative.type)) return 0;
+  if (!["agentMessage", "plan", "reasoning"].includes(authoritative.type)) return 0;
   if (Math.min(sourceText.length, liveText.length) < 12) return 0;
   return sourceText.startsWith(liveText) || liveText.startsWith(sourceText) ? 1 : 0;
 }
@@ -503,6 +503,19 @@ function mergeThreadItem(authoritative, live) {
   return merged;
 }
 
+function orderTurnItems(items = []) {
+  const ordered = Array.isArray(items) ? items : [];
+  const isFinalAnswer = (item) => (
+    item?.type === "agentMessage" && item.phase === "final_answer"
+  );
+  const finalAnswers = ordered.filter(isFinalAnswer);
+  if (!finalAnswers.length) return ordered;
+  return [
+    ...ordered.filter((item) => !isFinalAnswer(item)),
+    ...finalAnswers,
+  ];
+}
+
 function mergeTurnSnapshot(
   authoritative,
   live,
@@ -512,17 +525,21 @@ function mergeTurnSnapshot(
   if (!live) {
     return {
       ...authoritative,
-      items: mergeOrderedById(authoritative?.items, [], mergeThreadItem),
+      items: orderTurnItems(
+        mergeOrderedById(authoritative?.items, [], mergeThreadItem),
+      ),
     };
   }
   const merged = { ...live, ...authoritative };
   const liveItems = canonicalizeAliases
     ? canonicalizeStreamedItems(authoritative?.items, live?.items, onItemAlias)
     : live?.items;
-  merged.items = mergeOrderedById(
-    authoritative?.items,
-    liveItems,
-    mergeThreadItem,
+  merged.items = orderTurnItems(
+    mergeOrderedById(
+      authoritative?.items,
+      liveItems,
+      mergeThreadItem,
+    ),
   );
   if (
     authoritative?.status === "inProgress"
@@ -702,7 +719,12 @@ function findCachedTurn(entry, turnId) {
   return turns.at(-1) || null;
 }
 
-function cacheTurnUpdate(threadId, turn, fallbackStatus = "inProgress") {
+function cacheTurnUpdate(
+  threadId,
+  turn,
+  fallbackStatus = "inProgress",
+  preserveStreamedItems = false,
+) {
   const entry = cachedThread(threadId, false);
   if (!entry || !turn?.id) return null;
   if (!Array.isArray(entry.thread.turns)) entry.thread.turns = [];
@@ -711,9 +733,19 @@ function cacheTurnUpdate(threadId, turn, fallbackStatus = "inProgress") {
     cached = {
       ...turn,
       status: turn.status || fallbackStatus,
-      items: Array.isArray(turn.items) ? [...turn.items] : [],
+      items: orderTurnItems(Array.isArray(turn.items) ? [...turn.items] : []),
     };
     entry.thread.turns.push(cached);
+  } else if (
+    preserveStreamedItems
+    && Array.isArray(cached.items)
+    && cached.items.length
+  ) {
+    const streamedItems = cached.items;
+    Object.assign(cached, turn, {
+      status: turn.status || fallbackStatus,
+      items: streamedItems,
+    });
   } else {
     const merged = mergeTurnSnapshot(turn, cached, null, false);
     Object.assign(cached, merged);
@@ -2401,7 +2433,11 @@ function handleNotification(method, params) {
       refreshThreads();
       return;
     case "turn/completed":
-      cacheTurnUpdate(params.threadId, params.turn || {}, "completed");
+      // item/* notifications are the ordering authority for a live turn. The
+      // completion snapshot can omit live-only tools and use canonical IDs, so
+      // replacing the streamed sequence here would move those tools after the
+      // final answer before the alias-aware reconciliation runs.
+      cacheTurnUpdate(params.threadId, params.turn || {}, "completed", true);
       clearThreadActivity(params.threadId);
       void reconcileThreadHistory(params.threadId);
       refreshThreads();
