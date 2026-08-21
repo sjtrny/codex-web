@@ -1783,12 +1783,6 @@ function appendHighlightedText(container, text, query) {
   }
 }
 
-function searchRoleLabel(role) {
-  if (role === "user") return "You";
-  if (role === "assistant") return "Codex";
-  return role === "message" ? "Message" : `${role[0]?.toUpperCase() || ""}${role.slice(1)}`;
-}
-
 function searchItemText(item) {
   if (!item) return "";
   if (item.type === "userMessage") return inputText(item.content);
@@ -1889,7 +1883,7 @@ function renderSearchResults(response, query) {
   state.searchResults = response.results;
   ui.searchResults.replaceChildren();
   if (!response.results.length) {
-    let summary = `No messages found for “${query}”.`;
+    let summary = `No conversations found for “${query}”.`;
     if (response.partial) {
       const skipped = response.skippedThreads
         ? `${response.skippedThreads.toLocaleString()} conversation${response.skippedThreads === 1 ? "" : "s"}`
@@ -1903,9 +1897,9 @@ function renderSearchResults(response, query) {
   const shown = response.results.length;
   let summary;
   if (response.truncated || response.total > shown) {
-    summary = `Showing ${shown.toLocaleString()} of ${response.total.toLocaleString()} matches. Refine your search or date range to narrow the results.`;
+    summary = `Showing ${shown.toLocaleString()} of ${response.total.toLocaleString()} matching conversations. Refine your search or date range to narrow the results.`;
   } else {
-    summary = `${response.total.toLocaleString()} match${response.total === 1 ? "" : "es"} found.`;
+    summary = `${response.total.toLocaleString()} matching conversation${response.total === 1 ? "" : "s"} found.`;
   }
   if (response.partial) {
     const skipped = response.skippedThreads
@@ -1928,10 +1922,7 @@ function renderSearchResults(response, query) {
     const title = document.createElement("strong");
     title.className = "search-result-title";
     title.textContent = result.title;
-    const role = document.createElement("span");
-    role.className = "search-result-role";
-    role.textContent = searchRoleLabel(result.role);
-    heading.append(title, role);
+    heading.append(title);
 
     const snippet = document.createElement("span");
     snippet.className = "search-result-snippet";

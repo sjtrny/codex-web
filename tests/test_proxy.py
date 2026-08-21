@@ -446,7 +446,19 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
                                     "text": "No result in this answer.",
                                 },
                             ],
-                        }
+                        },
+                        {
+                            "id": "turn-alpha-later",
+                            "startedAt": 1704240000,
+                            "completedAt": 1704240060,
+                            "items": [
+                                {
+                                    "id": "answer-alpha-later",
+                                    "type": "agentMessage",
+                                    "text": "Another STRASSE hit in Alpha.",
+                                }
+                            ],
+                        },
                     ],
                 }
             },
@@ -562,6 +574,10 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [match["itemId"] for match in result["results"]],
             ["message-alpha", "answer-middle"],
+        )
+        self.assertEqual(
+            len({match["threadId"] for match in result["results"]}),
+            len(result["results"]),
         )
         first, middle = result["results"]
         self.assertEqual(first["messageId"], "message-alpha")

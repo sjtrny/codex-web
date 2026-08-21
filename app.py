@@ -1137,18 +1137,26 @@ async def search_backend_history(
                     skipped_threads += remaining_threads
                     break
                 continue
+            conversation_matches: list[dict[str, object]] = []
             for match in thread_message_matches(
                 response["thread"],
                 query,
                 from_date,
                 to_date,
                 filter_zone,
-                matched_count,
+                0,
             ):
-                matched_count += 1
-                matches.append(match)
-                if len(matches) >= max(limit * 2, 64):
-                    trim_search_matches(matches, sort_direction, limit)
+                conversation_matches.append(match)
+                trim_search_matches(conversation_matches, sort_direction, 1)
+            if not conversation_matches:
+                continue
+
+            # Keep the earliest or latest matching message, according to the
+            # requested ordering, so each conversation appears only once.
+            match = conversation_matches[0]
+            match["_sequence"] = matched_count
+            matched_count += 1
+            matches.append(match)
             trim_search_matches(matches, sort_direction, limit)
 
         for result in matches:

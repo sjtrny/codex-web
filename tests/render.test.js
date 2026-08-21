@@ -1691,14 +1691,14 @@ assert.equal(ui.searchFrom.getAttribute("aria-invalid"), null);
 
 renderSearchResults(normalizedSearch, "STRASSE");
 assert.equal(ui.searchResults.children.length, 1);
-assert.match(ui.searchStatus.textContent, /Showing 1 of 3 matches/);
+assert.match(ui.searchStatus.textContent, /Showing 1 of 3 matching conversations/);
 assert.match(ui.searchStatus.textContent, /2 conversations could not be searched/);
 const searchResultLink = ui.searchResults.children[0].children[0];
 assert.equal(searchResultLink.tagName, "a", "search results should be browser links");
 assert.equal(searchResultLink.getAttribute("href"), "/?thread=search-thread");
 assert.equal(searchResultLink.getAttribute("aria-disabled"), null);
 assert.equal(searchResultLink.children[0].children[0].textContent, "Search result title");
-assert.equal(searchResultLink.children[0].children[1].textContent, "Codex");
+assert.equal(searchResultLink.children[0].children.length, 1, "search results should not show a per-message role");
 const highlightedSnippet = searchResultLink.children[1];
 const highlight = highlightedSnippet.children.find((child) => child.tagName === "mark");
 assert.equal(highlight.textContent, "Straße", "search highlighting should safely preserve Unicode matches");

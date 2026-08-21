@@ -493,7 +493,6 @@ button:disabled { cursor: default; opacity: .45; }
 .search-result-button[aria-disabled="true"] { cursor: default; opacity: .45; }
 .search-result-heading { min-width: 0; display: flex; align-items: baseline; gap: 8px; }
 .search-result-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.search-result-role { flex: none; color: var(--muted-strong); font-size: .68rem; text-transform: uppercase; letter-spacing: .06em; }
 .search-result-snippet { margin: 0; overflow: hidden; color: var(--text); font-size: .9rem; line-height: 1.45; overflow-wrap: anywhere; white-space: pre-wrap; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
 .search-result-snippet mark { padding: 0 .08em; border-radius: 2px; background: var(--match-bg); color: inherit; }
 .search-result-meta { color: var(--muted); font-size: .72rem; }
