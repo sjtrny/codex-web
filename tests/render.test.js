@@ -374,6 +374,41 @@ const command = state.items.get(renderedItemKey("command", "history-thread", "tu
 assert.ok(command.body.textContent.includes("characters omitted"));
 assert.ok(command.body.textContent.length < MAX_ACTIVITY_CHARS + 100);
 
+const previousMarkdown = globalThis.CodexMarkdown;
+const markdownInputs = [];
+globalThis.CodexMarkdown = {
+  render(value) {
+    markdownInputs.push(value);
+    const fragment = document.createDocumentFragment();
+    const heading = document.createElement("h1");
+    heading.textContent = value;
+    fragment.append(heading);
+    return fragment;
+  },
+};
+const literalUserText = "# config comment\nkey: `literal`\n<div>not HTML</div>";
+upsertMessage("plain-user", "user", literalUserText, false, "plain-thread", "plain-turn");
+const plainUser = state.items.get(renderedItemKey(
+  "plain-user",
+  "plain-thread",
+  "plain-turn",
+));
+assert.equal(plainUser.body.textContent, literalUserText);
+assert.equal(plainUser.body.classList.contains("plain-text"), true);
+assert.equal(plainUser.body.children.length, 0, "user text must not create Markdown elements");
+assert.deepEqual(markdownInputs, [], "user messages must bypass the Markdown renderer");
+
+upsertMessage("markdown-agent", "agent", "# Agent heading", false, "plain-thread", "plain-turn");
+const markdownAgent = state.items.get(renderedItemKey(
+  "markdown-agent",
+  "plain-thread",
+  "plain-turn",
+));
+assert.deepEqual(markdownInputs, ["# Agent heading"]);
+assert.equal(markdownAgent.body.classList.contains("plain-text"), false);
+assert.equal(markdownAgent.body.children[0].tagName, "h1");
+globalThis.CodexMarkdown = previousMarkdown;
+
 ui.messages._scrollHeight = 1000;
 ui.messages.clientHeight = 200;
 ui.messages._scrollTop = 240;
