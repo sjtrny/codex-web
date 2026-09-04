@@ -80,6 +80,18 @@ See the provided [`compose.yaml`](compose.yaml) for all configuration options;
 
 Open `http://HOST_IP:8765`.
 
+### Agent response formatting
+
+Codex Web bundles [`codex-web-instructions.md`](codex-web-instructions.md) in
+the application image and adds it to `thread/start`, `thread/resume`, and
+`thread/fork` requests as app-server developer instructions. These instructions
+teach Codex how this UI renders links to local files and inline local images.
+
+The bundled file is stored under `/app` in the image. The normal workspace bind
+mount targets `/workspaces`, so mounting a user's projects does not replace the
+instructions. Project-level `AGENTS.md` files remain separate and are still
+discovered by the app-server from each thread's working directory.
+
 Without Docker:
 
 ```bash

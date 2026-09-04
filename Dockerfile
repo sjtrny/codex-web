@@ -19,6 +19,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir --requirement requirements.txt
 
 COPY app.py ./
+COPY codex-web-instructions.md ./
 COPY static ./static
 COPY --from=frontend /build/static/vendor ./static/vendor
 

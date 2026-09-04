@@ -17,6 +17,53 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 codex_web = importlib.import_module("app")
 
 
+class DeveloperInstructionTests(unittest.TestCase):
+    def test_injects_instructions_into_thread_lifecycle_requests(self) -> None:
+        for method in codex_web.THREAD_INSTRUCTION_METHODS:
+            with self.subTest(method=method):
+                payload = {
+                    "method": method,
+                    "id": 1,
+                    "params": {"threadId": "thread-1"},
+                }
+                rewritten = codex_web.inject_codex_web_instructions(payload)
+
+                self.assertNotIn("developerInstructions", payload["params"])
+                self.assertEqual(
+                    rewritten["params"]["developerInstructions"],
+                    codex_web.CODEX_WEB_DEVELOPER_INSTRUCTIONS,
+                )
+
+    def test_preserves_client_developer_instructions(self) -> None:
+        rewritten = codex_web.inject_codex_web_instructions(
+            {
+                "method": "thread/start",
+                "id": 1,
+                "params": {"developerInstructions": "Client guidance."},
+            }
+        )
+
+        self.assertEqual(
+            rewritten["params"]["developerInstructions"],
+            "Client guidance.\n\n" + codex_web.CODEX_WEB_DEVELOPER_INSTRUCTIONS,
+        )
+
+    def test_leaves_other_and_malformed_requests_unchanged(self) -> None:
+        for payload in (
+            {"method": "turn/start", "id": 1, "params": {}},
+            {"method": "thread/start", "id": 2, "params": []},
+            {
+                "method": "thread/start",
+                "id": 3,
+                "params": {"developerInstructions": 123},
+            },
+        ):
+            with self.subTest(payload=payload):
+                self.assertIs(
+                    codex_web.inject_codex_web_instructions(payload), payload
+                )
+
+
 class SearchHelperTests(unittest.TestCase):
     def test_bounded_search_sort_preserves_message_order_for_equal_dates(self) -> None:
         matches = [
@@ -280,6 +327,32 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             await socket.send_json(payload)
             echoed = json.loads((await socket.receive()).data)
             self.assertEqual(echoed, payload)
+
+    async def test_adds_developer_instructions_to_thread_requests(self) -> None:
+        async with (
+            ClientSession() as session,
+            session.ws_connect(
+                f"http://127.0.0.1:{self.port}/ws",
+                headers={"Origin": "http://host.example:9999"},
+            ) as socket,
+        ):
+            await socket.receive()
+            for request_id, method in enumerate(
+                sorted(codex_web.THREAD_INSTRUCTION_METHODS), start=1
+            ):
+                payload = {
+                    "method": method,
+                    "id": request_id,
+                    "params": {"threadId": "thread-1"},
+                }
+                await socket.send_json(payload)
+                echoed = json.loads((await socket.receive()).data)
+                self.assertEqual(echoed["method"], method)
+                self.assertEqual(echoed["params"]["threadId"], "thread-1")
+                self.assertEqual(
+                    echoed["params"]["developerInstructions"],
+                    codex_web.CODEX_WEB_DEVELOPER_INSTRUCTIONS,
+                )
 
     async def test_accepts_any_browser_origin_without_authentication(self) -> None:
         async with (
