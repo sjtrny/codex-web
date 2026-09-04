@@ -33,6 +33,17 @@ from aiohttp.helpers import content_disposition_header
 APP_VERSION = "0.9.3"
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
+CODEX_WEB_INSTRUCTIONS_PATH = ROOT / "codex-web-instructions.md"
+try:
+    CODEX_WEB_DEVELOPER_INSTRUCTIONS = CODEX_WEB_INSTRUCTIONS_PATH.read_text(
+        encoding="utf-8"
+    ).strip()
+except OSError as exc:
+    raise RuntimeError(
+        f"Codex Web instructions are unavailable: {CODEX_WEB_INSTRUCTIONS_PATH}"
+    ) from exc
+if not CODEX_WEB_DEVELOPER_INSTRUCTIONS:
+    raise RuntimeError("Codex Web instructions must not be empty")
 MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 MAX_HOST_IMAGE_BYTES = 10 * 1024 * 1024
 DEFAULT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -76,6 +87,7 @@ ACTIVE_DOCUMENT_MIMES = {
     "text/xml",
 }
 HOST_IMAGE_SUFFIXES = {".gif", ".jpeg", ".jpg", ".png", ".webp"}
+THREAD_INSTRUCTION_METHODS = {"thread/start", "thread/resume", "thread/fork"}
 
 
 class BackendRPCError(Exception):
@@ -1250,6 +1262,31 @@ def proxy_notice(method: str, **params: object) -> str:
     return json.dumps({"method": method, "params": params}, separators=(",", ":"))
 
 
+def inject_codex_web_instructions(payload: dict[str, object]) -> dict[str, object]:
+    if payload.get("method") not in THREAD_INSTRUCTION_METHODS:
+        return payload
+
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        return payload
+
+    existing = params.get("developerInstructions")
+    if existing is not None and not isinstance(existing, str):
+        return payload
+
+    instructions = "\n\n".join(
+        part
+        for part in (
+            existing.strip() if isinstance(existing, str) else "",
+            CODEX_WEB_DEVELOPER_INSTRUCTIONS,
+        )
+        if part
+    )
+    rewritten = dict(payload)
+    rewritten["params"] = {**params, "developerInstructions": instructions}
+    return rewritten
+
+
 async def websocket_proxy(request: web.Request) -> web.WebSocketResponse:
     browser = web.WebSocketResponse(
         heartbeat=30,
@@ -1288,7 +1325,13 @@ async def websocket_proxy(request: web.Request) -> web.WebSocketResponse:
                         )
                     )
                     continue
-                await upstream.send_str(message.data)
+                rewritten = inject_codex_web_instructions(payload)
+                if rewritten is payload:
+                    await upstream.send_str(message.data)
+                else:
+                    await upstream.send_str(
+                        json.dumps(rewritten, separators=(",", ":"))
+                    )
             elif message.type in {WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR}:
                 break
 
