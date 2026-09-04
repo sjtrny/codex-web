@@ -50,7 +50,7 @@ SEARCH_TIMEOUT_SECONDS = 120
 SEARCH_RPC_TIMEOUT_SECONDS = 20
 CHAT_SOURCE_KINDS = ["cli", "vscode", "appServer"]
 DEFAULT_CHAT_SETTINGS = {
-    "model": "gpt-5.6-terra",
+    "model": "gpt-6-astra",
     "effort": "medium",
     "serviceTier": "",
     "personality": "none",

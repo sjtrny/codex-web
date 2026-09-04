@@ -372,6 +372,7 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(config["workspaceRoot"], str(self.workspace_path))
             self.assertEqual(config["version"], "0.9.3")
             self.assertEqual(config["chatDefaults"], codex_web.DEFAULT_CHAT_SETTINGS)
+            self.assertEqual(config["chatDefaults"]["model"], "gpt-6-astra")
 
     async def test_config_exposes_chat_default_environment_overrides(self) -> None:
         configured = {
