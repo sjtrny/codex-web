@@ -2678,7 +2678,17 @@ function renderedItemKey(itemId, threadId = state.threadId, turnId = null) {
   return JSON.stringify([String(threadId), String(turnId), String(itemId)]);
 }
 
-function renderMessageBody(entry) {
+function renderMessageBody(entry, role) {
+  if (role !== "agent") {
+    if (entry.renderFrame && globalThis.window?.cancelAnimationFrame) {
+      window.cancelAnimationFrame(entry.renderFrame);
+    }
+    entry.renderFrame = null;
+    entry.body.classList.add("plain-text");
+    entry.body.textContent = entry.text;
+    return;
+  }
+
   const renderMarkdown = globalThis.CodexMarkdown?.render;
   if (typeof renderMarkdown !== "function") {
     entry.body.classList.add("plain-text");
@@ -2746,7 +2756,7 @@ function upsertMessage(
     entry.attachments = normalizeMessageAttachments(attachments);
     renderMessageAttachments(entry);
   }
-  renderMessageBody(entry);
+  renderMessageBody(entry, role);
   presentContentChanged(shouldFollow);
   return entry.node;
 }
