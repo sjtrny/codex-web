@@ -100,7 +100,7 @@ Compose, or export them when running directly.
 
 | Environment variable | Built-in default |
 | --- | --- |
-| `CODEX_DEFAULT_MODEL` | `gpt-5.6-terra` |
+| `CODEX_DEFAULT_MODEL` | `gpt-6-astra` |
 | `CODEX_DEFAULT_REASONING_EFFORT` | `medium` |
 | `CODEX_DEFAULT_SERVICE_TIER` | empty (standard service) |
 | `CODEX_DEFAULT_PERSONALITY` | `none` |
@@ -119,6 +119,8 @@ CODEX_DEFAULT_PERMISSION_PROFILE=:danger-full-access
 ```
 
 Values are app-server protocol IDs. Restart the web service after changing them.
+The model picker is populated by the app-server's `model/list` response, so keep
+Codex CLI current to make newly available models selectable.
 
 ## Attachment retention
 
