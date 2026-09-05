@@ -4,10 +4,12 @@
   "private": true,
   "scripts": {
     "build": "esbuild frontend/markdown.js --bundle --minify --format=iife --target=es2020 --outdir=static/vendor --entry-names=markdown --asset-names=fonts/[name]-[hash] --loader:.woff2=file --loader:.woff=file --loader:.ttf=file",
+    "test": "npm run test:markdown && npm run test:copy && npm run test:links && npm run test:theme && npm run test:render",
     "test:markdown": "node tests/markdown.test.mjs",
     "test:copy": "node tests/code-copy.test.mjs",
     "test:links": "node tests/workspace-links.test.mjs",
-    "test:theme": "node tests/theme.test.js"
+    "test:theme": "node tests/theme.test.js",
+    "test:render": "node tests/render.test.js"
   },
   "dependencies": {
     "dompurify": "3.4.13",
