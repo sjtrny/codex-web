@@ -249,6 +249,10 @@ const {
   mergeThreadSnapshot,
   handleNotification,
   handleMessagesScroll,
+  handleMessagesTouchEnd,
+  handleMessagesTouchMove,
+  handleMessagesTouchStart,
+  handleMessagesWheel,
   handlePromptInput,
   inputText,
   splitAttachedFileReferences,
@@ -439,6 +443,54 @@ jumpToPresent();
 assert.equal(state.followPresent, true);
 assert.equal(ui.messages.scrollTop, ui.messages.scrollHeight);
 assert.equal(ui.jumpPresent.hidden, true);
+
+const resistedScrollWrites = ui.messages.scrollWrites;
+handleMessagesWheel({ deltaY: -4 });
+assert.equal(state.followPresent, false, "an upward wheel gesture immediately stops following");
+upsertMessage("live-agent", "agent", " while the wheel gesture is pending", true);
+assert.equal(
+  ui.messages.scrollWrites,
+  resistedScrollWrites,
+  "streaming output must not cancel an upward gesture before its scroll event",
+);
+assert.equal(ui.jumpPresent.hidden, false);
+ui.messages._scrollTop = 790;
+handleMessagesScroll();
+assert.equal(
+  state.followPresent,
+  false,
+  "upward movement inside the near-bottom threshold must stay detached",
+);
+ui.messages._scrollTop = 800;
+handleMessagesScroll();
+assert.equal(state.followPresent, true, "moving back toward the bottom resumes following");
+assert.equal(ui.jumpPresent.hidden, true);
+
+const queuedScrollWrites = ui.messages.scrollWrites;
+ui.messages._scrollTop = 790;
+upsertMessage("live-agent", "agent", " before the queued scroll event", true);
+assert.equal(state.followPresent, false, "incoming output detects upward movement before scroll fires");
+assert.equal(
+  ui.messages.scrollWrites,
+  queuedScrollWrites,
+  "a queued upward scroll must not be overwritten by streaming output",
+);
+
+ui.messages._scrollTop = 700;
+handleMessagesScroll();
+ui.messages._scrollTop = 790;
+upsertMessage("live-agent", "agent", " while returning to the present", true);
+assert.equal(state.followPresent, false, "streaming does not preempt a queued downward scroll");
+handleMessagesScroll();
+assert.equal(state.followPresent, true, "the queued downward scroll resumes following near the bottom");
+jumpToPresent();
+
+handleMessagesTouchStart({ touches: [{ clientY: 100 }] });
+handleMessagesTouchMove({ touches: [{ clientY: 112 }] });
+assert.equal(state.followPresent, false, "a downward touch gesture immediately stops following");
+handleMessagesTouchEnd();
+assert.equal(state.messagesTouchY, null);
+jumpToPresent();
 
 ui.messages._scrollHeight = 1200;
 ui.messages._scrollTop = 1200 - ui.messages.clientHeight - PRESENT_THRESHOLD_PX + 1;

@@ -3,6 +3,7 @@
 const APP_VERSION = "0.9.3";
 const MAX_ACTIVITY_CHARS = 32 * 1024;
 const PRESENT_THRESHOLD_PX = 72;
+const SCROLL_DIRECTION_EPSILON_PX = 1;
 const THREAD_CACHE_LIMIT = 8;
 const THREAD_LIST_PARAMS = Object.freeze({
   limit: 50,
@@ -182,6 +183,8 @@ const state = {
   searchAbortController: null,
   searchResults: [],
   followPresent: true,
+  lastMessagesScrollTop: 0,
+  messagesTouchY: null,
   connectionStatus: "offline",
 };
 
@@ -279,7 +282,7 @@ function renderThinkingIndicator(busy = selectedThreadBusy()) {
   const visible = Boolean(busy);
   ui.messages.setAttribute("aria-busy", String(visible));
   if (ui.thinkingIndicator.hidden === !visible) return;
-  const shouldFollow = state.followPresent && messagesAtPresent();
+  const shouldFollow = shouldFollowMessages();
   ui.thinkingIndicator.hidden = !visible;
   presentContentChanged(shouldFollow);
 }
@@ -2537,6 +2540,7 @@ function clearMessages() {
   state.items.clear();
   state.pendingUser = null;
   state.followPresent = true;
+  rememberMessagesScrollTop();
   ui.jumpPresent.hidden = true;
 }
 
@@ -2544,22 +2548,90 @@ function removeEmpty() {
   ui.messages.querySelector(".empty")?.remove();
 }
 
-function messagesAtPresent() {
-  const distance = ui.messages.scrollHeight
-    - ui.messages.clientHeight
-    - ui.messages.scrollTop;
-  return distance <= PRESENT_THRESHOLD_PX;
+function currentMessagesScrollTop() {
+  const maximum = Math.max(0, ui.messages.scrollHeight - ui.messages.clientHeight);
+  return Math.min(maximum, Math.max(0, ui.messages.scrollTop));
+}
+
+function messagesAtPresent(threshold = PRESENT_THRESHOLD_PX) {
+  const maximum = Math.max(0, ui.messages.scrollHeight - ui.messages.clientHeight);
+  return maximum - currentMessagesScrollTop() <= threshold;
+}
+
+function rememberMessagesScrollTop() {
+  state.lastMessagesScrollTop = currentMessagesScrollTop();
+}
+
+function stopFollowingPresent() {
+  state.followPresent = false;
+  ui.jumpPresent.hidden = false;
+}
+
+function shouldFollowMessages() {
+  // A streamed update can run after scrollTop changes but before the queued
+  // scroll event. Detect that upward move before deciding to pin the viewport.
+  const scrollTop = currentMessagesScrollTop();
+  const movedUp = scrollTop < state.lastMessagesScrollTop - SCROLL_DIRECTION_EPSILON_PX;
+  if (movedUp && !messagesAtPresent(SCROLL_DIRECTION_EPSILON_PX)) {
+    state.lastMessagesScrollTop = scrollTop;
+    stopFollowingPresent();
+  }
+  return state.followPresent && messagesAtPresent();
 }
 
 function handleMessagesScroll() {
-  state.followPresent = messagesAtPresent();
-  if (state.followPresent) ui.jumpPresent.hidden = true;
+  const scrollTop = currentMessagesScrollTop();
+  const movedUp = scrollTop < state.lastMessagesScrollTop - SCROLL_DIRECTION_EPSILON_PX;
+  const movedDown = scrollTop > state.lastMessagesScrollTop + SCROLL_DIRECTION_EPSILON_PX;
+  state.lastMessagesScrollTop = scrollTop;
+
+  if (
+    (movedUp && !messagesAtPresent(SCROLL_DIRECTION_EPSILON_PX))
+    || !messagesAtPresent()
+  ) {
+    stopFollowingPresent();
+  } else if (state.followPresent || movedDown) {
+    state.followPresent = true;
+    ui.jumpPresent.hidden = true;
+  }
+}
+
+function handleMessagesWheel(event) {
+  if (event.deltaY < 0) {
+    // Wheel intent arrives before the browser necessarily exposes a new
+    // scrollTop, so detach synchronously rather than racing the next delta.
+    rememberMessagesScrollTop();
+    stopFollowingPresent();
+  }
+}
+
+function handleMessagesTouchStart(event) {
+  state.messagesTouchY = event.touches?.[0]?.clientY ?? null;
+  rememberMessagesScrollTop();
+}
+
+function handleMessagesTouchMove(event) {
+  const touchY = event.touches?.[0]?.clientY;
+  if (touchY == null) return;
+  if (
+    state.messagesTouchY != null
+    && touchY > state.messagesTouchY + SCROLL_DIRECTION_EPSILON_PX
+  ) {
+    rememberMessagesScrollTop();
+    stopFollowingPresent();
+  }
+  state.messagesTouchY = touchY;
+}
+
+function handleMessagesTouchEnd() {
+  state.messagesTouchY = null;
 }
 
 function jumpToPresent() {
   state.followPresent = true;
   ui.jumpPresent.hidden = true;
   ui.messages.scrollTop = ui.messages.scrollHeight;
+  rememberMessagesScrollTop();
 }
 
 function presentContentChanged(shouldFollow = state.followPresent) {
@@ -2567,8 +2639,7 @@ function presentContentChanged(shouldFollow = state.followPresent) {
   if (shouldFollow && state.followPresent) {
     jumpToPresent();
   } else {
-    state.followPresent = false;
-    ui.jumpPresent.hidden = false;
+    stopFollowingPresent();
   }
 }
 
@@ -2697,7 +2768,7 @@ function renderMessageBody(entry, role) {
   }
 
   const commit = () => {
-    const shouldFollow = state.followPresent && messagesAtPresent();
+    const shouldFollow = shouldFollowMessages();
     entry.renderFrame = null;
     entry.body.classList.remove("plain-text");
     entry.body.replaceChildren(renderMarkdown(entry.text));
@@ -2720,7 +2791,7 @@ function upsertMessage(
   turnId = null,
   attachments = null,
 ) {
-  const shouldFollow = state.followPresent && messagesAtPresent();
+  const shouldFollow = shouldFollowMessages();
   removeEmpty();
   const itemKey = renderedItemKey(id, threadId, turnId);
   let entry = state.items.get(itemKey);
@@ -2769,7 +2840,7 @@ function upsertActivity(
   threadId = state.threadId,
   turnId = null,
 ) {
-  const shouldFollow = state.followPresent && messagesAtPresent();
+  const shouldFollow = shouldFollowMessages();
   removeEmpty();
   const itemKey = renderedItemKey(id, threadId, turnId);
   let entry = state.items.get(itemKey);
@@ -3140,6 +3211,7 @@ function renderCachedThread(entry) {
   if (!entry.followPresent) {
     state.followPresent = false;
     ui.messages.scrollTop = entry.scrollTop;
+    rememberMessagesScrollTop();
     ui.jumpPresent.hidden = messagesAtPresent();
   }
   if (entry.pendingUser) {
@@ -3729,6 +3801,10 @@ if (globalThis.CODEX_WEB_TEST) {
     renderedItemKey,
     handleNotification,
     handleMessagesScroll,
+    handleMessagesTouchEnd,
+    handleMessagesTouchMove,
+    handleMessagesTouchStart,
+    handleMessagesWheel,
     isSearchSelectionCurrent,
     jumpToPresent,
     renderThreadHistory,
@@ -3795,6 +3871,11 @@ if (globalThis.CODEX_WEB_TEST) {
     }
   });
   ui.messages.addEventListener("scroll", handleMessagesScroll, { passive: true });
+  ui.messages.addEventListener("wheel", handleMessagesWheel, { passive: true });
+  ui.messages.addEventListener("touchstart", handleMessagesTouchStart, { passive: true });
+  ui.messages.addEventListener("touchmove", handleMessagesTouchMove, { passive: true });
+  ui.messages.addEventListener("touchend", handleMessagesTouchEnd, { passive: true });
+  ui.messages.addEventListener("touchcancel", handleMessagesTouchEnd, { passive: true });
   ui.jumpPresent.addEventListener("click", jumpToPresent);
   ui.stop.addEventListener("click", stopTurn);
   ui.settingsToggle.addEventListener("click", () => setSettingsOpen(!state.settingsOpen));
