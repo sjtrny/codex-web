@@ -119,6 +119,7 @@ const ui = {
   notice: el("notice"),
   messages: el("messages"),
   thinkingIndicator: el("thinking-indicator"),
+  thinkingLabel: el("thinking-label"),
   jumpPresent: el("jump-present"),
   requests: el("requests"),
   attachments: el("attachments"),
@@ -136,6 +137,9 @@ const state = {
   threadId: null,
   activeTurns: new Map(),
   submittingThreads: new Set(),
+  steeringThreads: new Set(),
+  pendingSteers: new Map(),
+  failedSteerAttachments: new Map(),
   submittingViews: new Set(),
   selectionId: 0,
   threads: [],
@@ -259,11 +263,16 @@ function notice(text = "") {
 function updateControls() {
   const busy = selectedThreadBusy();
   const turnId = selectedTurnId();
-  ui.send.disabled = !state.ready || busy || state.uploading;
-  ui.fileInput.disabled = busy || state.uploading;
+  const blocked = selectedThreadSubmitting() || (busy && !turnId);
+  ui.send.disabled = !state.ready || blocked || state.uploading;
+  ui.send.textContent = turnId ? "Reply" : "Send";
+  ui.send.title = turnId ? "Send a reply to the current task" : "Start a new turn";
+  ui.prompt.placeholder = turnId ? "Reply or add instructions while Codex works…" : "Ask Codex…";
+  ui.fileInput.disabled = blocked || state.uploading;
   ui.stop.disabled = !state.ready || !state.threadId || !turnId;
   ui.settingsToggle.disabled = !state.ready;
   ui.settingsFields.disabled = !state.ready;
+  renderRequests();
   renderThinkingIndicator(busy);
 }
 
@@ -271,16 +280,61 @@ function selectedTurnId() {
   return state.threadId ? (state.activeTurns.get(state.threadId) || null) : null;
 }
 
-function selectedThreadBusy() {
+function selectedThreadSubmitting() {
   if (state.submittingViews.has(state.selectionId)) return true;
   if (!state.threadId) return false;
   return state.submittingThreads.has(state.threadId)
-    || state.activeTurns.has(state.threadId);
+    || state.steeringThreads.has(state.threadId);
+}
+
+function selectedThreadBusy() {
+  return selectedThreadSubmitting() || state.activeTurns.has(state.threadId);
+}
+
+function pendingAsyncQuestion(threadId) {
+  if (!state.activeTurns.has(threadId)) return null;
+  const entry = cachedThread(threadId, false);
+  const turnId = state.activeTurns.get(threadId);
+  const turn = turnId
+    ? findCachedTurn(entry, turnId)
+    : [...(entry?.thread.turns || [])].reverse().find((item) => item.status === "inProgress");
+  if (!turn || turn.status !== "inProgress") return null;
+  let question = null;
+  for (const item of turn.items || []) {
+    if (item.type === "userMessage") question = null;
+    if (item.type !== "agentMessage") continue;
+    if (item.questions?.length) question = item;
+    else if (item.phase === "final_answer") question = null;
+  }
+  if (!question) return null;
+  const answered = [...state.pendingSteers.values()].some((pending) => (
+    pending.threadId === threadId && pending.turnId === turn.id && pending.accepted
+    && pending.asyncQuestionId != null
+    && String(resolvedThreadItemId(threadId, turn.id, pending.asyncQuestionId)) === String(question.id)
+  ));
+  return answered ? null : question;
 }
 
 function renderThinkingIndicator(busy = selectedThreadBusy()) {
   const visible = Boolean(busy);
-  ui.messages.setAttribute("aria-busy", String(visible));
+  const requests = [...state.requestCards.values()].filter((card) => (
+    card.requestParams?.threadId === state.threadId && !card.requestDisconnected
+  ));
+  const inputs = requests.filter((card) => card.requestKind === "input");
+  const flags = cachedThread(state.threadId, false)?.thread.status?.activeFlags || [];
+  const waitingOnInput = inputs.some((card) => card.requestParams.isBlocking !== false)
+    || flags.includes("waitingOnUserInput")
+    || Boolean(pendingAsyncQuestion(state.threadId));
+  const waitingOnApproval = requests.some((card) => card.requestKind === "approval")
+    || flags.includes("waitingOnApproval");
+  const label = waitingOnInput ? "Waiting for your answer"
+    : waitingOnApproval ? "Waiting for approval"
+      : inputs.length ? "Working — question pending"
+        : "Codex is thinking";
+  ui.thinkingLabel.textContent = label;
+  ui.thinkingIndicator.setAttribute("aria-label", label);
+  ui.thinkingIndicator.classList.toggle("waiting", waitingOnInput || waitingOnApproval);
+  ui.messages.setAttribute("aria-busy", String(visible && !waitingOnInput && !waitingOnApproval));
   if (ui.thinkingIndicator.hidden === !visible) return;
   const shouldFollow = shouldFollowMessages();
   ui.thinkingIndicator.hidden = !visible;
@@ -298,6 +352,8 @@ function clearThreadActivity(threadId) {
   if (!threadId) return;
   state.submittingThreads.delete(threadId);
   state.activeTurns.delete(threadId);
+  const cached = cachedThread(threadId, false);
+  if (cached) cached.thread.status = { type: "idle" };
   updateControls();
 }
 
@@ -479,6 +535,13 @@ function canonicalizeStreamedItems(authoritative = [], live = [], onItemAlias = 
 function mergeThreadItem(authoritative, live) {
   if (!live) return { ...authoritative };
   const merged = { ...live, ...authoritative };
+  if (
+    authoritative?.type === "agentMessage"
+    && !authoritative.questions?.length
+    && live?.questions?.length
+  ) {
+    merged.questions = live.questions;
+  }
   for (const field of ["text", "aggregatedOutput"]) {
     const sourceText = authoritative?.[field];
     const liveText = live?.[field];
@@ -508,14 +571,23 @@ function mergeThreadItem(authoritative, live) {
 
 function orderTurnItems(items = []) {
   const ordered = Array.isArray(items) ? items : [];
-  const isFinalAnswer = (item) => (
-    item?.type === "agentMessage" && item.phase === "final_answer"
-  );
-  const finalAnswers = ordered.filter(isFinalAnswer);
-  if (!finalAnswers.length) return ordered;
+  // Reconciliation can append live-only tools after the terminal answer. Move
+  // only that answer behind them: asynchronous questions also use final_answer,
+  // and steering can place another user message after an earlier final answer.
+  const finalIndex = ordered.findLastIndex((item) => (
+    item?.type === "agentMessage" || item?.type === "userMessage"
+  ));
+  const finalAnswer = ordered[finalIndex];
+  if (
+    finalAnswer?.type !== "agentMessage"
+    || finalAnswer.phase !== "final_answer"
+    || finalAnswer.questions?.length
+    || finalIndex === ordered.length - 1
+  ) return ordered;
   return [
-    ...ordered.filter((item) => !isFinalAnswer(item)),
-    ...finalAnswers,
+    ...ordered.slice(0, finalIndex),
+    ...ordered.slice(finalIndex + 1),
+    finalAnswer,
   ];
 }
 
@@ -578,10 +650,14 @@ function pendingUserMatches(pending, item, threadId, turnId) {
   if (!pending || pending.threadId == null || threadId == null) return false;
   if (String(pending.threadId) !== String(threadId)) return false;
   if (item?.id != null && String(pending.id) === String(item.id)) return true;
+  const presentation = userMessagePresentation(item?.content);
   return Boolean(
     pending.turnId != null
     && turnId != null
     && String(pending.turnId) === String(turnId)
+    && presentation.text === pending.text
+    && JSON.stringify(presentation.attachments.map((entry) => entry.path))
+      === JSON.stringify((pending.attachments || []).map((entry) => entry.path))
   );
 }
 
@@ -596,6 +672,8 @@ function threadContainsPendingUser(thread, pending) {
 
 function cacheThreadSnapshot(thread) {
   if (!thread?.id) return null;
+  reconcileSteersFromThread(thread);
+  reconcileRequestsFromThread(thread);
   const previous = state.threadCache.get(thread.id);
   const entry = {
     thread,
@@ -629,6 +707,8 @@ function mergeThreadSnapshot(thread) {
     entry.pendingUser = null;
   }
   state.threadCache.set(thread.id, entry);
+  reconcileSteersFromThread(entry.thread);
+  reconcileRequestsFromThread(entry.thread);
   pruneThreadCache();
   return entry;
 }
@@ -696,6 +776,11 @@ function restoreComposerDraft(key = state.composerKey) {
   ui.prompt.value = state.composerDrafts.get(key) || "";
   ui.prompt.setSelectionRange?.(ui.prompt.value.length, ui.prompt.value.length);
   resetPromptHistoryNavigation();
+  if (state.failedSteerAttachments.has(key)) {
+    state.attachments = state.failedSteerAttachments.get(key);
+    state.failedSteerAttachments.delete(key);
+    renderAttachments();
+  }
 }
 
 function clearComposerDraft(key = state.composerKey) {
@@ -758,6 +843,7 @@ function cacheTurnUpdate(
 }
 
 function cacheItemUpdate(params) {
+  reconcilePendingSteer(params.threadId, params.turnId, params.item);
   const entry = cachedThread(params.threadId, false);
   const item = params.item;
   if (!entry || !item?.id) return;
@@ -773,7 +859,13 @@ function cacheItemUpdate(params) {
   if (!Array.isArray(turn.items)) turn.items = [];
   const itemId = resolvedCachedItemId(entry, params.turnId, item.id);
   const index = turn.items.findIndex((candidate) => String(candidate.id) === itemId);
-  if (index >= 0) Object.assign(turn.items[index], item, { id: itemId });
+  if (index >= 0) {
+    const previousQuestions = turn.items[index].questions;
+    Object.assign(turn.items[index], item, { id: itemId });
+    if (previousQuestions?.length && !item.questions?.length) {
+      turn.items[index].questions = previousQuestions;
+    }
+  }
   else turn.items.push({ ...item, id: itemId });
   if (
     item.type === "userMessage"
@@ -1055,7 +1147,7 @@ function renderChatSettings() {
 
   const count = CHAT_SETTING_FIELDS.filter((field) => settings[field]).length;
   const unavailable = !personalitySupported ? " Personality is unavailable for this model." : "";
-  ui.settingsNote.textContent = `${count || "No"} override${count === 1 ? "" : "s"} set. Instance defaults apply wherever Default is selected. Changes apply to the next message and remain with this chat.${unavailable}`;
+  ui.settingsNote.textContent = `${count || "No"} override${count === 1 ? "" : "s"} set. Instance defaults apply wherever Default is selected. Changes apply to the next new turn, not replies sent while Codex works, and remain with this chat.${unavailable}`;
   persistChatSettings();
 }
 
@@ -2134,7 +2226,7 @@ function renderAttachments() {
 
 async function uploadFiles(fileList) {
   const files = [...fileList].filter((file) => file.size >= 0);
-  if (!files.length || selectedThreadBusy() || state.uploading) return;
+  if (!files.length || selectedThreadSubmitting() || (selectedThreadBusy() && !selectedTurnId()) || state.uploading) return;
 
   const limits = state.uploadLimits;
   if (limits && state.attachments.length + files.length > limits.maxFiles) {
@@ -2305,6 +2397,7 @@ async function connect() {
     state.activeTurns.clear();
     state.submittingThreads.clear();
     state.submittingViews.clear();
+    disconnectRequests();
     failPending("Connection closed");
     state.threadReconciliations.clear();
     setStatus("offline", "offline");
@@ -2398,6 +2491,7 @@ function handleNotification(method, params) {
       refreshThreads();
       return;
     case "thread/deleted":
+      removeRequestsForTurn(params.threadId);
       state.provisionalThreads.delete(params.threadId);
       state.threadCache.delete(params.threadId);
       state.threadReconciliations.delete(params.threadId);
@@ -2416,6 +2510,7 @@ function handleNotification(method, params) {
         }
       } else {
         state.activeTurns.delete(params.threadId);
+        removeRequestsForTurn(params.threadId);
       }
       updateControls();
       refreshThreads();
@@ -2441,6 +2536,7 @@ function handleNotification(method, params) {
       // replacing the streamed sequence here would move those tools after the
       // final answer before the alias-aware reconciliation runs.
       cacheTurnUpdate(params.threadId, params.turn || {}, "completed", true);
+      removeRequestsForTurn(params.threadId, params.turn?.id);
       clearThreadActivity(params.threadId);
       void reconcileThreadHistory(params.threadId);
       refreshThreads();
@@ -2450,6 +2546,7 @@ function handleNotification(method, params) {
       reconcileMissingTurnPrefix(params);
       if (params.threadId === state.threadId) {
         renderItem(params.item, false, params.threadId, params.turnId);
+        updateControls();
       }
       return;
     case "item/completed":
@@ -2458,6 +2555,7 @@ function handleNotification(method, params) {
       rememberThreadPrompt(params.threadId, params.item);
       if (params.threadId === state.threadId) {
         renderItem(params.item, true, params.threadId, params.turnId);
+        updateControls();
       }
       return;
     case "item/agentMessage/delta":
@@ -3227,6 +3325,9 @@ function renderCachedThread(entry) {
     );
     state.pendingUser = { ...pending, node };
   }
+  for (const pending of state.pendingSteers.values()) {
+    if (pending.threadId === thread.id) renderPendingSteer(pending);
+  }
 }
 
 function threadLabel(thread) {
@@ -3462,7 +3563,12 @@ async function submitPrompt(event) {
   const text = draftText.trim();
   const attachments = [...state.attachments];
   const input = buildTurnInput(text, attachments);
-  if (!input.length || !state.ready || selectedThreadBusy() || state.uploading) return;
+  if (!input.length || !state.ready || selectedThreadSubmitting() || state.uploading) return;
+  if (selectedThreadBusy()) {
+    const turnId = selectedTurnId();
+    if (turnId) await submitSteer({ draftText, text, attachments, input, turnId });
+    return;
+  }
   const selectionId = state.selectionId;
   const submissionComposerKey = state.composerKey;
   let targetComposerKey = submissionComposerKey;
@@ -3577,6 +3683,117 @@ async function submitPrompt(event) {
   }
 }
 
+function renderPendingSteer(pending) {
+  pending.node = upsertMessage(
+    pending.id, "user", pending.text, false,
+    pending.threadId, pending.turnId, pending.attachments,
+  );
+}
+
+function removePendingSteer(pending) {
+  state.pendingSteers.delete(pending.id);
+  pending.node?.remove();
+  if (state.threadId === pending.threadId) {
+    state.items.delete(renderedItemKey(pending.id, pending.threadId, pending.turnId));
+  }
+}
+
+function reconcileRequestsFromThread(thread) {
+  for (const [id, card] of state.requestCards) {
+    if (card.requestParams.threadId !== thread?.id) continue;
+    const turn = (thread.turns || []).find((entry) => entry.id === card.requestParams.turnId);
+    const terminal = turn?.status && turn.status !== "inProgress";
+    const disconnectedIdle = card.requestDisconnected && thread.status?.type === "idle"
+      && !(thread.turns || []).some((entry) => entry.status === "inProgress");
+    if (terminal || disconnectedIdle) removeRequest(id);
+  }
+}
+
+function steerInputKey(content) {
+  return JSON.stringify((content || []).map((part) => ({
+    type: part.type, text: part.text, path: part.path, url: part.url,
+  })));
+}
+
+function reconcilePendingSteer(threadId, turnId, item) {
+  if (item?.type !== "userMessage" || item.id == null) return;
+  const pending = [...state.pendingSteers.values()].filter((entry) => (
+    entry.threadId === threadId && entry.turnId === turnId
+  ));
+  const match = pending.find((entry) => String(item.id) === entry.id)
+    || pending.find((entry) => (
+      ![...entry.knownUserIds].some((id) => (
+        String(item.id) === String(resolvedThreadItemId(threadId, turnId, id))
+      ))
+      && steerInputKey(item.content) === steerInputKey(entry.input)
+    ));
+  // A started/completed pair or repeated snapshot must not consume a second
+  // identical reply. Existing messages in this turn are never reply echoes.
+  for (const entry of pending) entry.knownUserIds.add(String(item.id));
+  if (match) removePendingSteer(match);
+}
+
+function reconcileSteersFromThread(thread) {
+  for (const turn of thread?.turns || []) {
+    for (const item of turn.items || []) {
+      reconcilePendingSteer(thread.id, turn.id, item);
+    }
+  }
+}
+
+async function submitSteer({ draftText, text, attachments, input, turnId }) {
+  const threadId = state.threadId;
+  const composerKey = state.composerKey;
+  const id = globalThis.crypto?.randomUUID?.()
+    || `reply-${Date.now()}-${state.nextId++}`;
+  const turn = findCachedTurn(cachedThread(threadId, false), turnId);
+  const pending = {
+    id, threadId, turnId, text, attachments, input,
+    asyncQuestionId: pendingAsyncQuestion(threadId)?.id || null,
+    knownUserIds: new Set((turn?.items || []).filter((item) => item.type === "userMessage").map((item) => String(item.id))),
+  };
+  state.pendingSteers.set(id, pending);
+  state.steeringThreads.add(threadId);
+  clearComposerDraft(composerKey);
+  state.attachments = [];
+  renderAttachments();
+  notice("");
+  jumpToPresent();
+  renderPendingSteer(pending);
+  updateControls();
+  try {
+    await rpc("turn/steer", {
+      threadId, expectedTurnId: turnId, input, clientUserMessageId: id,
+    });
+    pending.accepted = true;
+    // Receipt does not mean the input has been consumed. In particular, do not
+    // mark a turn active here: completion may already have arrived.
+    void reconcileThreadHistory(threadId);
+  } catch (error) {
+    if (state.pendingSteers.has(id)) {
+      removePendingSteer(pending);
+      const currentDraft = state.composerDrafts.get(composerKey) || "";
+      state.composerDrafts.set(composerKey, currentDraft ? `${draftText}\n\n${currentDraft}` : draftText);
+      if (state.threadId === threadId && state.composerKey === composerKey) {
+        restoreComposerDraft(composerKey);
+        state.attachments = [...attachments, ...state.attachments];
+        renderAttachments();
+      } else if (attachments.length) {
+        state.failedSteerAttachments.set(composerKey, attachments);
+      }
+      notice(`Reply not confirmed: ${error.message}. Your reply was kept as a draft; it was not sent again.`);
+    } else {
+      notice(`The reply is in the conversation, but confirmation failed: ${error.message}`);
+    }
+    // A stale expectedTurnId can mean work ended just before the reply. Refresh
+    // state and leave resubmission to the user instead of starting another task.
+    if (state.ready) void reconcileThreadHistory(threadId);
+  } finally {
+    state.steeringThreads.delete(threadId);
+    updateControls();
+  }
+}
+
 async function stopTurn() {
   const threadId = state.threadId;
   const turnId = selectedTurnId();
@@ -3592,14 +3809,74 @@ function removeRequest(id) {
   const card = state.requestCards.get(String(id));
   if (card) card.remove();
   state.requestCards.delete(String(id));
+  updateControls();
+}
+
+function renderRequests() {
+  for (const card of state.requestCards.values()) {
+    card.hidden = card.requestParams.threadId !== state.threadId;
+    for (const button of card.requestActions) {
+      button.disabled = !state.ready || card.requestDisconnected;
+    }
+    card.requestConnectionNotice.hidden = !card.requestDisconnected;
+  }
+}
+
+function removeRequestsForTurn(threadId, turnId = null) {
+  for (const [id, card] of state.requestCards) {
+    const params = card.requestParams;
+    if (params.threadId !== threadId) continue;
+    if (turnId && params.turnId && params.turnId !== turnId) continue;
+    card.remove();
+    state.requestCards.delete(id);
+  }
+  updateControls();
+}
+
+function clearRequests() {
+  for (const card of state.requestCards.values()) card.remove();
+  state.requestCards.clear();
+  updateControls();
+}
+
+function disconnectRequests() {
+  const cards = [...state.requestCards.entries()];
+  state.requestCards.clear();
+  for (const [id, card] of cards) {
+    card.requestDisconnected = true;
+    // The new connection may reuse an old request ID for a different question.
+    // Keep stale cards under separate keys until their own request is replayed.
+    state.requestCards.set(`disconnected:${state.connectionGeneration}:${id}`, card);
+  }
+  updateControls();
 }
 
 function actionButton(label, action) {
   const button = document.createElement("button");
   button.type = "button";
   button.textContent = label;
-  button.addEventListener("click", action, { once: true });
+  button.addEventListener("click", action);
   return button;
+}
+
+function sendRequestResponse(card, result = null, error = null) {
+  if (state.requestCards.get(String(card.requestId)) !== card) return;
+  try {
+    if (!state.ready || card.requestDisconnected) {
+      throw new Error("Codex is reconnecting");
+    }
+    respond(card.requestId, result, error);
+    removeRequest(card.requestId);
+  } catch (sendError) {
+    let alert = card.querySelector(".request-error");
+    if (!alert) {
+      alert = document.createElement("p");
+      alert.className = "request-error";
+      alert.setAttribute("role", "alert");
+      card.append(alert);
+    }
+    alert.textContent = `${sendError.message}. Your answer has not been sent. Try again when connected.`;
+  }
 }
 
 function approvalRequest(message, kind) {
@@ -3616,8 +3893,7 @@ function approvalRequest(message, kind) {
   actions.className = "actions";
 
   const decide = (decision) => {
-    respond(message.id, { decision });
-    removeRequest(message.id);
+    sendRequestResponse(card, { decision });
   };
   actions.append(
     actionButton("Allow", () => decide("accept")),
@@ -3626,7 +3902,7 @@ function approvalRequest(message, kind) {
     actionButton("Cancel turn", () => decide("cancel")),
   );
   card.append(title, reason, detail, actions);
-  addRequest(message.id, card);
+  addRequest(message.id, card, params, "approval", message.method);
 }
 
 function userInputRequest(message) {
@@ -3634,42 +3910,69 @@ function userInputRequest(message) {
   const card = document.createElement("article");
   card.className = "request";
   const title = document.createElement("strong");
-  title.textContent = "Codex needs input";
+  title.textContent = params.isBlocking === false ? "Question while Codex works" : "Codex needs input";
   card.append(title);
   const controls = [];
 
   for (const question of params.questions || []) {
+    const group = document.createElement("div");
+    group.className = "request-question";
     const label = document.createElement("label");
     const prompt = document.createElement("span");
     prompt.textContent = `${question.header || "Question"}: ${question.question}`;
     let control;
+    let freeform = null;
     if (question.options?.length) {
       control = document.createElement("select");
+      control.className = "request-choice";
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "Choose an answer…";
+      control.append(placeholder);
       for (const option of question.options) {
         const choice = document.createElement("option");
         choice.value = option.label;
         choice.textContent = option.description ? `${option.label} — ${option.description}` : option.label;
         control.append(choice);
       }
+      control.value = "";
+      freeform = document.createElement("input");
+      freeform.className = "request-answer request-freeform";
+      freeform.type = question.isSecret ? "password" : "text";
+      freeform.autocomplete = "off";
+      freeform.addEventListener("input", () => { control.value = ""; });
+      control.addEventListener("change", () => { freeform.value = ""; });
     } else {
       control = document.createElement("input");
+      control.className = "request-answer";
       control.type = question.isSecret ? "password" : "text";
+      control.autocomplete = "off";
     }
     label.append(prompt, control);
-    card.append(label);
-    controls.push({ id: question.id, control });
+    group.append(label);
+    if (freeform) {
+      const otherLabel = document.createElement("label");
+      const otherPrompt = document.createElement("span");
+      otherPrompt.textContent = "Or write your own answer";
+      otherLabel.append(otherPrompt, freeform);
+      group.append(otherLabel);
+    }
+    card.append(group);
+    controls.push({ id: question.id, control, freeform });
   }
 
   const actions = document.createElement("div");
   actions.className = "actions";
   actions.append(actionButton("Submit", () => {
     const answers = {};
-    for (const entry of controls) answers[entry.id] = { answers: [entry.control.value] };
-    respond(message.id, { answers });
-    removeRequest(message.id);
+    for (const entry of controls) {
+      const value = entry.freeform?.value || entry.control.value;
+      answers[entry.id] = { answers: value ? [value] : [] };
+    }
+    sendRequestResponse(card, { answers });
   }));
   card.append(actions);
-  addRequest(message.id, card);
+  addRequest(message.id, card, params, "input", message.method);
 }
 
 function unsupportedRequest(message) {
@@ -3682,20 +3985,71 @@ function unsupportedRequest(message) {
   const actions = document.createElement("div");
   actions.className = "actions";
   actions.append(actionButton("Reject", () => {
-    respond(message.id, null, { code: -32601, message: `Unsupported by Codex Web: ${message.method}` });
-    removeRequest(message.id);
+    sendRequestResponse(card, null, { code: -32601, message: `Unsupported by Codex Web: ${message.method}` });
   }));
   card.append(title, detail, actions);
-  addRequest(message.id, card);
+  addRequest(message.id, card, message.params || {}, "unsupported", message.method);
 }
 
-function addRequest(id, card) {
-  removeRequest(id);
+function requestParamsForMessage(params) {
+  const threadId = params.threadId ?? params.conversationId ?? state.threadId;
+  return {
+    ...params,
+    threadId,
+    turnId: params.turnId ?? state.activeTurns.get(threadId) ?? null,
+  };
+}
+
+function addRequest(id, card, params, kind, method) {
+  const previous = state.requestCards.get(String(id));
+  if (previous) previous.remove();
+  card.requestParams = requestParamsForMessage(params);
+  card.requestKind = kind;
+  card.requestMethod = method;
+  card.requestId = id;
+  card.requestDisconnected = false;
+  card.requestActions = Array.from(card.querySelector(".actions")?.children || []);
+  const connectionNotice = document.createElement("p");
+  connectionNotice.className = "request-connection";
+  connectionNotice.textContent = kind === "input"
+    ? "Reconnecting question… Your answer is saved here."
+    : "Reconnecting request…";
+  card.requestConnectionNotice = connectionNotice;
+  card.append(connectionNotice);
   state.requestCards.set(String(id), card);
   ui.requests.append(card);
+  updateControls();
 }
 
 function handleServerRequest(message) {
+  const params = requestParamsForMessage(message.params || {});
+  for (const [id, card] of state.requestCards) {
+    if (card.requestMethod !== message.method) continue;
+    const previous = card.requestParams;
+    if (previous.threadId !== params.threadId || previous.turnId !== params.turnId) continue;
+    if (card.requestDisconnected) {
+      // Request IDs belong to a connection. Only a replay of the same tool
+      // request can make a saved answer safe to send on the new connection.
+      const itemId = params.itemId || params.callId;
+      if (!itemId || itemId !== (previous.itemId || previous.callId)) continue;
+    } else if (id !== String(message.id)) {
+      continue;
+    }
+    if (JSON.stringify(previous.questions) !== JSON.stringify(params.questions)) continue;
+    if (JSON.stringify(previous.command) !== JSON.stringify(params.command)) continue;
+    if (previous.reason !== params.reason || previous.isBlocking !== params.isBlocking) continue;
+    const replaced = state.requestCards.get(String(message.id));
+    if (replaced && replaced !== card) replaced.remove();
+    state.requestCards.delete(id);
+    card.requestId = message.id;
+    card.requestParams = params;
+    card.requestDisconnected = false;
+    const previousError = card.querySelector(".request-error");
+    if (previousError) previousError.remove();
+    state.requestCards.set(String(message.id), card);
+    updateControls();
+    return;
+  }
   switch (message.method) {
     case "item/commandExecution/requestApproval":
     case "execCommandApproval":
@@ -3813,9 +4167,18 @@ if (globalThis.CODEX_WEB_TEST) {
     renderThreads,
     renderThemeControl,
     selectedThreadBusy,
+    selectedThreadSubmitting,
     selectedTurnId,
     setThreadActivity,
     showStartedThread,
+    submitPrompt,
+    handleMessage,
+    handleServerRequest,
+    renderRequests,
+    removeRequest,
+    removeRequestsForTurn,
+    clearRequests,
+    disconnectRequests,
     cancelSidebarSwipe,
     cancelSidebarResize,
     clampSidebarWidth,
@@ -3975,7 +4338,7 @@ if (globalThis.CODEX_WEB_TEST) {
   for (const eventName of ["dragenter", "dragover"]) {
     ui.composer.addEventListener(eventName, (event) => {
       event.preventDefault();
-      if (!selectedThreadBusy() && !state.uploading) ui.composer.classList.add("drop-target");
+      if (!ui.fileInput.disabled) ui.composer.classList.add("drop-target");
     });
   }
   ui.composer.addEventListener("dragleave", (event) => {

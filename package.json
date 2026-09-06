@@ -9,7 +9,8 @@
     "test:copy": "node tests/code-copy.test.mjs",
     "test:links": "node tests/workspace-links.test.mjs",
     "test:theme": "node tests/theme.test.js",
-    "test:render": "node tests/render.test.js"
+    "test:render": "node tests/render.test.js",
+    "test:browser:questions": "node tests/questions.browser.cjs"
   },
   "dependencies": {
     "dompurify": "3.4.13",

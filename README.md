@@ -105,6 +105,27 @@ CODEX_UPLOAD_DIR="$PWD/uploads" CODEX_UPLOAD_HOST_DIR="$PWD/uploads" \
 HOST=0.0.0.0 PORT=8765 .venv/bin/python app.py
 ```
 
+### Reply while Codex works
+
+During an active task, the chat button changes to **Reply**. Send an answer,
+correction, or additional instruction without stopping the task. Attachments
+are supported. Replies use the current task's settings; Tune changes apply to
+the next new turn.
+
+Structured questions appear below the conversation. Choose a suggested answer
+or write your own, then select **Submit**. The status distinguishes **Waiting
+for your answer** from **Working — question pending**. Questions stay with their
+chat, and typed answers survive chat switching and temporary disconnections.
+
+If a task ends before a reply is accepted, the reply remains a draft for you to
+send again. Codex Web does not automatically start a new task. Mid-task replies
+require an app-server that supports `turn/steer`.
+
+For an isolated desktop/mobile browser check, install the demo's Playwright
+dependencies and Chromium with `demo/setup.sh`, then run
+`npm run test:browser:questions`. This check uses simulated app-server events
+and does not start Codex tasks or change the running service.
+
 ### Tune defaults
 
 Unset **Tune** fields use these instance defaults. Set them in `.env` for Docker
