@@ -116,6 +116,14 @@ Open **Model and chat settings** beside **Attach** to change the model,
 reasoning, and other chat options in a modal. Changes are saved for the chat and
 apply to the next new turn. Replies use the current task's settings.
 
+**Working folder** is the folder on the Codex server where commands start and
+project files are found. It replaces the old `cwd` header input. The field shows
+the current path, uses the chat's folder by default, and keeps your changes with
+that chat. Clear it to return to the chat's default folder. Changing it does not
+move files or affect a task already running.
+
+Settings, Attach, and Send/Reply/Stop are grouped on the right of the composer.
+
 Questions appear as ordinary conversation text. Answer using the same text box
 and **Reply** button; there are no separate question cards or answer controls.
 The status distinguishes **Waiting for your answer** from **Working — question

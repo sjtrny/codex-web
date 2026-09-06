@@ -46,10 +46,6 @@
         <header class="topbar">
           <button id="menu" class="menu-button" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="Open conversations">Chats</button>
           <strong id="thread-title">New thread</strong>
-          <label class="cwd-label">
-            <span>cwd</span>
-            <input id="cwd" spellcheck="false" autocomplete="off">
-          </label>
         </header>
 
         <div id="notice" class="notice" hidden></div>
@@ -67,11 +63,8 @@
 
         <form id="composer" class="composer">
           <div id="attachments" class="attachments" aria-label="Attachments" hidden></div>
+          <textarea id="prompt" rows="3" placeholder="Ask Codex…"></textarea>
           <div class="composer-tools">
-            <label class="file-picker" title="Attach files or images">
-              <span>Attach</span>
-              <input id="file-input" type="file" multiple>
-            </label>
             <button id="settings-toggle" class="composer-settings" type="button" aria-controls="settings-dialog" aria-expanded="false" aria-haspopup="dialog" aria-label="Model and chat settings" title="Model and chat settings" disabled>
               <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                 <path d="M4 7h3m4 0h9M4 17h9m4 0h3"></path>
@@ -79,9 +72,12 @@
                 <circle cx="15" cy="17" r="2"></circle>
               </svg>
             </button>
+            <label class="file-picker" title="Attach files or images">
+              <span>Attach</span>
+              <input id="file-input" type="file" multiple>
+            </label>
+            <button id="send" type="submit" disabled>Send</button>
           </div>
-          <textarea id="prompt" rows="3" placeholder="Ask Codex…"></textarea>
-          <button id="send" type="submit" disabled>Send</button>
         </form>
 
         <section id="search-view" class="search-view" aria-labelledby="search-title" hidden>
@@ -133,6 +129,11 @@
       <div class="preferences-body">
         <fieldset id="settings-fields" class="settings-grid" disabled>
           <legend class="sr-only">Chat settings</legend>
+          <div class="setting working-folder">
+            <label for="cwd">Working folder</label>
+            <input id="cwd" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="cwd-help">
+            <small id="cwd-help">Folder where Codex starts commands and looks for project files. Changes apply to your next task, not one already running.</small>
+          </div>
           <label class="setting">
             <span>Model</span>
             <select id="setting-model" data-setting="model"><option value="">Loading instance default…</option></select>

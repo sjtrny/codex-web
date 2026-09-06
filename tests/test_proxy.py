@@ -388,6 +388,9 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('aria-label="Model and chat settings"', body)
             self.assertIn('<dialog id="settings-dialog"', body)
             self.assertIn('id="settings-close"', body)
+            self.assertIn('<label for="cwd">Working folder</label>', body)
+            self.assertIn('aria-describedby="cwd-help"', body)
+            self.assertNotIn('class="cwd-label"', body)
             self.assertNotIn('id="stop"', body)
             self.assertIn('id="setting-model"', body)
             self.assertIn('id="setting-permissions"', body)
@@ -1138,11 +1141,11 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
                 ".thread.running { border-left-color: var(--success); }", stylesheet
             )
             self.assertIn(
-                'grid-template-areas: "attachments attachments" "prompt prompt" "tools send";',
+                'grid-template-areas: "attachments" "prompt" "tools";',
                 stylesheet,
             )
             self.assertIn(
-                "grid-template-columns: auto minmax(0, 1fr);",
+                "grid-template-columns: minmax(0, 1fr) auto;",
                 stylesheet,
             )
 

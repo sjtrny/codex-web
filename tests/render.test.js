@@ -793,6 +793,7 @@ assert.equal(
 );
 
 const chatSettings = normalizeChatSettings({
+  cwd: "  /workspaces/my project  ",
   model: "gpt-5.5",
   effort: "high",
   serviceTier: "priority",
@@ -803,6 +804,7 @@ const chatSettings = normalizeChatSettings({
   ignored: "not-a-protocol-field",
 });
 assert.deepEqual(turnSettingsParams(chatSettings), {
+  cwd: "/workspaces/my project",
   model: "gpt-5.5",
   effort: "high",
   serviceTier: "priority",
@@ -812,6 +814,7 @@ assert.deepEqual(turnSettingsParams(chatSettings), {
   permissions: ":workspace",
 });
 assert.deepEqual(threadSettingsParams(chatSettings), {
+  cwd: "/workspaces/my project",
   model: "gpt-5.5",
   serviceTier: "priority",
   personality: "friendly",
@@ -830,10 +833,12 @@ state.chatDefaults = normalizeChatSettings({
   permissions: ":danger-full-access",
 });
 const effectiveSettings = effectiveChatSettings(normalizeChatSettings({
+  cwd: "/workspaces/selected-project",
   effort: "high",
   summary: "detailed",
 }));
 assert.deepEqual(effectiveSettings, {
+  cwd: "/workspaces/selected-project",
   model: "gpt-5.6-sol",
   effort: "high",
   serviceTier: "priority",
@@ -1390,7 +1395,7 @@ setSettingsOpen(false, false);
 
 setSettingsOpen(true);
 assert.equal(ui.settingsDialog.open, true, "chat settings open as a dialog");
-assert.equal(document.activeElement, ui.settingModel);
+assert.equal(document.activeElement, ui.cwd);
 setSettingsOpen(false);
 assert.equal(ui.settingsDialog.open, false);
 assert.equal(document.activeElement, ui.settingsToggle, "closing returns focus to the composer settings button");

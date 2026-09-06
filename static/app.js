@@ -26,6 +26,7 @@ const SIDEBAR_SWIPE_OPEN_DISTANCE = 56;
 const SIDEBAR_SWIPE_DIRECTION_RATIO = 1.25;
 const SIDEBAR_SWIPE_DRAG_START_DISTANCE = 6;
 const CHAT_SETTING_FIELDS = [
+  "cwd",
   "model",
   "effort",
   "serviceTier",
@@ -996,6 +997,24 @@ function currentChatSettings() {
   return state.settingsByThread.get(state.threadId);
 }
 
+function defaultWorkingFolder() {
+  return cachedThread(state.threadId, false)?.thread.cwd || state.defaultCwd;
+}
+
+function currentWorkingFolder() {
+  return currentChatSettings().cwd?.trim() || defaultWorkingFolder();
+}
+
+function renderWorkingFolder() {
+  ui.cwd.value = currentChatSettings().cwd || defaultWorkingFolder();
+  ui.cwd.placeholder = defaultWorkingFolder();
+}
+
+function saveWorkingFolder() {
+  currentChatSettings().cwd = ui.cwd.value;
+  persistChatSettings();
+}
+
 function loadStoredChatSettings() {
   if (globalThis.CODEX_WEB_TEST) return;
   try {
@@ -1093,6 +1112,7 @@ function permissionOptions() {
 
 function renderChatSettings() {
   const settings = currentChatSettings();
+  renderWorkingFolder();
   if (
     state.modelsLoaded
     && settings.model
@@ -1183,6 +1203,7 @@ function saveChatSettingsFromControls() {
 
 function turnSettingsParams(settings) {
   const params = {};
+  if (settings.cwd?.trim()) params.cwd = settings.cwd.trim();
   if (settings.model) params.model = settings.model;
   if (settings.effort) params.effort = settings.effort;
   if (settings.serviceTier) params.serviceTier = settings.serviceTier;
@@ -1213,7 +1234,7 @@ function setSettingsOpen(open, moveFocus = true) {
   } else {
     ui.settingsDialog.removeAttribute("open");
   }
-  if (moveFocus) (state.settingsOpen ? ui.settingModel : ui.settingsToggle).focus();
+  if (moveFocus) (state.settingsOpen ? ui.cwd : ui.settingsToggle).focus();
 }
 
 function closeSettingsForChatChange(threadId) {
@@ -1226,7 +1247,7 @@ async function refreshPermissionProfiles() {
   if (!state.ready) return;
   try {
     const result = await rpc("permissionProfile/list", {
-      cwd: ui.cwd.value || state.defaultCwd,
+      cwd: currentWorkingFolder(),
     });
     state.permissionProfiles = result?.data || [];
     state.permissionProfilesLoaded = true;
@@ -1241,7 +1262,7 @@ async function loadChatSettingsCatalog() {
     rpc("model/list", { limit: 100, includeHidden: false }),
     rpc("config/read", { includeLayers: false }),
     rpc("configRequirements/read", {}),
-    rpc("permissionProfile/list", { cwd: ui.cwd.value || state.defaultCwd }),
+    rpc("permissionProfile/list", { cwd: currentWorkingFolder() }),
   ]);
   if (models.status === "fulfilled") {
     state.models = models.value?.data || [];
@@ -3333,7 +3354,7 @@ function renderThreadHistory(thread) {
 function renderCachedThread(entry) {
   const thread = entry.thread;
   ui.title.textContent = threadLabel(thread);
-  ui.cwd.value = thread.cwd || state.defaultCwd;
+  renderWorkingFolder();
   renderThreadHistory(thread);
   if (!entry.followPresent) {
     state.followPresent = false;
@@ -3549,7 +3570,6 @@ function beginNewThread() {
   renderAttachments();
   notice("");
   ui.title.textContent = "New thread";
-  ui.cwd.value = state.defaultCwd;
   renderChatSettings();
   clearMessages();
   const empty = document.createElement("p");
@@ -3607,7 +3627,7 @@ async function submitPrompt(event) {
   const selectionId = state.selectionId;
   const submissionComposerKey = state.composerKey;
   let targetComposerKey = submissionComposerKey;
-  const cwd = ui.cwd.value || state.defaultCwd;
+  const cwd = currentWorkingFolder();
   const chatSettingOverrides = { ...currentChatSettings() };
   const chatSettings = effectiveChatSettings(chatSettingOverrides);
   let targetThreadId = state.threadId;
@@ -4123,7 +4143,6 @@ async function boot() {
     state.defaultCwd = config.defaultCwd || state.defaultCwd;
     state.chatDefaults = normalizeChatSettings(config.chatDefaults);
     state.uploadLimits = config.uploads || null;
-    ui.cwd.value = state.defaultCwd;
     renderChatSettings();
   } catch (error) {
     notice(`Configuration error: ${error.message}`);
@@ -4297,7 +4316,13 @@ if (globalThis.CODEX_WEB_TEST) {
   ]) {
     select.addEventListener("change", saveChatSettingsFromControls);
   }
-  ui.cwd.addEventListener("change", refreshPermissionProfiles);
+  ui.cwd.addEventListener("input", saveWorkingFolder);
+  ui.cwd.addEventListener("change", () => {
+    ui.cwd.value = ui.cwd.value.trim();
+    saveWorkingFolder();
+    renderChatSettings();
+    void refreshPermissionProfiles();
+  });
   ui.menu.addEventListener("click", toggleSidebar);
   ui.searchMenu.addEventListener("click", toggleSidebar);
   ui.sidebarToggle.addEventListener("click", () => {
