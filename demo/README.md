@@ -1,6 +1,8 @@
 # Demo recorder
 
 Creates `docs/sync-demo.gif` with fresh conversation state.
+The recording shows the composer controls, sends a CLI prompt, and shows the
+same response in both clients. The settings dialog stays closed.
 
 ```bash
 ./setup.sh

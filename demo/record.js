@@ -135,7 +135,7 @@ window.demoWrite = (data) => new Promise((resolve) => term.write(data, resolve))
 window.demoScreen = () => {
   const buffer = term.buffer.active;
   const lines = [];
-  for (let row = 0; row < term.rows; row += 1) lines.push(buffer.getLine(row)?.translateToString(true) || '');
+  for (let row = 0; row < term.rows; row += 1) lines.push(buffer.getLine(buffer.viewportY + row)?.translateToString(true) || '');
   return lines.join('\\n').replace(/\\s+$/, '');
 };
 window.demoReady = true;
@@ -233,6 +233,10 @@ async function run() {
   let terminalClosed = false;
 
   try {
+    // Only trust the empty workspace created for this recording.
+    fs.writeFileSync(path.join(codexHome, "config.toml"),
+      `[tui]\nshow_tooltips = false\n[notice]\nhide_rate_limit_model_nudge = true\n`
+      + `[projects.${JSON.stringify(workspace)}]\ntrust_level = "trusted"\n`, { mode: 0o600 });
     const authentication = findAuthentication();
     if (authentication) {
       fs.copyFileSync(authentication, path.join(codexHome, "auth.json"));
@@ -321,8 +325,21 @@ async function run() {
     terminalProcess.onData((data) => {
       writeQueue = writeQueue.then(() => terminalPage.evaluate((chunk) => window.demoWrite(chunk), data));
     });
+    terminalProcess.onExit(() => { terminalClosed = true; });
 
-    await delay(9000);
+    let startupScreen = "";
+    let startupChangedAt = Date.now();
+    await waitFor(async () => {
+      if (terminalClosed) throw new Error("Codex CLI exited before it was ready.");
+      await writeQueue;
+      const screen = await terminalPage.evaluate(() => window.demoScreen());
+      if (screen !== startupScreen) {
+        startupScreen = screen;
+        startupChangedAt = Date.now();
+      }
+      return screen.includes("OpenAI Codex") && screen.includes("›")
+        && Date.now() - startupChangedAt >= 1500;
+    }, "Codex CLI to be ready");
     terminalProcess.write("\x0c");
     await delay(1200);
     await writeQueue;
@@ -334,7 +351,9 @@ async function run() {
     await webPage.addStyleTag({ content: "*,*::before,*::after{animation:none!important;transition:none!important}" });
     await webPage.waitForFunction(() => {
       const promptBox = document.querySelector("#prompt");
-      return promptBox && !promptBox.disabled && document.querySelector("#cwd")?.value;
+      const settingsButton = document.querySelector("#settings-toggle");
+      return promptBox && !promptBox.disabled && settingsButton && !settingsButton.disabled
+        && document.querySelector("#cwd")?.value;
     });
     await delay(500);
     if (await webPage.locator(".thread").count() !== 0) throw new Error("The isolated app-server was not blank.");
@@ -343,6 +362,9 @@ async function run() {
     const snapshotSession = await context.newCDPSession(snapshotPage);
     let frameNumber = 0;
     const capture = async () => {
+      if (await webPage.locator(".thread").count() > 1) {
+        throw new Error("Unexpected extra sidebar threads appeared.");
+      }
       await writeQueue;
       const screen = await terminalPage.evaluate(() => window.demoScreen());
       await snapshotPage.evaluate((text) => window.setScreen(text), screen);
@@ -367,10 +389,11 @@ async function run() {
       if (!threadOpened && Date.now() - lastRefresh >= 600) {
         lastRefresh = Date.now();
         await webPage.evaluate(() => refreshThreads());
-        const threadCount = await webPage.locator(".thread").count();
-        if (threadCount > 1) throw new Error("Unexpected pre-existing threads appeared.");
+        const demoThread = webPage.locator(".thread").filter({ hasText: prompt });
+        const threadCount = await demoThread.count();
+        if (threadCount > 1) throw new Error("Duplicate demo conversations appeared.");
         if (threadCount === 1) {
-          await webPage.locator(".thread").click();
+          await demoThread.click();
           threadOpened = true;
           await delay(250);
         }
