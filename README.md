@@ -107,10 +107,14 @@ HOST=0.0.0.0 PORT=8765 .venv/bin/python app.py
 
 ### Reply while Codex works
 
-During an active task, the chat button changes to **Reply**. Send an answer,
-correction, or additional instruction without stopping the task. Attachments
-are supported. Replies use the current task's settings; Tune changes apply to
-the next new turn.
+During an active task, the composer button shows **Stop** when the text box is
+empty. Type a message or attach a file to switch it to **Reply**. Send an answer,
+correction, or additional instruction without stopping the task. Pressing Enter
+in an empty text box does not stop the task.
+
+Open **Model and chat settings** beside **Attach** to change the model,
+reasoning, and other chat options in a modal. Changes are saved for the chat and
+apply to the next new turn. Replies use the current task's settings.
 
 Questions appear as ordinary conversation text. Answer using the same text box
 and **Reply** button; there are no separate question cards or answer controls.
@@ -128,9 +132,9 @@ dependencies and Chromium with `demo/setup.sh`, then run
 `npm run test:browser:questions`. This check uses simulated app-server events
 and does not start Codex tasks or change the running service.
 
-### Tune defaults
+### Chat settings defaults
 
-Unset **Tune** fields use these instance defaults. Set them in `.env` for Docker
+Unset chat settings use these instance defaults. Set them in `.env` for Docker
 Compose, or export them when running directly.
 
 | Environment variable | Built-in default |
