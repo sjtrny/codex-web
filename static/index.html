@@ -46,48 +46,7 @@
         <header class="topbar">
           <button id="menu" class="menu-button" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="Open conversations">Chats</button>
           <strong id="thread-title">New thread</strong>
-          <label class="cwd-label">
-            <span>cwd</span>
-            <input id="cwd" spellcheck="false" autocomplete="off">
-          </label>
-          <button id="settings-toggle" type="button" aria-controls="settings-panel" aria-expanded="false" aria-label="Chat settings" title="Chat settings">🧠</button>
-          <button id="stop" disabled>Stop</button>
         </header>
-
-        <section id="settings-panel" class="settings-panel" aria-label="Chat settings" hidden>
-          <fieldset id="settings-fields" class="settings-grid" disabled>
-            <legend class="sr-only">Chat settings</legend>
-            <label class="setting">
-              <span>Model</span>
-              <select id="setting-model" data-setting="model"><option value="">Loading instance default…</option></select>
-            </label>
-            <label class="setting">
-              <span>Reasoning</span>
-              <select id="setting-effort" data-setting="effort"><option value="">Instance default</option></select>
-            </label>
-            <label class="setting">
-              <span>Service</span>
-              <select id="setting-service-tier" data-setting="serviceTier"><option value="">Instance default</option></select>
-            </label>
-            <label class="setting">
-              <span>Personality</span>
-              <select id="setting-personality" data-setting="personality"><option value="">Instance default</option></select>
-            </label>
-            <label class="setting">
-              <span>Reasoning summary</span>
-              <select id="setting-summary" data-setting="summary"><option value="">Instance default</option></select>
-            </label>
-            <label class="setting">
-              <span>Approvals</span>
-              <select id="setting-approval" data-setting="approvalPolicy"><option value="">Instance default</option></select>
-            </label>
-            <label class="setting">
-              <span>Permissions</span>
-              <select id="setting-permissions" data-setting="permissions"><option value="">Instance default</option></select>
-            </label>
-          </fieldset>
-          <p id="settings-note" class="settings-note">Instance defaults apply wherever Default is selected.</p>
-        </section>
 
         <div id="notice" class="notice" hidden></div>
         <div class="messages-region">
@@ -104,12 +63,24 @@
 
         <form id="composer" class="composer">
           <div id="attachments" class="attachments" aria-label="Attachments" hidden></div>
-          <label class="file-picker" title="Attach files or images">
-            <span>Attach</span>
-            <input id="file-input" type="file" multiple>
-          </label>
           <textarea id="prompt" rows="3" placeholder="Ask Codex…"></textarea>
-          <button id="send" type="submit" disabled>Send</button>
+          <div class="composer-tools">
+            <button id="settings-toggle" class="composer-settings" type="button" aria-controls="settings-dialog" aria-expanded="false" aria-haspopup="dialog" aria-label="Model and chat settings" title="Model and chat settings" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M4 7h3m4 0h9M4 17h9m4 0h3"></path>
+                <circle cx="9" cy="7" r="2"></circle>
+                <circle cx="15" cy="17" r="2"></circle>
+              </svg>
+            </button>
+            <label class="file-picker" title="Attach files or images">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.19 9.19a2 2 0 0 1-2.83-2.83l8.48-8.48"></path>
+              </svg>
+              <span class="sr-only">Attach files or images</span>
+              <input id="file-input" type="file" multiple>
+            </label>
+            <button id="send" type="submit" disabled>Send</button>
+          </div>
         </form>
 
         <section id="search-view" class="search-view" aria-labelledby="search-title" hidden>
@@ -153,6 +124,51 @@
         </section>
       </section>
     </main>
+    <dialog id="settings-dialog" class="preferences-dialog settings-dialog" aria-labelledby="settings-title">
+      <header class="preferences-header">
+        <h2 id="settings-title">Model and chat settings</h2>
+        <button id="settings-close" class="preferences-close" type="button" aria-label="Close chat settings">×</button>
+      </header>
+      <div class="preferences-body">
+        <fieldset id="settings-fields" class="settings-grid" disabled>
+          <legend class="sr-only">Chat settings</legend>
+          <div class="setting working-folder">
+            <label for="cwd">Working folder</label>
+            <input id="cwd" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="cwd-help">
+            <small id="cwd-help">Folder where Codex starts commands and looks for project files. Changes apply to your next task, not one already running.</small>
+          </div>
+          <label class="setting">
+            <span>Model</span>
+            <select id="setting-model" data-setting="model"><option value="">Loading instance default…</option></select>
+          </label>
+          <label class="setting">
+            <span>Reasoning</span>
+            <select id="setting-effort" data-setting="effort"><option value="">Instance default</option></select>
+          </label>
+          <label class="setting">
+            <span>Service</span>
+            <select id="setting-service-tier" data-setting="serviceTier"><option value="">Instance default</option></select>
+          </label>
+          <label class="setting">
+            <span>Personality</span>
+            <select id="setting-personality" data-setting="personality"><option value="">Instance default</option></select>
+          </label>
+          <label class="setting">
+            <span>Reasoning summary</span>
+            <select id="setting-summary" data-setting="summary"><option value="">Instance default</option></select>
+          </label>
+          <label class="setting">
+            <span>Approvals</span>
+            <select id="setting-approval" data-setting="approvalPolicy"><option value="">Instance default</option></select>
+          </label>
+          <label class="setting">
+            <span>Permissions</span>
+            <select id="setting-permissions" data-setting="permissions"><option value="">Instance default</option></select>
+          </label>
+        </fieldset>
+        <p id="settings-note" class="settings-note">Instance defaults apply wherever Default is selected.</p>
+      </div>
+    </dialog>
     <dialog id="preferences-dialog" class="preferences-dialog" aria-labelledby="preferences-title">
       <header class="preferences-header">
         <h2 id="preferences-title">Settings</h2>

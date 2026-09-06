@@ -385,9 +385,13 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('aria-orientation="vertical"', body)
             self.assertIn('<a class="brand-home" href="/"><strong>Codex</strong></a>', body)
             self.assertIn('id="settings-toggle"', body)
-            self.assertIn('aria-label="Chat settings"', body)
-            self.assertIn('title="Chat settings">🧠</button>', body)
-            self.assertNotIn('title="Chat settings">Tune</button>', body)
+            self.assertIn('aria-label="Model and chat settings"', body)
+            self.assertIn('<dialog id="settings-dialog"', body)
+            self.assertIn('id="settings-close"', body)
+            self.assertIn('<label for="cwd">Working folder</label>', body)
+            self.assertIn('aria-describedby="cwd-help"', body)
+            self.assertNotIn('class="cwd-label"', body)
+            self.assertNotIn('id="stop"', body)
             self.assertIn('id="setting-model"', body)
             self.assertIn('id="setting-permissions"', body)
             self.assertIn('id="preferences-toggle"', body)
@@ -1087,11 +1091,11 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             stylesheet = await response.text()
             self.assertEqual(response.status, 200)
             self.assertIn(
-                "grid-template-rows: auto auto auto minmax(0, 1fr) auto auto",
+                "grid-template-rows: auto auto minmax(0, 1fr) auto auto",
                 stylesheet,
             )
             self.assertIn(
-                ".messages-region { grid-row: 4; position: relative;", stylesheet
+                ".messages-region { grid-row: 3; position: relative;", stylesheet
             )
             self.assertIn(".messages { min-width: 0; min-height: 0;", stylesheet)
             self.assertIn(".jump-present {", stylesheet)
@@ -1115,11 +1119,8 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('input[type="date"]', stylesheet)
             self.assertIn(".message.search-match {", stylesheet)
             self.assertIn(".settings-cog {", stylesheet)
-            self.assertIn(".settings-panel { grid-row: 2;", stylesheet)
-            self.assertIn(
-                ".settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr));",
-                stylesheet,
-            )
+            self.assertIn(".settings-dialog {", stylesheet)
+            self.assertIn(".composer-tools { grid-area: tools;", stylesheet)
             self.assertIn("height: 100dvh", stylesheet)
             self.assertIn("--sidebar-width: 260px", stylesheet)
             self.assertIn("--sidebar-rail-width: 64px", stylesheet)
@@ -1140,11 +1141,11 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
                 ".thread.running { border-left-color: var(--success); }", stylesheet
             )
             self.assertIn(
-                'grid-template-areas: "attachments attachments" "prompt prompt" "attach send";',
+                'grid-template-areas: "attachments attachments" "prompt tools";',
                 stylesheet,
             )
             self.assertIn(
-                "grid-template-columns: auto minmax(0, 1fr);",
+                "grid-template-columns: minmax(0, 1fr) auto;",
                 stylesheet,
             )
 

@@ -26,6 +26,7 @@ const SIDEBAR_SWIPE_OPEN_DISTANCE = 56;
 const SIDEBAR_SWIPE_DIRECTION_RATIO = 1.25;
 const SIDEBAR_SWIPE_DRAG_START_DISTANCE = 6;
 const CHAT_SETTING_FIELDS = [
+  "cwd",
   "model",
   "effort",
   "serviceTier",
@@ -105,7 +106,8 @@ const ui = {
   title: el("thread-title"),
   cwd: el("cwd"),
   settingsToggle: el("settings-toggle"),
-  settingsPanel: el("settings-panel"),
+  settingsDialog: el("settings-dialog"),
+  settingsClose: el("settings-close"),
   settingsFields: el("settings-fields"),
   settingModel: el("setting-model"),
   settingEffort: el("setting-effort"),
@@ -115,7 +117,6 @@ const ui = {
   settingApproval: el("setting-approval"),
   settingPermissions: el("setting-permissions"),
   settingsNote: el("settings-note"),
-  stop: el("stop"),
   notice: el("notice"),
   messages: el("messages"),
   thinkingIndicator: el("thinking-indicator"),
@@ -138,6 +139,7 @@ const state = {
   activeTurns: new Map(),
   submittingThreads: new Set(),
   steeringThreads: new Set(),
+  interruptingTurns: new Set(),
   pendingSteers: new Map(),
   failedSteerAttachments: new Map(),
   submittingViews: new Set(),
@@ -265,12 +267,9 @@ function updateControls() {
   const turnId = selectedTurnId();
   const inputRequest = selectedInputRequest();
   const blocked = selectedThreadSubmitting() || (busy && !turnId) || inputRequest?.requestDisconnected;
-  ui.send.disabled = !state.ready || blocked || state.uploading;
-  ui.send.textContent = turnId ? "Reply" : "Send";
-  ui.send.title = turnId ? "Send a reply to the current task" : "Start a new turn";
+  updateComposerAction();
   ui.prompt.placeholder = turnId ? "Reply or add instructions while Codex works…" : "Ask Codex…";
   ui.fileInput.disabled = blocked || state.uploading || Boolean(inputRequest);
-  ui.stop.disabled = !state.ready || !state.threadId || !turnId;
   ui.settingsToggle.disabled = !state.ready;
   ui.settingsFields.disabled = !state.ready;
   renderRequests();
@@ -279,6 +278,22 @@ function updateControls() {
 
 function selectedTurnId() {
   return state.threadId ? (state.activeTurns.get(state.threadId) || null) : null;
+}
+
+function updateComposerAction() {
+  const busy = selectedThreadBusy();
+  const turnId = selectedTurnId();
+  const stopping = state.interruptingTurns.has(turnId);
+  const hasInput = Boolean(ui.prompt.value.trim() || state.attachments.length || state.uploading);
+  const stop = busy && !hasInput;
+  const blocked = selectedThreadSubmitting() || (busy && !turnId)
+    || (!stop && selectedInputRequest()?.requestDisconnected);
+  ui.send.disabled = !state.ready || blocked || state.uploading || stopping;
+  ui.send.textContent = stopping ? "Stopping…" : stop ? "Stop" : busy ? "Reply" : "Send";
+  // Stop is a deliberate button action. Enter in the text box only sends input.
+  ui.send.type = stop || stopping ? "button" : "submit";
+  ui.send.title = stop || stopping ? "Stop the current task"
+    : busy ? "Send a reply to the current task" : "Start a new turn";
 }
 
 function selectedThreadSubmitting() {
@@ -782,12 +797,14 @@ function restoreComposerDraft(key = state.composerKey) {
     state.failedSteerAttachments.delete(key);
     renderAttachments();
   }
+  updateComposerAction();
 }
 
 function clearComposerDraft(key = state.composerKey) {
   state.composerDrafts.delete(key);
   if (key === state.composerKey) ui.prompt.value = "";
   resetPromptHistoryNavigation();
+  updateComposerAction();
 }
 
 function moveComposerDraft(fromKey, toKey) {
@@ -799,6 +816,7 @@ function moveComposerDraft(fromKey, toKey) {
 function handlePromptInput() {
   resetPromptHistoryNavigation();
   saveComposerDraft();
+  updateComposerAction();
   if (state.followPresent) jumpToPresent();
 }
 
@@ -979,6 +997,24 @@ function currentChatSettings() {
   return state.settingsByThread.get(state.threadId);
 }
 
+function defaultWorkingFolder() {
+  return cachedThread(state.threadId, false)?.thread.cwd || state.defaultCwd;
+}
+
+function currentWorkingFolder() {
+  return currentChatSettings().cwd?.trim() || defaultWorkingFolder();
+}
+
+function renderWorkingFolder() {
+  ui.cwd.value = currentChatSettings().cwd || defaultWorkingFolder();
+  ui.cwd.placeholder = defaultWorkingFolder();
+}
+
+function saveWorkingFolder() {
+  currentChatSettings().cwd = ui.cwd.value;
+  persistChatSettings();
+}
+
 function loadStoredChatSettings() {
   if (globalThis.CODEX_WEB_TEST) return;
   try {
@@ -1076,6 +1112,7 @@ function permissionOptions() {
 
 function renderChatSettings() {
   const settings = currentChatSettings();
+  renderWorkingFolder();
   if (
     state.modelsLoaded
     && settings.model
@@ -1166,6 +1203,7 @@ function saveChatSettingsFromControls() {
 
 function turnSettingsParams(settings) {
   const params = {};
+  if (settings.cwd?.trim()) params.cwd = settings.cwd.trim();
   if (settings.model) params.model = settings.model;
   if (settings.effort) params.effort = settings.effort;
   if (settings.serviceTier) params.serviceTier = settings.serviceTier;
@@ -1185,9 +1223,18 @@ function threadSettingsParams(settings) {
 
 function setSettingsOpen(open, moveFocus = true) {
   state.settingsOpen = Boolean(open);
-  ui.settingsPanel.hidden = !state.settingsOpen;
   ui.settingsToggle.setAttribute("aria-expanded", String(state.settingsOpen));
-  if (moveFocus) (state.settingsOpen ? ui.settingModel : ui.settingsToggle).focus();
+  if (state.settingsOpen) {
+    if (!ui.settingsDialog.open) {
+      if (typeof ui.settingsDialog.showModal === "function") ui.settingsDialog.showModal();
+      else ui.settingsDialog.setAttribute("open", "");
+    }
+  } else if (ui.settingsDialog.open && typeof ui.settingsDialog.close === "function") {
+    ui.settingsDialog.close();
+  } else {
+    ui.settingsDialog.removeAttribute("open");
+  }
+  if (moveFocus) (state.settingsOpen ? ui.cwd : ui.settingsToggle).focus();
 }
 
 function closeSettingsForChatChange(threadId) {
@@ -1200,7 +1247,7 @@ async function refreshPermissionProfiles() {
   if (!state.ready) return;
   try {
     const result = await rpc("permissionProfile/list", {
-      cwd: ui.cwd.value || state.defaultCwd,
+      cwd: currentWorkingFolder(),
     });
     state.permissionProfiles = result?.data || [];
     state.permissionProfilesLoaded = true;
@@ -1215,7 +1262,7 @@ async function loadChatSettingsCatalog() {
     rpc("model/list", { limit: 100, includeHidden: false }),
     rpc("config/read", { includeLayers: false }),
     rpc("configRequirements/read", {}),
-    rpc("permissionProfile/list", { cwd: ui.cwd.value || state.defaultCwd }),
+    rpc("permissionProfile/list", { cwd: currentWorkingFolder() }),
   ]);
   if (models.status === "fulfilled") {
     state.models = models.value?.data || [];
@@ -2223,6 +2270,7 @@ function renderAttachments() {
     chip.append(kind, name, remove);
     ui.attachments.append(chip);
   });
+  updateComposerAction();
 }
 
 async function uploadFiles(fileList) {
@@ -3110,6 +3158,7 @@ function promptCaretIsOnFirstLine() {
 function showPromptHistoryValue(value) {
   ui.prompt.value = value;
   saveComposerDraft();
+  updateComposerAction();
   ui.prompt.setSelectionRange?.(value.length, value.length);
 }
 
@@ -3305,7 +3354,7 @@ function renderThreadHistory(thread) {
 function renderCachedThread(entry) {
   const thread = entry.thread;
   ui.title.textContent = threadLabel(thread);
-  ui.cwd.value = thread.cwd || state.defaultCwd;
+  renderWorkingFolder();
   renderThreadHistory(thread);
   if (!entry.followPresent) {
     state.followPresent = false;
@@ -3521,7 +3570,6 @@ function beginNewThread() {
   renderAttachments();
   notice("");
   ui.title.textContent = "New thread";
-  ui.cwd.value = state.defaultCwd;
   renderChatSettings();
   clearMessages();
   const empty = document.createElement("p");
@@ -3564,7 +3612,8 @@ async function submitPrompt(event) {
   const text = draftText.trim();
   const attachments = [...state.attachments];
   const input = buildTurnInput(text, attachments);
-  if (!input.length || !state.ready || selectedThreadSubmitting() || state.uploading) return;
+  if (!input.length || !state.ready || selectedThreadSubmitting() || state.uploading
+    || state.interruptingTurns.has(selectedTurnId())) return;
   const inputRequest = selectedInputRequest();
   if (inputRequest) {
     submitUserInput(inputRequest, text);
@@ -3578,7 +3627,7 @@ async function submitPrompt(event) {
   const selectionId = state.selectionId;
   const submissionComposerKey = state.composerKey;
   let targetComposerKey = submissionComposerKey;
-  const cwd = ui.cwd.value || state.defaultCwd;
+  const cwd = currentWorkingFolder();
   const chatSettingOverrides = { ...currentChatSettings() };
   const chatSettings = effectiveChatSettings(chatSettingOverrides);
   let targetThreadId = state.threadId;
@@ -3803,11 +3852,18 @@ async function submitSteer({ draftText, text, attachments, input, turnId }) {
 async function stopTurn() {
   const threadId = state.threadId;
   const turnId = selectedTurnId();
-  if (!threadId || !turnId) return;
+  if (!state.ready || !threadId || !turnId || selectedThreadSubmitting()
+    || state.interruptingTurns.has(turnId)) return;
+  notice("");
+  state.interruptingTurns.add(turnId);
+  updateControls();
   try {
     await rpc("turn/interrupt", { threadId, turnId });
   } catch (error) {
-    notice(error.message);
+    notice(`Could not stop the task: ${error.message}`);
+  } finally {
+    state.interruptingTurns.delete(turnId);
+    updateControls();
   }
 }
 
@@ -4087,7 +4143,6 @@ async function boot() {
     state.defaultCwd = config.defaultCwd || state.defaultCwd;
     state.chatDefaults = normalizeChatSettings(config.chatDefaults);
     state.uploadLimits = config.uploads || null;
-    ui.cwd.value = state.defaultCwd;
     renderChatSettings();
   } catch (error) {
     notice(`Configuration error: ${error.message}`);
@@ -4242,8 +4297,14 @@ if (globalThis.CODEX_WEB_TEST) {
   ui.messages.addEventListener("touchend", handleMessagesTouchEnd, { passive: true });
   ui.messages.addEventListener("touchcancel", handleMessagesTouchEnd, { passive: true });
   ui.jumpPresent.addEventListener("click", jumpToPresent);
-  ui.stop.addEventListener("click", stopTurn);
+  ui.send.addEventListener("click", () => {
+    if (ui.send.type === "button") void stopTurn();
+  });
   ui.settingsToggle.addEventListener("click", () => setSettingsOpen(!state.settingsOpen));
+  ui.settingsClose.addEventListener("click", () => setSettingsOpen(false));
+  ui.settingsDialog.addEventListener("close", () => {
+    if (state.settingsOpen) setSettingsOpen(false);
+  });
   for (const select of [
     ui.settingModel,
     ui.settingEffort,
@@ -4255,7 +4316,13 @@ if (globalThis.CODEX_WEB_TEST) {
   ]) {
     select.addEventListener("change", saveChatSettingsFromControls);
   }
-  ui.cwd.addEventListener("change", refreshPermissionProfiles);
+  ui.cwd.addEventListener("input", saveWorkingFolder);
+  ui.cwd.addEventListener("change", () => {
+    ui.cwd.value = ui.cwd.value.trim();
+    saveWorkingFolder();
+    renderChatSettings();
+    void refreshPermissionProfiles();
+  });
   ui.menu.addEventListener("click", toggleSidebar);
   ui.searchMenu.addEventListener("click", toggleSidebar);
   ui.sidebarToggle.addEventListener("click", () => {
@@ -4305,9 +4372,8 @@ if (globalThis.CODEX_WEB_TEST) {
   });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
-    if (ui.preferencesDialog.open) return;
-    if (state.settingsOpen) setSettingsOpen(false);
-    else if (sidebarIsMobile() && state.sidebarOpen) setSidebarOpen(false);
+    if (ui.preferencesDialog.open || ui.settingsDialog.open) return;
+    if (sidebarIsMobile() && state.sidebarOpen) setSidebarOpen(false);
     else if (state.searchOpen) setSearchOpen(false);
   });
   const mobileLayout = window.matchMedia("(max-width: 760px)");

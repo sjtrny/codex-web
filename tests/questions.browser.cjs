@@ -11,7 +11,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || "../demo/node_modu
 
 const root = path.resolve(__dirname, "..");
 const staticRoot = path.join(root, "static");
-const artifacts = path.resolve(root, "../artifacts/questions/composer");
+const artifacts = path.resolve(root, "../artifacts/questions/stacked-controls");
 const contentTypes = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml" };
 const server = http.createServer(async (request, response) => {
   try {
@@ -49,6 +49,9 @@ async function main() {
     await page.route("**/api/config", (route) => route.fulfill({
       json: { defaultCwd: "/workspaces", workspaceRoot: "/workspaces", chatDefaults: {} },
     }));
+    await page.route("**/api/uploads", (route) => route.fulfill({
+      json: { files: [{ name: "note.txt", path: "/workspaces/uploads/note.txt", size: 4, image: false }] },
+    }));
     const questionText = "A recording is running. May I finish it safely before updating?";
     const thread = (id, name, items = []) => ({
       id, name, cwd: "/workspaces", createdAt: 1788652800, updatedAt: 1788652800,
@@ -56,7 +59,7 @@ async function main() {
       turns: [{ id: `turn-${id}`, status: "inProgress", items }],
     });
     const threads = new Map([
-      ["a", thread("a", "Recording feature", [{ id: "plain-question", type: "agentMessage", text: questionText }])],
+      ["a", thread("a", "Recording feature with a very long conversation title that used to squeeze the working folder input until it looked empty", [{ id: "plain-question", type: "agentMessage", text: questionText }])],
       ["b", thread("b", "Separate task")],
       ["async", thread("async", "Question and reply ordering", [{
         id: "async-prompt", type: "userMessage", content: [{
@@ -64,11 +67,13 @@ async function main() {
         }],
       }])],
     ]);
+    threads.get("b").cwd = "/workspaces/other-project";
     const received = [];
     let socket;
     let connections = 0;
     let delaySteerEcho = false;
     const pendingEchoes = [];
+    const pendingInterrupts = [];
     const send = (message) => socket.send(JSON.stringify(message));
     const notification = (method, params) => send({ method, params });
     await page.routeWebSocket("**/ws", (ws) => {
@@ -81,11 +86,30 @@ async function main() {
         let result;
         switch (message.method) {
           case "initialize": result = { userAgent: "browser-test" }; break;
-          case "model/list": case "permissionProfile/list": result = { data: [] }; break;
+          case "model/list": result = { data: [{
+            id: "model-a", model: "model-a", displayName: "Example model",
+            supportedReasoningEfforts: [{ reasoningEffort: "medium" }, { reasoningEffort: "high" }],
+          }] }; break;
+          case "permissionProfile/list": result = { data: [] }; break;
           case "config/read": result = { config: {} }; break;
           case "configRequirements/read": result = { requirements: null }; break;
           case "thread/list": result = { data: [...threads.values()], nextCursor: null }; break;
           case "thread/resume": result = { thread: threads.get(message.params.threadId) }; break;
+          case "thread/start": {
+            const started = { ...thread("new-folder", "Working folder check"), cwd: message.params.cwd, turns: [], status: { type: "idle" } };
+            threads.set(started.id, started);
+            result = { thread: started };
+            break;
+          }
+          case "turn/start": {
+            const current = threads.get(message.params.threadId);
+            current.cwd = message.params.cwd;
+            const turn = { id: "turn-new-folder", status: "inProgress", items: [] };
+            current.turns.push(turn);
+            current.status = { type: "active", activeFlags: [] };
+            result = { turn };
+            break;
+          }
           case "turn/steer": {
             const item = { id: message.params.clientUserMessageId, type: "userMessage", content: message.params.input };
             const echo = () => {
@@ -99,6 +123,7 @@ async function main() {
             result = { turnId: message.params.expectedTurnId };
             break;
           }
+          case "turn/interrupt": pendingInterrupts.push(message); return;
           default:
             errors.push(`Unexpected RPC: ${message.method}`);
             ws.send(JSON.stringify({ id: message.id, error: { code: -32601, message: "Unexpected RPC" } }));
@@ -123,11 +148,77 @@ async function main() {
     const waitLabel = (text) => eventually(async () => await label.textContent() === text, text);
     const responseTo = (id) => received.find((message) => message.id === id && !message.method);
     await page.goto(`http://127.0.0.1:${server.address().port}/?thread=a`);
-    await eventually(async () => await page.locator("#send").textContent() === "Reply"
-      && await page.locator("#send").isEnabled(), "active reply ready");
+    await eventually(async () => await page.locator("#send").textContent() === "Stop"
+      && await page.locator("#send").isEnabled(), "active stop ready");
     assert.equal(await page.evaluate(() => typeof globalThis.CodexWebTest), "undefined");
+    assert.equal(await page.locator(".topbar #settings-toggle, .topbar #cwd, #stop, #settings-panel").count(), 0);
+    assert.equal(await page.locator(".composer-tools #settings-toggle").count(), 1);
+    await page.locator("#prompt").press("Enter");
+    assert.equal(received.some((message) => ["turn/interrupt", "turn/steer", "turn/start"].includes(message.method)), false,
+      "Enter in an empty text box must not stop or submit work");
+    await page.locator("#file-input").setInputFiles({ name: "note.txt", mimeType: "text/plain", buffer: Buffer.from("Note") });
+    await eventually(async () => await page.locator("#send").textContent() === "Reply"
+      && await page.locator("#send").isEnabled(), "attachment-only reply ready");
+    await page.getByRole("button", { name: "Remove note.txt" }).click();
+    assert.equal(await page.locator("#send").textContent(), "Stop");
+
+    const dialog = page.getByRole("dialog", { name: "Model and chat settings" });
+    const settingsButton = page.getByRole("button", { name: "Model and chat settings", exact: true });
+    await settingsButton.click();
+    await dialog.waitFor();
+    assert.equal(await dialog.evaluate((node) => node.matches(":modal")), true);
+    const folder = dialog.getByRole("textbox", { name: "Working folder", exact: true });
+    assert.equal(await folder.evaluate((node) => node === document.activeElement), true);
+    assert.equal(await folder.inputValue(), "/workspaces");
+    await folder.fill("/workspaces/my project");
+    await folder.press("Tab");
+    await eventually(() => received.some(message => message.method === "permissionProfile/list"
+      && message.params.cwd === "/workspaces/my project"), "permissions use the selected folder");
+    await dialog.getByText(/Folder where Codex starts commands/).waitFor();
+    await page.locator("#setting-model").selectOption("model-a");
+    await page.locator("#setting-effort").selectOption("high");
+    await page.locator("#setting-permissions").focus();
+    await page.keyboard.press("Tab");
+    // Native dialogs can pass focus through browser chrome between endpoints.
+    if (await page.evaluate(() => document.activeElement === document.body)) await page.keyboard.press("Tab");
+    assert.equal(await page.locator("#settings-close").evaluate((node) => node === document.activeElement), true,
+      "Tab returns to the modal without focusing the background app");
+    await fs.mkdir(artifacts, { recursive: true });
+    for (const [name, width, height] of [["desktop", 1280, 900], ["laptop", 1024, 768], ["mobile", 390, 844], ["small-mobile", 320, 568]]) {
+      await page.setViewportSize({ width, height });
+      const bounds = await dialog.boundingBox();
+      assert.ok(bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= width && bounds.y + bounds.height <= height);
+      assert.equal(await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth), true, `${name} modal overflow`);
+      assert.ok((await folder.boundingBox()).width >= 240, `${name} working folder must have readable width`);
+      const attachBox = await page.locator('.file-picker').boundingBox();
+      const sendBox = await page.locator('#send').boundingBox();
+      const settingsBox = await settingsButton.boundingBox();
+      const promptBox = await page.locator('#prompt').boundingBox();
+      const composerRight = await page.locator('#composer').evaluate(node => node.getBoundingClientRect().right - parseFloat(getComputedStyle(node).paddingRight));
+      assert.ok(attachBox.y >= settingsBox.y + settingsBox.height && sendBox.y >= attachBox.y + attachBox.height,
+        `${name} Settings, Attach, and Send are stacked vertically`);
+      assert.ok(Math.abs(attachBox.x - sendBox.x) <= 1 && Math.abs(settingsBox.x - sendBox.x) <= 1,
+        `${name} controls share one narrow column`);
+      assert.ok(promptBox.x + promptBox.width <= sendBox.x && promptBox.width >= 200,
+        `${name} text box stays beside the controls with usable width`);
+      assert.ok(Math.abs(composerRight - sendBox.x - sendBox.width) <= 1, `${name} buttons align to the right`);
+      await page.screenshot({ path: path.join(artifacts, `settings-${name}.png`), fullPage: true, animations: "disabled" });
+    }
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden" });
+    await eventually(async () => await settingsButton.getAttribute("aria-expanded") === "false", "native dialog close event");
+    assert.equal(await settingsButton.evaluate((node) => node === document.activeElement), true);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, "small mobile composer overflow");
+    await settingsButton.click();
+    assert.equal(await page.locator("#setting-model").inputValue(), "model-a");
+    assert.equal(await page.locator("#setting-effort").inputValue(), "high");
+    assert.equal(await folder.inputValue(), "/workspaces/my project");
+    await page.locator("#settings-close").click();
+    await dialog.waitFor({ state: "hidden" });
+    await page.setViewportSize({ width: 1280, height: 900 });
     await page.getByText(questionText, { exact: true }).waitFor();
     await page.locator("#prompt").fill("Yes, finish the recording safely, then update.");
+    assert.equal(await page.locator("#send").textContent(), "Reply");
     await page.locator("#send").click();
     await eventually(() => received.some((message) => message.method === "turn/steer"), "steer sent");
     const steer = received.find((message) => message.method === "turn/steer");
@@ -136,7 +227,11 @@ async function main() {
     assert.ok(steer.params.clientUserMessageId);
     assert.deepEqual(steer.params.input, [{ type: "text", text: "Yes, finish the recording safely, then update." }]);
     await eventually(async () => await page.getByText(steer.params.input[0].text, { exact: true }).count() === 1, "one reply echo");
-    assert.equal(await page.locator("#stop").isEnabled(), true);
+    await eventually(async () => await page.locator("#send").textContent() === "Stop"
+      && await page.locator("#send").isEnabled(), "reply returns to stop");
+    assert.equal(steer.params.model, undefined, "settings do not change an active task's model");
+    assert.equal(steer.params.cwd, undefined, "changing the folder must not alter the running task");
+    assert.equal(await page.locator('#cwd').inputValue(), "/workspaces/my project", "history refresh must preserve the selected folder");
 
     send(question(1001, "a", false));
     await waitLabel("Working — question pending");
@@ -147,6 +242,7 @@ async function main() {
     send(question(1002, "b", true));
     await page.locator('#threads a[href="/?thread=b"]').click();
     await waitLabel("Waiting for your answer");
+    assert.equal(await page.locator('#cwd').inputValue(), "/workspaces/other-project", "each chat uses its own working folder");
     assert.equal(await page.locator("#prompt").inputValue(), "");
     assert.equal(await card.count(), 0);
     await page.locator("#prompt").fill("Keep recording");
@@ -155,11 +251,13 @@ async function main() {
     assert.deepEqual(responseTo(1002).result, { answers: { deployment: { answers: ["Keep recording"] } } });
     await page.locator('#threads a[href="/?thread=a"]').click();
     await waitLabel("Working — question pending");
+    assert.equal(await page.locator('#cwd').inputValue(), "/workspaces/my project", "folder edits survive switching chats");
     assert.equal(await page.locator("#prompt").inputValue(), "Finish safely, but wait until the export is saved.");
 
     socket.close({ code: 1012, reason: "Test reconnect" });
     await eventually(async () => await page.locator("#send").isDisabled(), "disconnected answer disabled");
     await eventually(() => connections === 2, "new websocket connection");
+    assert.equal(await page.locator('#cwd').inputValue(), "/workspaces/my project", "folder edits survive reconnects");
     assert.equal(await page.locator("#send").isDisabled(), true);
     assert.equal(await page.locator("#prompt").inputValue(), "Finish safely, but wait until the export is saved.");
     send(question(1003, "a", false, "question-1001"));
@@ -222,7 +320,7 @@ async function main() {
     await waitLabel("Waiting for your answer");
     assert.equal(await card.count(), 0, "async question is an ordinary transcript message");
     assert.equal(await page.locator("#messages").getAttribute("aria-busy"), "false");
-    assert.equal(await page.locator("#send").textContent(), "Reply");
+    assert.equal(await page.locator("#send").textContent(), "Stop");
     assert.equal(await page.locator("#send").isEnabled(), true);
     await emitAsyncItem({
       id: "sky-reasoning", type: "reasoning", summary: ["Waiting for user input", "Awaiting your answer"], content: [],
@@ -294,6 +392,62 @@ async function main() {
     assert.equal(await page.locator("#thinking-indicator").isHidden(), true);
     await page.screenshot({ path: path.join(artifacts, "async-history-desktop.png"), fullPage: true, animations: "disabled" });
     assert.equal(received.some((message) => ["turn/start", "thread/start", "turn/interrupt"].includes(message.method)), false);
+
+    // Stop the selected task through the composer, including while awaiting an answer.
+    await page.locator('#threads a[href="/?thread=b"]').click();
+    send(question(1005, "b", true));
+    await waitLabel("Waiting for your answer");
+    assert.equal(await page.locator("#send").textContent(), "Stop");
+    await page.locator("#send").click();
+    await eventually(() => pendingInterrupts.length === 1, "stop request sent");
+    const interrupt = pendingInterrupts[0];
+    assert.deepEqual(interrupt.params, { threadId: "b", turnId: "turn-b" });
+    assert.equal(await page.locator("#send").isDisabled(), true);
+    assert.equal(await page.locator("#send").textContent(), "Stopping…");
+    await page.locator("#prompt").press("Enter");
+    assert.equal(pendingInterrupts.length, 1, "no duplicate interrupt while pending");
+    send({ id: interrupt.id, error: { code: -32603, message: "Try stopping again" } });
+    await eventually(async () => await page.locator("#send").isEnabled(), "failed stop can be retried");
+    assert.equal(await page.locator("#send").textContent(), "Stop");
+    await page.getByText("Could not stop the task: Try stopping again", { exact: true }).waitFor();
+    await page.locator("#send").click();
+    await eventually(() => pendingInterrupts.length === 2, "stop retried");
+    await page.locator("#prompt").fill("Keep this draft after stopping.");
+    await page.locator("#prompt").press("Enter");
+    assert.equal(await page.locator("#prompt").inputValue(), "Keep this draft after stopping.");
+    const stopped = threads.get("b");
+    stopped.status = { type: "idle" };
+    stopped.turns[0].status = "interrupted";
+    notification("turn/completed", { threadId: "b", turn: stopped.turns[0] });
+    send({ id: pendingInterrupts[1].id, result: {} });
+    await eventually(async () => await page.locator("#send").textContent() === "Send"
+      && await page.locator("#send").isEnabled(), "stopped task returns to send");
+    assert.equal(await page.locator("#thinking-indicator").isHidden(), true);
+    assert.equal(await page.locator("#prompt").inputValue(), "Keep this draft after stopping.");
+    assert.equal(await page.locator("#notice").isHidden(), true);
+    assert.equal(received.some((message) => ["turn/start", "thread/start"].includes(message.method)), false);
+
+    await page.locator('#threads a[href="/?thread=a"]').click();
+    await page.reload();
+    await eventually(async () => await page.locator('#cwd').inputValue() === '/workspaces/my project', "folder edits survive reload");
+    await settingsButton.click();
+    await folder.fill('');
+    await folder.press('Tab');
+    assert.equal(await folder.inputValue(), '/workspaces', 'clearing the override restores the chat folder');
+    await page.locator('#settings-close').click();
+    await page.locator('#new-thread').click();
+    await settingsButton.click();
+    assert.equal(await folder.inputValue(), '/workspaces', 'new chats start with the instance folder');
+    await folder.fill('/workspaces/new project');
+    await folder.press('Tab');
+    await page.locator('#settings-close').click();
+    await page.locator('#prompt').fill('Check the selected working folder.');
+    await page.locator('#send').click();
+    await eventually(() => received.some(message => message.method === 'turn/start'), 'new task started in the chosen folder');
+    assert.equal(received.filter(message => message.method === 'thread/start').length, 1);
+    assert.equal(received.filter(message => message.method === 'turn/start').length, 1);
+    assert.equal(received.find(message => message.method === 'thread/start').params.cwd, '/workspaces/new project');
+    assert.equal(received.find(message => message.method === 'turn/start').params.cwd, '/workspaces/new project');
     assert.deepEqual(errors, []);
     console.log(`Question browser checks passed; screenshots: ${artifacts}`);
   } finally {

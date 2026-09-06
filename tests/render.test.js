@@ -793,6 +793,7 @@ assert.equal(
 );
 
 const chatSettings = normalizeChatSettings({
+  cwd: "  /workspaces/my project  ",
   model: "gpt-5.5",
   effort: "high",
   serviceTier: "priority",
@@ -803,6 +804,7 @@ const chatSettings = normalizeChatSettings({
   ignored: "not-a-protocol-field",
 });
 assert.deepEqual(turnSettingsParams(chatSettings), {
+  cwd: "/workspaces/my project",
   model: "gpt-5.5",
   effort: "high",
   serviceTier: "priority",
@@ -812,6 +814,7 @@ assert.deepEqual(turnSettingsParams(chatSettings), {
   permissions: ":workspace",
 });
 assert.deepEqual(threadSettingsParams(chatSettings), {
+  cwd: "/workspaces/my project",
   model: "gpt-5.5",
   serviceTier: "priority",
   personality: "friendly",
@@ -830,10 +833,12 @@ state.chatDefaults = normalizeChatSettings({
   permissions: ":danger-full-access",
 });
 const effectiveSettings = effectiveChatSettings(normalizeChatSettings({
+  cwd: "/workspaces/selected-project",
   effort: "high",
   summary: "detailed",
 }));
 assert.deepEqual(effectiveSettings, {
+  cwd: "/workspaces/selected-project",
   model: "gpt-5.6-sol",
   effort: "high",
   serviceTier: "priority",
@@ -1260,6 +1265,8 @@ setSidebarCollapsed(false, false);
 
 state.ready = true;
 state.threadId = "thread-a";
+ui.prompt.value = "";
+state.attachments = [];
 ui.messages._scrollHeight = 1000;
 ui.messages.clientHeight = 200;
 ui.messages._scrollTop = 240;
@@ -1269,8 +1276,16 @@ const thinkingScrollWrites = ui.messages.scrollWrites;
 setThreadActivity("thread-a", "turn-a");
 assert.equal(selectedThreadBusy(), true, "selected active thread should be busy");
 assert.equal(selectedTurnId(), "turn-a");
-assert.equal(ui.send.disabled, false, "a known active turn accepts steering replies");
-assert.equal(ui.stop.disabled, false);
+assert.equal(ui.send.disabled, false, "a known active turn can be stopped from the composer");
+assert.equal(ui.send.textContent, "Stop");
+assert.equal(ui.send.type, "button", "empty text-box submission must not interrupt a task");
+ui.prompt.value = "A reply";
+handlePromptInput();
+assert.equal(ui.send.textContent, "Reply");
+assert.equal(ui.send.type, "submit");
+ui.prompt.value = "   ";
+handlePromptInput();
+assert.equal(ui.send.textContent, "Stop", "whitespace is not a reply");
 assert.equal(ui.thinkingIndicator.hidden, false, "selected active turn should show thinking");
 assert.equal(ui.messages.getAttribute("aria-busy"), "true");
 assert.equal(ui.messages.children.at(-1), ui.thinkingIndicator, "visible indicator stays last");
@@ -1283,7 +1298,6 @@ assert.equal(ui.messages.scrollTop, thinkingScrollTop, "streaming beside thinkin
 
 setThreadActivity("thread-a", null);
 assert.equal(ui.send.disabled, true, "a busy thread without a known turn id cannot be steered safely");
-assert.equal(ui.stop.disabled, true);
 setThreadActivity("thread-a", "turn-a");
 state.submittingThreads.add("thread-a");
 updateControls();
@@ -1297,7 +1311,7 @@ updateControls();
 assert.equal(selectedThreadBusy(), false, "background activity must not block another thread");
 assert.equal(selectedTurnId(), null);
 assert.equal(ui.send.disabled, false, "an idle selected thread can start a turn");
-assert.equal(ui.stop.disabled, true, "Stop only targets the selected active thread");
+assert.equal(ui.send.textContent, "Send", "Stop only targets the selected active thread");
 assert.equal(ui.thinkingIndicator.hidden, true, "background work must not mark the selected thread as thinking");
 assert.equal(ui.messages.getAttribute("aria-busy"), "false");
 ui.messages._scrollHeight = null;
@@ -1372,12 +1386,19 @@ state.threadId = "thread-b";
 setSettingsOpen(true, false);
 openThread("thread-a");
 assert.equal(state.settingsOpen, false, "switching chats should close chat settings");
-assert.equal(ui.settingsPanel.hidden, true);
+assert.equal(ui.settingsDialog.open, false);
 assert.equal(ui.settingsToggle.getAttribute("aria-expanded"), "false");
 setSettingsOpen(true, false);
 openThread("thread-b");
 assert.equal(state.settingsOpen, true, "reopening the selected chat should preserve chat settings");
 setSettingsOpen(false, false);
+
+setSettingsOpen(true);
+assert.equal(ui.settingsDialog.open, true, "chat settings open as a dialog");
+assert.equal(document.activeElement, ui.cwd);
+setSettingsOpen(false);
+assert.equal(ui.settingsDialog.open, false);
+assert.equal(document.activeElement, ui.settingsToggle, "closing returns focus to the composer settings button");
 
 const startedThread = {
   id: "thread-new",
@@ -2114,6 +2135,8 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
     "an earlier final answer must remain before the later user reply");
 
   selectActiveThread("async-question-live", sky.id);
+  ui.prompt.value = "";
+  handlePromptInput();
   const sendItem = (item, method = "item/completed") => handleNotification(method, {
     threadId: "async-question-live", turnId: sky.id, item,
   });
@@ -2122,7 +2145,7 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
     "a live agentMessage.questions event must update the status immediately");
   assert.equal(ui.messages.getAttribute("aria-busy"), "false");
   assert.equal(ui.send.disabled, false, "the composer must accept the asynchronous answer");
-  assert.equal(ui.send.textContent, "Reply");
+  assert.equal(ui.send.textContent, "Stop");
   sendItem({ id: "async-wait-commentary", type: "agentMessage", phase: "commentary", text: "I'll wait for your answer.", questions: null });
   sendItem(sky.items[2]);
   assert.equal(ui.thinkingLabel.textContent, "Waiting for your answer",
@@ -2514,7 +2537,7 @@ async function checkQuestionsInComposer(rpcMessages) {
   assert.ok(prompt, "native questions must appear as ordinary conversation messages");
   assert.match(prompt.text, /Keep running — Deploy separately/);
   assert.equal(ui.send.disabled, false);
-  assert.equal(ui.send.textContent, "Reply");
+  assert.equal(ui.send.textContent, "Stop");
   assert.equal(responseTo(question.id), undefined, "showing options must never submit an answer");
   await answer("   ");
   assert.equal(responseTo(question.id), undefined);
