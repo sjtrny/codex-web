@@ -166,6 +166,7 @@ const state = {
   promptHistoryDraft: "",
   items: new Map(),
   requestCards: new Map(),
+  asyncQuestionCards: new Map(),
   reconnectTimer: null,
   defaultCwd: "/workspaces",
   attachments: [],
@@ -3741,7 +3742,7 @@ function reconcileSteersFromThread(thread) {
   }
 }
 
-async function submitSteer({ draftText, text, attachments, input, turnId }) {
+async function submitSteer({ draftText, text, attachments, input, turnId, preserveComposer = false }) {
   const threadId = state.threadId;
   const composerKey = state.composerKey;
   const id = globalThis.crypto?.randomUUID?.()
@@ -3754,9 +3755,11 @@ async function submitSteer({ draftText, text, attachments, input, turnId }) {
   };
   state.pendingSteers.set(id, pending);
   state.steeringThreads.add(threadId);
-  clearComposerDraft(composerKey);
-  state.attachments = [];
-  renderAttachments();
+  if (!preserveComposer) {
+    clearComposerDraft(composerKey);
+    state.attachments = [];
+    renderAttachments();
+  }
   notice("");
   jumpToPresent();
   renderPendingSteer(pending);
@@ -3769,25 +3772,36 @@ async function submitSteer({ draftText, text, attachments, input, turnId }) {
     // Receipt does not mean the input has been consumed. In particular, do not
     // mark a turn active here: completion may already have arrived.
     void reconcileThreadHistory(threadId);
+    return true;
   } catch (error) {
+    const echoed = !state.pendingSteers.has(id);
     if (state.pendingSteers.has(id)) {
       removePendingSteer(pending);
-      const currentDraft = state.composerDrafts.get(composerKey) || "";
-      state.composerDrafts.set(composerKey, currentDraft ? `${draftText}\n\n${currentDraft}` : draftText);
-      if (state.threadId === threadId && state.composerKey === composerKey) {
-        restoreComposerDraft(composerKey);
-        state.attachments = [...attachments, ...state.attachments];
-        renderAttachments();
-      } else if (attachments.length) {
-        state.failedSteerAttachments.set(composerKey, attachments);
+      const questionCard = state.asyncQuestionCards.get(threadId);
+      const keptInCard = preserveComposer && questionCard
+        && questionCard.requestParams.turnId === turnId
+        && String(resolvedThreadItemId(threadId, turnId, questionCard.requestParams.itemId))
+          === String(resolvedThreadItemId(threadId, turnId, pending.asyncQuestionId));
+      if (keptInCard) questionCard.failedAnswer = draftText;
+      else {
+        const currentDraft = state.composerDrafts.get(composerKey) || "";
+        state.composerDrafts.set(composerKey, currentDraft ? `${draftText}\n\n${currentDraft}` : draftText);
+        if (state.threadId === threadId && state.composerKey === composerKey) {
+          restoreComposerDraft(composerKey);
+          state.attachments = [...attachments, ...state.attachments];
+          renderAttachments();
+        } else if (attachments.length) {
+          state.failedSteerAttachments.set(composerKey, attachments);
+        }
       }
-      notice(`Reply not confirmed: ${error.message}. Your reply was kept as a draft; it was not sent again.`);
+      notice(`Reply not confirmed: ${error.message}. Your ${keptInCard ? "answer was kept in the question card" : "reply was kept as a draft"}; it was not sent again.`);
     } else {
       notice(`The reply is in the conversation, but confirmation failed: ${error.message}`);
     }
     // A stale expectedTurnId can mean work ended just before the reply. Refresh
     // state and leave resubmission to the user instead of starting another task.
     if (state.ready) void reconcileThreadHistory(threadId);
+    return echoed;
   } finally {
     state.steeringThreads.delete(threadId);
     updateControls();
@@ -3813,6 +3827,7 @@ function removeRequest(id) {
 }
 
 function renderRequests() {
+  renderAsyncQuestionCards();
   for (const card of state.requestCards.values()) {
     card.hidden = card.requestParams.threadId !== state.threadId;
     for (const button of card.requestActions) {
@@ -3836,7 +3851,87 @@ function removeRequestsForTurn(threadId, turnId = null) {
 function clearRequests() {
   for (const card of state.requestCards.values()) card.remove();
   state.requestCards.clear();
+  for (const card of state.asyncQuestionCards.values()) card.remove();
+  state.asyncQuestionCards.clear();
   updateControls();
+}
+
+function renderAsyncQuestionCards() {
+  for (const threadId of new Set([...state.asyncQuestionCards.keys(), state.threadId])) {
+    if (!threadId) continue;
+    const cached = cachedThread(threadId, false);
+    const question = pendingAsyncQuestion(threadId);
+    const turnId = state.activeTurns.get(threadId)
+      || (question && [...(cached?.thread.turns || [])].reverse().find((turn) => turn.status === "inProgress")?.id);
+    const disconnected = !state.ready || cached?.generation !== state.connectionGeneration;
+    let card = state.asyncQuestionCards.get(threadId);
+    const sameQuestion = card && question && card.requestParams.turnId === turnId
+      && String(resolvedThreadItemId(threadId, turnId, card.requestParams.itemId)) === String(question.id)
+      && card.questionsKey === JSON.stringify(question.questions);
+    // Keep existing controls while reconnecting. A fresh history snapshot will
+    // establish whether this question still needs an answer before re-enabling it.
+    if (card && !sameQuestion && !(disconnected && !question)) {
+      if (card.failedAnswer) {
+        const composerKey = threadComposerKey(threadId);
+        const draft = state.composerDrafts.get(composerKey) || "";
+        state.composerDrafts.set(composerKey, draft ? `${card.failedAnswer}\n\n${draft}` : card.failedAnswer);
+        if (state.composerKey === composerKey) restoreComposerDraft(composerKey);
+      }
+      card.remove();
+      state.asyncQuestionCards.delete(threadId);
+      card = null;
+    }
+    if (!card && question) {
+      const params = {
+        threadId, turnId, itemId: question.id, isBlocking: false,
+        questions: question.questions.map((entry, index) => ({
+          ...entry,
+          id: String(index),
+          question: entry.title || entry.question,
+          options: entry.options?.map((option) => typeof option === "string" ? { label: option } : option),
+        })),
+      };
+      card = createUserInputCard(params, submitAsyncQuestion);
+      card.requestParams = params;
+      card.questionsKey = JSON.stringify(question.questions);
+      state.asyncQuestionCards.set(threadId, card);
+      ui.requests.append(card);
+    }
+    if (!card) continue;
+    card.hidden = threadId !== state.threadId;
+    const blocked = disconnected || !turnId || state.activeTurns.get(threadId) !== turnId || state.steeringThreads.has(threadId)
+      || state.submittingThreads.has(threadId);
+    card.submitButton.disabled = blocked;
+    for (const { control, freeform } of card.answerControls) {
+      control.disabled = blocked;
+      if (freeform) freeform.disabled = blocked;
+    }
+  }
+}
+
+async function submitAsyncQuestion(card, answers) {
+  const { threadId, turnId } = card.requestParams;
+  if (state.asyncQuestionCards.get(threadId) !== card || threadId !== state.threadId
+    || card.submitButton.disabled || selectedTurnId() !== turnId) return;
+  const entries = card.requestParams.questions.map((question) => ({
+    question: question.question,
+    answer: answers[question.id]?.answers[0] || "",
+  }));
+  if (entries.some((entry) => !entry.answer.trim())) {
+    showRequestError(card, "Choose an answer or write your own for each question.");
+    return;
+  }
+  const text = entries.length === 1 ? entries[0].answer
+    : entries.map((entry) => `${entry.question}\n${entry.answer}`).join("\n\n");
+  card.querySelector(".request-error")?.remove();
+  card.failedAnswer = null;
+  const accepted = await submitSteer({
+    text, draftText: text, attachments: [], input: [{ type: "text", text }], turnId,
+    preserveComposer: true,
+  });
+  if (!accepted && state.asyncQuestionCards.get(threadId) === card) {
+    showRequestError(card, "Your answer was not confirmed. It is saved here; you can try again.");
+  }
 }
 
 function disconnectRequests() {
@@ -3868,15 +3963,19 @@ function sendRequestResponse(card, result = null, error = null) {
     respond(card.requestId, result, error);
     removeRequest(card.requestId);
   } catch (sendError) {
-    let alert = card.querySelector(".request-error");
-    if (!alert) {
-      alert = document.createElement("p");
-      alert.className = "request-error";
-      alert.setAttribute("role", "alert");
-      card.append(alert);
-    }
-    alert.textContent = `${sendError.message}. Your answer has not been sent. Try again when connected.`;
+    showRequestError(card, `${sendError.message}. Your answer has not been sent. Try again when connected.`);
   }
+}
+
+function showRequestError(card, message) {
+  let alert = card.querySelector(".request-error");
+  if (!alert) {
+    alert = document.createElement("p");
+    alert.className = "request-error";
+    alert.setAttribute("role", "alert");
+    card.append(alert);
+  }
+  alert.textContent = message;
 }
 
 function approvalRequest(message, kind) {
@@ -3905,8 +4004,7 @@ function approvalRequest(message, kind) {
   addRequest(message.id, card, params, "approval", message.method);
 }
 
-function userInputRequest(message) {
-  const params = message.params || {};
+function createUserInputCard(params, onSubmit) {
   const card = document.createElement("article");
   card.className = "request";
   const title = document.createElement("strong");
@@ -3963,15 +4061,23 @@ function userInputRequest(message) {
 
   const actions = document.createElement("div");
   actions.className = "actions";
-  actions.append(actionButton("Submit", () => {
+  card.answerControls = controls;
+  card.submitButton = actionButton("Submit", () => {
     const answers = {};
     for (const entry of controls) {
       const value = entry.freeform?.value || entry.control.value;
       answers[entry.id] = { answers: value ? [value] : [] };
     }
-    sendRequestResponse(card, { answers });
-  }));
+    return onSubmit(card, answers);
+  });
+  actions.append(card.submitButton);
   card.append(actions);
+  return card;
+}
+
+function userInputRequest(message) {
+  const params = message.params || {};
+  const card = createUserInputCard(params, (request, answers) => sendRequestResponse(request, { answers }));
   addRequest(message.id, card, params, "input", message.method);
 }
 

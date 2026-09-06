@@ -68,6 +68,7 @@ async function main() {
     let socket;
     let connections = 0;
     let delaySteerEcho = false;
+    let rejectNextSteer = false;
     const pendingEchoes = [];
     const send = (message) => socket.send(JSON.stringify(message));
     const notification = (method, params) => send({ method, params });
@@ -87,6 +88,11 @@ async function main() {
           case "thread/list": result = { data: [...threads.values()], nextCursor: null }; break;
           case "thread/resume": result = { thread: threads.get(message.params.threadId) }; break;
           case "turn/steer": {
+            if (rejectNextSteer) {
+              rejectNextSteer = false;
+              ws.send(JSON.stringify({ id: message.id, error: { code: -32000, message: "Reply rejected for retry check" } }));
+              return;
+            }
             const item = { id: message.params.clientUserMessageId, type: "userMessage", content: message.params.input };
             const echo = () => {
               threads.get(message.params.threadId).turns[0].items.push(item);
@@ -226,7 +232,10 @@ async function main() {
     await page.getByText(asyncTurn.items[0].content[0].text, { exact: true }).waitFor();
     await emitAsyncItem(skyQuestion);
     await waitLabel("Waiting for your answer");
-    assert.equal(await card.count(), 0, "async question is an ordinary transcript message");
+    assert.equal(await card.count(), 1, "real async metadata must show an answer card as well as the transcript question");
+    assert.equal(await card.locator("select").inputValue(), "", "suggestions must not be submitted automatically");
+    assert.deepEqual(await card.locator("select option").allTextContents(),
+      ["Choose an answer…", skyReply, "A short scientific explanation", "A playful rhyme"]);
     assert.equal(await page.locator("#messages").getAttribute("aria-busy"), "false");
     assert.equal(await page.locator("#send").textContent(), "Reply");
     assert.equal(await page.locator("#send").isEnabled(), true);
@@ -247,16 +256,40 @@ async function main() {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.reload();
     await waitLabel("Waiting for your answer");
+    assert.equal(await card.count(), 1, "reload must restore the pending async card");
     await assertConversationOrder([asyncTurn.items[0].content[0].text, skyTitle, "Your choice will determine"], "unanswered reload");
+
+    await card.locator(".request-freeform").fill("Keep this answer across chat switches and reconnects");
+    await page.locator('#threads a[href="/?thread=b"]').click();
+    assert.equal(await card.count(), 0, "another chat must not show the async card");
+    await page.locator('#threads a[href="/?thread=async"]').click();
+    await waitLabel("Waiting for your answer");
+    assert.equal(await card.locator(".request-freeform").inputValue(), "Keep this answer across chat switches and reconnects");
+    const beforeReconnect = connections;
+    socket.close();
+    await eventually(async () => await card.getByRole("button", { name: "Submit" }).isDisabled(), "disconnected async card disabled");
+    await eventually(() => connections > beforeReconnect, "async question reconnected");
+    await eventually(async () => await card.getByRole("button", { name: "Submit" }).isEnabled(), "resumed async card ready");
+    assert.equal(await card.locator(".request-freeform").inputValue(), "Keep this answer across chat switches and reconnects");
+    await card.locator("select").selectOption(skyReply);
+    assert.equal(await card.locator(".request-freeform").inputValue(), "");
+    await page.locator("#prompt").fill("Keep this unrelated chat draft");
+    rejectNextSteer = true;
+    await card.getByRole("button", { name: "Submit" }).click();
+    await card.getByText("Your answer was not confirmed. It is saved here; you can try again.", { exact: true }).waitFor();
+    assert.equal(await card.locator("select").inputValue(), skyReply, "failed card replies keep their answer for retry");
+    assert.equal(await page.locator("#prompt").inputValue(), "Keep this unrelated chat draft");
+    await waitLabel("Waiting for your answer");
 
     // A successful acknowledgement clears waiting even before its user echo.
     // A stale resume response must not resurrect the unanswered state.
     delaySteerEcho = true;
-    await page.locator("#prompt").fill(skyReply);
     const resumeCount = received.filter((message) => message.method === "thread/resume").length;
-    await page.locator("#send").click();
+    await card.getByRole("button", { name: "Submit" }).click();
     await eventually(() => pendingEchoes.length === 1, "delayed answer accepted");
     await waitLabel("Codex is thinking");
+    assert.equal(await card.count(), 0, "an accepted card answer must remove its controls");
+    assert.equal(await page.locator("#prompt").inputValue(), "Keep this unrelated chat draft");
     await eventually(() => received.filter((message) => message.method === "thread/resume").length > resumeCount, "accepted answer resumes history");
     await eventually(async () => await page.locator("#send").isEnabled(), "accepted answer controls ready");
     await waitLabel("Codex is thinking");

@@ -116,6 +116,8 @@ Structured questions appear below the conversation. Choose a suggested answer
 or write your own, then select **Submit**. The status distinguishes **Waiting
 for your answer** from **Working — question pending**. Questions stay with their
 chat, and typed answers survive chat switching and temporary disconnections.
+Async questions also show answer cards. Submitting a card replies to the active
+task and leaves any separate chat draft and attachments unchanged.
 
 If a task ends before a reply is accepted, the reply remains a draft for you to
 send again. Codex Web does not automatically start a new task. Mid-task replies

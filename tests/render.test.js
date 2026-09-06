@@ -2077,6 +2077,7 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
     "an active snapshot must restore waiting from the question even without waiting flags");
   assert.equal(ui.messages.getAttribute("aria-busy"), "false");
   assert.equal(ui.thinkingIndicator.classList.contains("waiting"), true);
+  assert.ok(state.asyncQuestionCards.get(reconnected.id), "resuming an unanswered async question must restore its answer card");
 
   const answeredReconnect = mergeThreadSnapshot({
     ...reconnected,
@@ -2086,6 +2087,7 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
   assert.equal(ui.thinkingLabel.textContent, "Codex is thinking",
     "a user reply in an active snapshot must clear the question's waiting state");
   assert.equal(ui.messages.getAttribute("aria-busy"), "true");
+  assert.equal(state.asyncQuestionCards.has(reconnected.id), false, "an answer from history must remove the card");
 
   const laterTurn = {
     id: "later-turn",
@@ -2123,6 +2125,11 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
   assert.equal(ui.messages.getAttribute("aria-busy"), "false");
   assert.equal(ui.send.disabled, false, "the composer must accept the asynchronous answer");
   assert.equal(ui.send.textContent, "Reply");
+  const liveCard = state.asyncQuestionCards.get("async-question-live");
+  assert.ok(liveCard, "real agentMessage.questions metadata must create an answer card");
+  assert.deepEqual(liveCard.querySelector(".request-choice").children.map((option) => option.value),
+    ["", ...sky.items[1].questions[0].options]);
+  liveCard.querySelector(".request-freeform").value = "Keep my answer draft";
   sendItem({ id: "async-wait-commentary", type: "agentMessage", phase: "commentary", text: "I'll wait for your answer.", questions: null });
   sendItem(sky.items[2]);
   assert.equal(ui.thinkingLabel.textContent, "Waiting for your answer",
@@ -2153,16 +2160,22 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
     "a snapshot without question metadata must preserve known live choices");
   renderThreadHistory(withoutMetadata);
   assert.equal(ui.thinkingLabel.textContent, "Waiting for your answer");
+  assert.equal(state.asyncQuestionCards.get("async-question-live"), liveCard);
+  assert.equal(liveCard.querySelector(".request-freeform").value, "Keep my answer draft");
 
   selectActiveThread("async-question-unrelated", "async-other-turn");
   assert.equal(ui.thinkingLabel.textContent, "Codex is thinking", "an asynchronous question must remain scoped to its conversation");
+  assert.equal(liveCard.hidden, true, "async cards must not appear in another chat");
   state.threadId = "async-question-live";
   state.composerKey = threadComposerKey(state.threadId, state.selectionId);
   renderThreadHistory(cachedThread(state.threadId).thread);
+  assert.equal(liveCard.hidden, false);
+  assert.equal(liveCard.querySelector(".request-freeform").value, "Keep my answer draft");
   sendItem(sky.items[3]);
   assert.equal(ui.thinkingLabel.textContent, "Codex is thinking",
     "a user-message event must clear waiting even when the reply comes from another client");
   assert.equal(ui.thinkingIndicator.classList.contains("waiting"), false);
+  assert.equal(state.asyncQuestionCards.has("async-question-live"), false);
   sendItem(sky.items[4]);
   assertRenderedItemOrder("async-question-live", sky.id, sky.items.slice(1));
 
@@ -2186,6 +2199,128 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
     threadId: "async-question-live", turn: { id: sky.id, status: "completed", items: [] },
   });
   assert.equal(ui.thinkingIndicator.hidden, true);
+}
+
+async function checkAsyncQuestionCardSubmission({ selectActiveThread, notify, settle, latestSteer, rpcMessages }) {
+  const threadId = "async-card-submit";
+  const turnId = "async-card-turn";
+  selectActiveThread(threadId, turnId);
+  const question = {
+    id: "async-card-question", type: "agentMessage", phase: "final_answer",
+    text: "Choose a setting and a hero.",
+    questions: [
+      { title: "Where should the story happen?", options: ["A sunken city", "A space station"] },
+      { title: "Who is the hero?" },
+    ],
+  };
+  notify("item/completed", { threadId, turnId, item: question });
+  const card = state.asyncQuestionCards.get(threadId);
+  const choice = card.answerControls[0].control;
+  const custom = card.answerControls[0].freeform;
+  const hero = card.answerControls[1].control;
+  const submit = () => card.submitButton.listeners.get("click")();
+  const beforeSubmit = rpcMessages.filter((message) => message.method === "turn/steer").length;
+  assert.equal(choice.value, "", "a suggested answer must not be selected or submitted automatically");
+  await submit();
+  assert.equal(rpcMessages.filter((message) => message.method === "turn/steer").length, beforeSubmit);
+  assert.match(card.querySelector(".request-error").textContent, /each question/);
+  choice.value = "A sunken city";
+  hero.value = "An octopus";
+  assert.equal(rpcMessages.filter((message) => message.method === "turn/steer").length, beforeSubmit);
+
+  // The connection can disappear while an answer is being composed. Reconcile
+  // canonical history IDs without replacing the controls or their typed values.
+  state.ready = false;
+  state.activeTurns.delete(threadId);
+  updateControls();
+  assert.equal(state.asyncQuestionCards.get(threadId), card);
+  assert.equal(card.submitButton.disabled, true);
+  state.connectionGeneration += 1;
+  state.ready = true;
+  setThreadActivity(threadId, null);
+  assert.equal(state.asyncQuestionCards.get(threadId), card);
+  assert.equal(card.submitButton.disabled, true, "stale cached questions must wait for a fresh active turn");
+  const reconnected = mergeThreadSnapshot({
+    id: threadId, status: { type: "active", activeFlags: [] },
+    turns: [{ id: turnId, status: "inProgress", items: [
+      cachedThread(threadId).thread.turns[0].items[0],
+      { ...question, id: "canonical-async-card-question" },
+    ] }],
+  }).thread;
+  renderThreadHistory(reconnected);
+  assert.equal(state.asyncQuestionCards.get(threadId), card, "canonical IDs must not discard an answer draft");
+  assert.equal(card.submitButton.disabled, false);
+  assert.equal(choice.value, "A sunken city");
+  assert.equal(hero.value, "An octopus");
+
+  ui.prompt.value = "Keep this separate chat draft";
+  handlePromptInput();
+  state.attachments = [attachments[1]];
+  const submission = submit();
+  const firstSteer = latestSteer();
+  assert.deepEqual(firstSteer.params.input, [{ type: "text", text:
+    "Where should the story happen?\nA sunken city\n\nWho is the hero?\nAn octopus" }]);
+  assert.equal(firstSteer.params.threadId, threadId);
+  assert.equal(firstSteer.params.expectedTurnId, turnId);
+  assert.equal(ui.prompt.value, "Keep this separate chat draft");
+  assert.deepEqual(state.attachments, [attachments[1]], "card answers must not consume unrelated attachments");
+  assert.equal(card.submitButton.disabled, true);
+  assert.equal(choice.disabled, true);
+  assert.equal(hero.disabled, true);
+  await submit();
+  assert.equal(latestSteer(), firstSteer, "repeated Submit clicks must not send duplicate answers");
+  settle(firstSteer, null, "Connection lost");
+  await submission;
+  assert.equal(state.asyncQuestionCards.get(threadId), card);
+  assert.equal(card.submitButton.disabled, false);
+  assert.equal(hero.value, "An octopus");
+  assert.equal(ui.prompt.value, "Keep this separate chat draft");
+  assert.match(card.querySelector(".request-error").textContent, /not confirmed/);
+
+  custom.value = "A village bakery";
+  custom.listeners.get("input")();
+  assert.equal(choice.value, "");
+  const retry = submit();
+  const retrySteer = latestSteer();
+  assert.match(retrySteer.params.input[0].text, /A village bakery/);
+  settle(retrySteer, { turnId });
+  await retry;
+  assert.equal(state.asyncQuestionCards.has(threadId), false, "an accepted answer must remove the card before its echo");
+  assert.equal(card.parentNode, null);
+  await submit();
+  assert.equal(latestSteer(), retrySteer, "a removed card must not send another answer");
+  assert.equal(ui.prompt.value, "Keep this separate chat draft");
+  assert.deepEqual(state.attachments, [attachments[1]]);
+  assert.equal(ui.thinkingLabel.textContent, "Codex is thinking");
+
+  notify("item/completed", { threadId, turnId, item: { ...question, id: "async-completed-card-question" } });
+  const endingCard = state.asyncQuestionCards.get(threadId);
+  assert.ok(endingCard);
+  endingCard.answerControls[0].control.value = "A sunken city";
+  endingCard.answerControls[1].control.value = "An octopus";
+  const endingSubmission = endingCard.submitButton.listeners.get("click")();
+  const endingSteer = latestSteer();
+  notify("turn/completed", { threadId, turn: { id: turnId, status: "completed", items: [] } });
+  assert.equal(state.asyncQuestionCards.has(threadId), false, "turn completion must remove unanswered cards");
+  settle(endingSteer, null, "Turn already completed");
+  await endingSubmission;
+  assert.equal(ui.prompt.value,
+    "Where should the story happen?\nA sunken city\n\nWho is the hero?\nAn octopus\n\nKeep this separate chat draft",
+    "a rejected card answer must survive as a chat draft if its turn has already ended");
+  assert.equal(ui.send.textContent, "Send");
+
+  selectActiveThread("async-late-completion", "async-late-completion-turn");
+  notify("item/completed", { threadId: state.threadId, turnId: selectedTurnId(), item: question });
+  const failedCard = state.asyncQuestionCards.get(state.threadId);
+  failedCard.answerControls[0].control.value = "A space station";
+  failedCard.answerControls[1].control.value = "A robot";
+  const failedSubmission = failedCard.submitButton.listeners.get("click")();
+  settle(latestSteer(), null, "Reply rejected");
+  await failedSubmission;
+  assert.equal(state.asyncQuestionCards.get(state.threadId), failedCard);
+  notify("turn/completed", { threadId: state.threadId, turn: { id: selectedTurnId(), status: "completed", items: [] } });
+  assert.equal(ui.prompt.value, "Where should the story happen?\nA space station\n\nWho is the hero?\nA robot",
+    "late completion must retain a failed answer after its card goes away");
 }
 
 async function checkMidTurnInteractions(rpcMessages) {
@@ -2451,6 +2586,9 @@ async function checkMidTurnInteractions(rpcMessages) {
     notify: notifyWithoutBackgroundRpc,
     settle,
     latestSteer,
+  });
+  await checkAsyncQuestionCardSubmission({
+    selectActiveThread, notify: notifyWithoutBackgroundRpc, settle, latestSteer, rpcMessages,
   });
 
   selectActiveThread("questions-thread", "questions-turn");
