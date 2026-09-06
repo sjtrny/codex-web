@@ -11,7 +11,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || "../demo/node_modu
 
 const root = path.resolve(__dirname, "..");
 const staticRoot = path.join(root, "static");
-const artifacts = path.resolve(root, "../artifacts/questions");
+const artifacts = path.resolve(root, "../artifacts/questions/composer");
 const contentTypes = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml" };
 const server = http.createServer(async (request, response) => {
   try {
@@ -68,7 +68,6 @@ async function main() {
     let socket;
     let connections = 0;
     let delaySteerEcho = false;
-    let rejectNextSteer = false;
     const pendingEchoes = [];
     const send = (message) => socket.send(JSON.stringify(message));
     const notification = (method, params) => send({ method, params });
@@ -88,11 +87,6 @@ async function main() {
           case "thread/list": result = { data: [...threads.values()], nextCursor: null }; break;
           case "thread/resume": result = { thread: threads.get(message.params.threadId) }; break;
           case "turn/steer": {
-            if (rejectNextSteer) {
-              rejectNextSteer = false;
-              ws.send(JSON.stringify({ id: message.id, error: { code: -32000, message: "Reply rejected for retry check" } }));
-              return;
-            }
             const item = { id: message.params.clientUserMessageId, type: "userMessage", content: message.params.input };
             const echo = () => {
               threads.get(message.params.threadId).turns[0].items.push(item);
@@ -146,38 +140,32 @@ async function main() {
 
     send(question(1001, "a", false));
     await waitLabel("Working — question pending");
-    assert.equal(await page.locator("#messages").getAttribute("aria-busy"), "true");
-    await card.getByText("Question while Codex works", { exact: true }).waitFor();
-    await card.locator("select").selectOption("Keep recording");
-    await card.locator(".request-freeform").fill("Finish safely, but wait until the export is saved.");
-    assert.equal(await card.locator("select").inputValue(), "");
-    await page.locator("#prompt").fill("Remember to retain the original recording.");
+    assert.equal(await card.count(), 0, "native questions must not render cards");
+    assert.equal(await page.locator("#requests input, #requests select, #requests button").count(), 0);
+    await page.locator("#messages .body").filter({ hasText: "Keep recording — Keep this recording running" }).waitFor();
+    await page.locator("#prompt").fill("Finish safely, but wait until the export is saved.");
     send(question(1002, "b", true));
-    assert.equal(await card.count(), 1);
     await page.locator('#threads a[href="/?thread=b"]').click();
-    await card.getByText("Codex needs input", { exact: true }).waitFor();
     await waitLabel("Waiting for your answer");
-    assert.equal(await page.locator("#messages").getAttribute("aria-busy"), "false");
     assert.equal(await page.locator("#prompt").inputValue(), "");
-    await card.locator("select").selectOption("Keep recording");
-    await card.getByRole("button", { name: "Submit", exact: true }).click();
-    await eventually(() => responseTo(1002), "blocking answer sent");
+    assert.equal(await card.count(), 0);
+    await page.locator("#prompt").fill("Keep recording");
+    await page.locator("#send").click();
+    await eventually(() => responseTo(1002), "blocking answer sent through the composer");
     assert.deepEqual(responseTo(1002).result, { answers: { deployment: { answers: ["Keep recording"] } } });
     await page.locator('#threads a[href="/?thread=a"]').click();
     await waitLabel("Working — question pending");
-    assert.equal(await card.locator(".request-freeform").inputValue(), "Finish safely, but wait until the export is saved.");
-    assert.equal(await page.locator("#prompt").inputValue(), "Remember to retain the original recording.");
+    assert.equal(await page.locator("#prompt").inputValue(), "Finish safely, but wait until the export is saved.");
 
     socket.close({ code: 1012, reason: "Test reconnect" });
-    await eventually(async () => await card.getByRole("button", { name: "Submit", exact: true }).isDisabled(), "disconnected answer disabled");
+    await eventually(async () => await page.locator("#send").isDisabled(), "disconnected answer disabled");
     await eventually(() => connections === 2, "new websocket connection");
-    await eventually(async () => await page.locator("#send").isEnabled(), "reconnected composer");
-    assert.equal(await card.getByRole("button", { name: "Submit", exact: true }).isDisabled(), true);
-    assert.equal(await card.locator(".request-freeform").inputValue(), "Finish safely, but wait until the export is saved.");
+    assert.equal(await page.locator("#send").isDisabled(), true);
+    assert.equal(await page.locator("#prompt").inputValue(), "Finish safely, but wait until the export is saved.");
     send(question(1003, "a", false, "question-1001"));
-    await eventually(async () => await card.getByRole("button", { name: "Submit", exact: true }).isEnabled(), "replayed question enabled");
-    assert.equal(await card.count(), 1);
-    await card.getByRole("button", { name: "Submit", exact: true }).click();
+    await eventually(async () => await page.locator("#send").isEnabled(), "replayed question enables the composer");
+    assert.equal(await card.count(), 0);
+    await page.locator("#send").click();
     await eventually(() => responseTo(1003), "custom answer sent on new request id");
     assert.equal(responseTo(1001), undefined);
     assert.deepEqual(responseTo(1003).result, { answers: { deployment: { answers: ["Finish safely, but wait until the export is saved."] } } });
@@ -187,18 +175,18 @@ async function main() {
     await fs.mkdir(artifacts, { recursive: true });
     for (const [name, width, height] of [["desktop", 1280, 900], ["mobile", 390, 844]]) {
       await page.setViewportSize({ width, height });
-      await card.locator(".request-freeform").fill("Wait for the recording to finish safely.");
+      await page.locator("#prompt").fill("Wait for the recording to finish safely.");
+      assert.equal(await card.count(), 0);
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `${name} page overflow`);
-      assert.equal(await page.locator("#requests").evaluate((node) => node.scrollWidth <= node.clientWidth), true, `${name} questions overflow`);
       await page.screenshot({ path: path.join(artifacts, `${name}.png`), fullPage: true, animations: "disabled" });
     }
     const finished = threads.get("a");
     finished.status = { type: "idle" };
     finished.turns[0].status = "completed";
     notification("turn/completed", { threadId: "a", turn: finished.turns[0] });
-    await eventually(async () => await page.locator("#requests .request").count() === 0, "completed turn removes unanswered questions");
     await eventually(async () => await page.locator("#thinking-indicator").isHidden(), "completed status hidden");
     assert.equal(await page.locator("#send").textContent(), "Send");
+    assert.equal(await page.locator("#prompt").inputValue(), "Wait for the recording to finish safely.");
 
     // Real asynchronous questions are agentMessage items, not server requests.
     // This is the payload shape captured from the sky/adventure conversation.
@@ -232,10 +220,7 @@ async function main() {
     await page.getByText(asyncTurn.items[0].content[0].text, { exact: true }).waitFor();
     await emitAsyncItem(skyQuestion);
     await waitLabel("Waiting for your answer");
-    assert.equal(await card.count(), 1, "real async metadata must show an answer card as well as the transcript question");
-    assert.equal(await card.locator("select").inputValue(), "", "suggestions must not be submitted automatically");
-    assert.deepEqual(await card.locator("select option").allTextContents(),
-      ["Choose an answer…", skyReply, "A short scientific explanation", "A playful rhyme"]);
+    assert.equal(await card.count(), 0, "async question is an ordinary transcript message");
     assert.equal(await page.locator("#messages").getAttribute("aria-busy"), "false");
     assert.equal(await page.locator("#send").textContent(), "Reply");
     assert.equal(await page.locator("#send").isEnabled(), true);
@@ -256,40 +241,16 @@ async function main() {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.reload();
     await waitLabel("Waiting for your answer");
-    assert.equal(await card.count(), 1, "reload must restore the pending async card");
     await assertConversationOrder([asyncTurn.items[0].content[0].text, skyTitle, "Your choice will determine"], "unanswered reload");
-
-    await card.locator(".request-freeform").fill("Keep this answer across chat switches and reconnects");
-    await page.locator('#threads a[href="/?thread=b"]').click();
-    assert.equal(await card.count(), 0, "another chat must not show the async card");
-    await page.locator('#threads a[href="/?thread=async"]').click();
-    await waitLabel("Waiting for your answer");
-    assert.equal(await card.locator(".request-freeform").inputValue(), "Keep this answer across chat switches and reconnects");
-    const beforeReconnect = connections;
-    socket.close();
-    await eventually(async () => await card.getByRole("button", { name: "Submit" }).isDisabled(), "disconnected async card disabled");
-    await eventually(() => connections > beforeReconnect, "async question reconnected");
-    await eventually(async () => await card.getByRole("button", { name: "Submit" }).isEnabled(), "resumed async card ready");
-    assert.equal(await card.locator(".request-freeform").inputValue(), "Keep this answer across chat switches and reconnects");
-    await card.locator("select").selectOption(skyReply);
-    assert.equal(await card.locator(".request-freeform").inputValue(), "");
-    await page.locator("#prompt").fill("Keep this unrelated chat draft");
-    rejectNextSteer = true;
-    await card.getByRole("button", { name: "Submit" }).click();
-    await card.getByText("Your answer was not confirmed. It is saved here; you can try again.", { exact: true }).waitFor();
-    assert.equal(await card.locator("select").inputValue(), skyReply, "failed card replies keep their answer for retry");
-    assert.equal(await page.locator("#prompt").inputValue(), "Keep this unrelated chat draft");
-    await waitLabel("Waiting for your answer");
 
     // A successful acknowledgement clears waiting even before its user echo.
     // A stale resume response must not resurrect the unanswered state.
     delaySteerEcho = true;
+    await page.locator("#prompt").fill(skyReply);
     const resumeCount = received.filter((message) => message.method === "thread/resume").length;
-    await card.getByRole("button", { name: "Submit" }).click();
+    await page.locator("#send").click();
     await eventually(() => pendingEchoes.length === 1, "delayed answer accepted");
     await waitLabel("Codex is thinking");
-    assert.equal(await card.count(), 0, "an accepted card answer must remove its controls");
-    assert.equal(await page.locator("#prompt").inputValue(), "Keep this unrelated chat draft");
     await eventually(() => received.filter((message) => message.method === "thread/resume").length > resumeCount, "accepted answer resumes history");
     await eventually(async () => await page.locator("#send").isEnabled(), "accepted answer controls ready");
     await waitLabel("Codex is thinking");

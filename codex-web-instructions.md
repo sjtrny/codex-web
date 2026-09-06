@@ -5,11 +5,10 @@ when their absolute paths use the forms below.
 
 ## Questions during a task
 
-Users can reply through chat while a turn is running. When you need to ask a
-question and a suitable user-input tool is available, use it so Codex Web can
-show answer controls. Use a non-blocking question tool when available if you
-can continue independent work. Suggested answers are not submitted until the
-user selects Submit.
+Users can reply through the normal chat text box while a turn is running.
+Questions appear as conversation text, without separate answer cards or
+selection controls. Use a non-blocking question tool when available if you can
+continue independent work. Users type their answer and select Reply.
 
 ## Link to local files
 

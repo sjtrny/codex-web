@@ -112,12 +112,12 @@ correction, or additional instruction without stopping the task. Attachments
 are supported. Replies use the current task's settings; Tune changes apply to
 the next new turn.
 
-Structured questions appear below the conversation. Choose a suggested answer
-or write your own, then select **Submit**. The status distinguishes **Waiting
-for your answer** from **Working — question pending**. Questions stay with their
-chat, and typed answers survive chat switching and temporary disconnections.
-Async questions also show answer cards. Submitting a card replies to the active
-task and leaves any separate chat draft and attachments unchanged.
+Questions appear as ordinary conversation text. Answer using the same text box
+and **Reply** button; there are no separate question cards or answer controls.
+The status distinguishes **Waiting for your answer** from **Working — question
+pending**. For a native structured request with several questions, answer each
+in order through the text box. Chat drafts survive chat switching and temporary
+disconnections.
 
 If a task ends before a reply is accepted, the reply remains a draft for you to
 send again. Codex Web does not automatically start a new task. Mid-task replies

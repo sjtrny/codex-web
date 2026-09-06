@@ -2077,7 +2077,6 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
     "an active snapshot must restore waiting from the question even without waiting flags");
   assert.equal(ui.messages.getAttribute("aria-busy"), "false");
   assert.equal(ui.thinkingIndicator.classList.contains("waiting"), true);
-  assert.ok(state.asyncQuestionCards.get(reconnected.id), "resuming an unanswered async question must restore its answer card");
 
   const answeredReconnect = mergeThreadSnapshot({
     ...reconnected,
@@ -2087,7 +2086,6 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
   assert.equal(ui.thinkingLabel.textContent, "Codex is thinking",
     "a user reply in an active snapshot must clear the question's waiting state");
   assert.equal(ui.messages.getAttribute("aria-busy"), "true");
-  assert.equal(state.asyncQuestionCards.has(reconnected.id), false, "an answer from history must remove the card");
 
   const laterTurn = {
     id: "later-turn",
@@ -2125,11 +2123,6 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
   assert.equal(ui.messages.getAttribute("aria-busy"), "false");
   assert.equal(ui.send.disabled, false, "the composer must accept the asynchronous answer");
   assert.equal(ui.send.textContent, "Reply");
-  const liveCard = state.asyncQuestionCards.get("async-question-live");
-  assert.ok(liveCard, "real agentMessage.questions metadata must create an answer card");
-  assert.deepEqual(liveCard.querySelector(".request-choice").children.map((option) => option.value),
-    ["", ...sky.items[1].questions[0].options]);
-  liveCard.querySelector(".request-freeform").value = "Keep my answer draft";
   sendItem({ id: "async-wait-commentary", type: "agentMessage", phase: "commentary", text: "I'll wait for your answer.", questions: null });
   sendItem(sky.items[2]);
   assert.equal(ui.thinkingLabel.textContent, "Waiting for your answer",
@@ -2160,22 +2153,16 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
     "a snapshot without question metadata must preserve known live choices");
   renderThreadHistory(withoutMetadata);
   assert.equal(ui.thinkingLabel.textContent, "Waiting for your answer");
-  assert.equal(state.asyncQuestionCards.get("async-question-live"), liveCard);
-  assert.equal(liveCard.querySelector(".request-freeform").value, "Keep my answer draft");
 
   selectActiveThread("async-question-unrelated", "async-other-turn");
   assert.equal(ui.thinkingLabel.textContent, "Codex is thinking", "an asynchronous question must remain scoped to its conversation");
-  assert.equal(liveCard.hidden, true, "async cards must not appear in another chat");
   state.threadId = "async-question-live";
   state.composerKey = threadComposerKey(state.threadId, state.selectionId);
   renderThreadHistory(cachedThread(state.threadId).thread);
-  assert.equal(liveCard.hidden, false);
-  assert.equal(liveCard.querySelector(".request-freeform").value, "Keep my answer draft");
   sendItem(sky.items[3]);
   assert.equal(ui.thinkingLabel.textContent, "Codex is thinking",
     "a user-message event must clear waiting even when the reply comes from another client");
   assert.equal(ui.thinkingIndicator.classList.contains("waiting"), false);
-  assert.equal(state.asyncQuestionCards.has("async-question-live"), false);
   sendItem(sky.items[4]);
   assertRenderedItemOrder("async-question-live", sky.id, sky.items.slice(1));
 
@@ -2199,128 +2186,6 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
     threadId: "async-question-live", turn: { id: sky.id, status: "completed", items: [] },
   });
   assert.equal(ui.thinkingIndicator.hidden, true);
-}
-
-async function checkAsyncQuestionCardSubmission({ selectActiveThread, notify, settle, latestSteer, rpcMessages }) {
-  const threadId = "async-card-submit";
-  const turnId = "async-card-turn";
-  selectActiveThread(threadId, turnId);
-  const question = {
-    id: "async-card-question", type: "agentMessage", phase: "final_answer",
-    text: "Choose a setting and a hero.",
-    questions: [
-      { title: "Where should the story happen?", options: ["A sunken city", "A space station"] },
-      { title: "Who is the hero?" },
-    ],
-  };
-  notify("item/completed", { threadId, turnId, item: question });
-  const card = state.asyncQuestionCards.get(threadId);
-  const choice = card.answerControls[0].control;
-  const custom = card.answerControls[0].freeform;
-  const hero = card.answerControls[1].control;
-  const submit = () => card.submitButton.listeners.get("click")();
-  const beforeSubmit = rpcMessages.filter((message) => message.method === "turn/steer").length;
-  assert.equal(choice.value, "", "a suggested answer must not be selected or submitted automatically");
-  await submit();
-  assert.equal(rpcMessages.filter((message) => message.method === "turn/steer").length, beforeSubmit);
-  assert.match(card.querySelector(".request-error").textContent, /each question/);
-  choice.value = "A sunken city";
-  hero.value = "An octopus";
-  assert.equal(rpcMessages.filter((message) => message.method === "turn/steer").length, beforeSubmit);
-
-  // The connection can disappear while an answer is being composed. Reconcile
-  // canonical history IDs without replacing the controls or their typed values.
-  state.ready = false;
-  state.activeTurns.delete(threadId);
-  updateControls();
-  assert.equal(state.asyncQuestionCards.get(threadId), card);
-  assert.equal(card.submitButton.disabled, true);
-  state.connectionGeneration += 1;
-  state.ready = true;
-  setThreadActivity(threadId, null);
-  assert.equal(state.asyncQuestionCards.get(threadId), card);
-  assert.equal(card.submitButton.disabled, true, "stale cached questions must wait for a fresh active turn");
-  const reconnected = mergeThreadSnapshot({
-    id: threadId, status: { type: "active", activeFlags: [] },
-    turns: [{ id: turnId, status: "inProgress", items: [
-      cachedThread(threadId).thread.turns[0].items[0],
-      { ...question, id: "canonical-async-card-question" },
-    ] }],
-  }).thread;
-  renderThreadHistory(reconnected);
-  assert.equal(state.asyncQuestionCards.get(threadId), card, "canonical IDs must not discard an answer draft");
-  assert.equal(card.submitButton.disabled, false);
-  assert.equal(choice.value, "A sunken city");
-  assert.equal(hero.value, "An octopus");
-
-  ui.prompt.value = "Keep this separate chat draft";
-  handlePromptInput();
-  state.attachments = [attachments[1]];
-  const submission = submit();
-  const firstSteer = latestSteer();
-  assert.deepEqual(firstSteer.params.input, [{ type: "text", text:
-    "Where should the story happen?\nA sunken city\n\nWho is the hero?\nAn octopus" }]);
-  assert.equal(firstSteer.params.threadId, threadId);
-  assert.equal(firstSteer.params.expectedTurnId, turnId);
-  assert.equal(ui.prompt.value, "Keep this separate chat draft");
-  assert.deepEqual(state.attachments, [attachments[1]], "card answers must not consume unrelated attachments");
-  assert.equal(card.submitButton.disabled, true);
-  assert.equal(choice.disabled, true);
-  assert.equal(hero.disabled, true);
-  await submit();
-  assert.equal(latestSteer(), firstSteer, "repeated Submit clicks must not send duplicate answers");
-  settle(firstSteer, null, "Connection lost");
-  await submission;
-  assert.equal(state.asyncQuestionCards.get(threadId), card);
-  assert.equal(card.submitButton.disabled, false);
-  assert.equal(hero.value, "An octopus");
-  assert.equal(ui.prompt.value, "Keep this separate chat draft");
-  assert.match(card.querySelector(".request-error").textContent, /not confirmed/);
-
-  custom.value = "A village bakery";
-  custom.listeners.get("input")();
-  assert.equal(choice.value, "");
-  const retry = submit();
-  const retrySteer = latestSteer();
-  assert.match(retrySteer.params.input[0].text, /A village bakery/);
-  settle(retrySteer, { turnId });
-  await retry;
-  assert.equal(state.asyncQuestionCards.has(threadId), false, "an accepted answer must remove the card before its echo");
-  assert.equal(card.parentNode, null);
-  await submit();
-  assert.equal(latestSteer(), retrySteer, "a removed card must not send another answer");
-  assert.equal(ui.prompt.value, "Keep this separate chat draft");
-  assert.deepEqual(state.attachments, [attachments[1]]);
-  assert.equal(ui.thinkingLabel.textContent, "Codex is thinking");
-
-  notify("item/completed", { threadId, turnId, item: { ...question, id: "async-completed-card-question" } });
-  const endingCard = state.asyncQuestionCards.get(threadId);
-  assert.ok(endingCard);
-  endingCard.answerControls[0].control.value = "A sunken city";
-  endingCard.answerControls[1].control.value = "An octopus";
-  const endingSubmission = endingCard.submitButton.listeners.get("click")();
-  const endingSteer = latestSteer();
-  notify("turn/completed", { threadId, turn: { id: turnId, status: "completed", items: [] } });
-  assert.equal(state.asyncQuestionCards.has(threadId), false, "turn completion must remove unanswered cards");
-  settle(endingSteer, null, "Turn already completed");
-  await endingSubmission;
-  assert.equal(ui.prompt.value,
-    "Where should the story happen?\nA sunken city\n\nWho is the hero?\nAn octopus\n\nKeep this separate chat draft",
-    "a rejected card answer must survive as a chat draft if its turn has already ended");
-  assert.equal(ui.send.textContent, "Send");
-
-  selectActiveThread("async-late-completion", "async-late-completion-turn");
-  notify("item/completed", { threadId: state.threadId, turnId: selectedTurnId(), item: question });
-  const failedCard = state.asyncQuestionCards.get(state.threadId);
-  failedCard.answerControls[0].control.value = "A space station";
-  failedCard.answerControls[1].control.value = "A robot";
-  const failedSubmission = failedCard.submitButton.listeners.get("click")();
-  settle(latestSteer(), null, "Reply rejected");
-  await failedSubmission;
-  assert.equal(state.asyncQuestionCards.get(state.threadId), failedCard);
-  notify("turn/completed", { threadId: state.threadId, turn: { id: selectedTurnId(), status: "completed", items: [] } });
-  assert.equal(ui.prompt.value, "Where should the story happen?\nA space station\n\nWho is the hero?\nA robot",
-    "late completion must retain a failed answer after its card goes away");
 }
 
 async function checkMidTurnInteractions(rpcMessages) {
@@ -2587,12 +2452,9 @@ async function checkMidTurnInteractions(rpcMessages) {
     settle,
     latestSteer,
   });
-  await checkAsyncQuestionCardSubmission({
-    selectActiveThread, notify: notifyWithoutBackgroundRpc, settle, latestSteer, rpcMessages,
-  });
 
   selectActiveThread("questions-thread", "questions-turn");
-  checkQuestionCards(rpcMessages);
+  await checkQuestionsInComposer(rpcMessages);
 
   // Drain background refreshes without leaving 60-second RPC timers behind.
   state.ready = false;
@@ -2607,38 +2469,26 @@ async function checkMidTurnInteractions(rpcMessages) {
   await Promise.all([...state.threadReconciliations.values()].map((entry) => entry.promise));
 }
 
-function checkQuestionCards(rpcMessages) {
+async function checkQuestionsInComposer(rpcMessages) {
   function updateStatus(threadId, activeFlags) {
     state.ready = false;
     handleNotification("thread/status/changed", {
-      threadId,
-      status: { type: "active", activeFlags },
+      threadId, status: { type: "active", activeFlags },
     });
     state.ready = true;
     updateControls();
   }
-
-  updateStatus("questions-thread", ["waitingOnUserInput"]);
-  assert.match(ui.thinkingLabel.textContent, /waiting.*answer/i, "server waiting flags must work before the card arrives");
-  assert.equal(ui.messages.getAttribute("aria-busy"), "false");
-  updateStatus("questions-thread", ["waitingOnApproval"]);
-  assert.equal(ui.thinkingLabel.textContent, "Waiting for approval");
-  updateStatus("questions-thread", []);
-  updateStatus("other-open-thread", ["waitingOnUserInput"]);
-  assert.equal(ui.thinkingLabel.textContent, "Codex is thinking", "another conversation's question must not change the selected status");
-  assert.equal(ui.messages.getAttribute("aria-busy"), "true");
-
-  const request = {
-    id: "question-options",
-    method: "item/tool/requestUserInput",
+  async function answer(text) {
+    ui.prompt.value = text;
+    handlePromptInput();
+    await submitPrompt({ preventDefault() {} });
+  }
+  const responseTo = (id) => rpcMessages.findLast((message) => message.id === id && !message.method);
+  const question = {
+    id: "question-options", method: "item/tool/requestUserInput",
     params: {
-      threadId: "questions-thread",
-      turnId: "questions-turn",
-      isBlocking: true,
-      questions: [{
-        id: "deployment",
-        header: "Deployment",
-        question: "How should I deploy?",
+      threadId: "questions-thread", turnId: "questions-turn", isBlocking: true,
+      questions: [{ id: "deployment", header: "Deployment", question: "How should I deploy?",
         options: [
           { label: "Keep running", description: "Deploy separately" },
           { label: "Finish safely", description: "Then update" },
@@ -2646,184 +2496,132 @@ function checkQuestionCards(rpcMessages) {
       }],
     },
   };
-  handleServerRequest(request);
-  const card = state.requestCards.get("question-options");
-  assert.equal(card.requestKind, "input");
-  assert.equal(card.requestParams.threadId, "questions-thread");
-  assert.equal(card.hidden, false);
-  assert.match(ui.thinkingLabel.textContent, /waiting.*answer/i);
-  const select = card.querySelector(".request-choice");
-  const freeform = card.querySelector(".request-freeform");
-  assert.ok(select, "suggested answers must remain available");
-  assert.ok(freeform, "option questions must also accept an original answer");
-  assert.deepEqual(select.children.map((option) => option.value), ["", "Keep running", "Finish safely"]);
-  select.value = "Keep running";
-  freeform.value = "Deploy tomorrow after the recording finishes";
-  freeform.listeners.get("input")({ target: freeform });
-  assert.equal(select.value, "", "typing a custom answer must deselect the suggestion");
-  select.value = "Finish safely";
-  select.listeners.get("change")({ target: select });
-  assert.equal(freeform.value, "", "choosing a suggestion must clear a stale custom answer");
-  freeform.value = "Deploy tomorrow after the recording finishes";
-  freeform.listeners.get("input")({ target: freeform });
 
-  state.threadId = "unrelated-question-thread";
-  updateControls();
-  assert.equal(card.hidden, true, "questions must not leak into another conversation");
-  state.threadId = "questions-thread";
-  updateControls();
-  assert.equal(card.hidden, false);
-  assert.equal(freeform.value, "Deploy tomorrow after the recording finishes", "switching chats must preserve the answer draft");
+  updateStatus("questions-thread", ["waitingOnUserInput"]);
+  assert.equal(ui.thinkingLabel.textContent, "Waiting for your answer");
+  assert.equal(ui.messages.getAttribute("aria-busy"), "false");
+  updateStatus("questions-thread", ["waitingOnApproval"]);
+  assert.equal(ui.thinkingLabel.textContent, "Waiting for approval");
+  updateStatus("questions-thread", []);
+  updateStatus("other-open-thread", ["waitingOnUserInput"]);
+  assert.equal(ui.thinkingLabel.textContent, "Codex is thinking");
 
-  const submit = descendants(card, (node) => node.tagName === "button").find((button) => button.textContent === "Submit");
-  assert.ok(submit);
+  handleServerRequest(question);
+  const request = state.requestCards.get(question.id);
+  assert.equal(request.parentNode, null, "a user-input request must not create a card or form");
+  assert.equal(ui.requests.children.length, 0);
+  const prompt = [...state.items.values()].find((item) => item.text?.startsWith("How should I deploy?"));
+  assert.ok(prompt, "native questions must appear as ordinary conversation messages");
+  assert.match(prompt.text, /Keep running — Deploy separately/);
+  assert.equal(ui.send.disabled, false);
+  assert.equal(ui.send.textContent, "Reply");
+  assert.equal(responseTo(question.id), undefined, "showing options must never submit an answer");
+  await answer("   ");
+  assert.equal(responseTo(question.id), undefined);
+
   state.ws.readyState = 3;
-  const beforeDisconnected = rpcMessages.length;
-  submit.listeners.get("click")();
-  assert.equal(rpcMessages.length, beforeDisconnected);
-  assert.equal(state.requestCards.get("question-options"), card, "a failed send must keep the question retryable");
-  assert.equal(freeform.value, "Deploy tomorrow after the recording finishes");
-  assert.match(card.querySelector(".request-error").textContent, /connection/i);
+  await answer("Deploy tomorrow after the recording finishes");
+  assert.equal(responseTo(question.id), undefined);
+  assert.equal(ui.prompt.value, "Deploy tomorrow after the recording finishes");
+  assert.match(ui.notice.textContent, /still in the text box/);
+  assert.equal(state.requestCards.get(question.id), request);
   state.ws.readyState = 1;
-  submit.listeners.get("click")();
-  assert.deepEqual(rpcMessages.at(-1), {
-    id: "question-options",
-    result: { answers: { deployment: { answers: ["Deploy tomorrow after the recording finishes"] } } },
+  await answer(ui.prompt.value);
+  assert.deepEqual(responseTo(question.id).result, {
+    answers: { deployment: { answers: ["Deploy tomorrow after the recording finishes"] } },
   });
-  assert.equal(state.requestCards.has("question-options"), false);
-  const afterAnswer = rpcMessages.length;
-  submit.listeners.get("click")();
-  assert.equal(rpcMessages.length, afterAnswer, "a removed card must not answer the request twice");
+  assert.equal(ui.prompt.value, "");
+  assert.equal(state.requestCards.has(question.id), false);
+  assert.equal(ui.requests.children.length, 0);
+  const localReply = [...state.items.values()].find((item) => item.text === "Deploy tomorrow after the recording finishes");
+  assert.ok(localReply);
+  assert.ok(ui.messages.children.indexOf(prompt.node) < ui.messages.children.indexOf(localReply.node));
 
-  handleServerRequest({
-    ...request,
-    id: "secret-question",
-    params: {
-      ...request.params,
-      questions: [{ id: "secret", header: "Secret", question: "Enter the value", isSecret: true }],
+  const several = {
+    ...question, id: "several-questions", params: {
+      ...question.params, questions: [
+        { id: "place", question: "Where should it happen?", options: [{ label: "A village" }] },
+        { id: "hero", question: "Who is the hero?" },
+      ],
     },
-  });
-  const secretCard = state.requestCards.get("secret-question");
-  assert.equal(secretCard.querySelector(".request-answer").type, "password");
-  secretCard.querySelector(".request-answer").value = "private value";
-  descendants(secretCard, (node) => node.tagName === "button")[0].listeners.get("click")();
-  assert.deepEqual(rpcMessages.at(-1).result, { answers: { secret: { answers: ["private value"] } } });
-
-  handleServerRequest({
-    ...request,
-    id: "optional-question",
-    params: { ...request.params, isBlocking: false },
-  });
-  const optionalCard = state.requestCards.get("optional-question");
-  assert.match(ui.thinkingLabel.textContent, /working.*question pending/i);
-  descendants(optionalCard, (node) => node.tagName === "button")[0].listeners.get("click")();
-  assert.deepEqual(rpcMessages.at(-1).result, { answers: { deployment: { answers: [] } } });
-
-  const reconnectRequest = {
-    ...request,
-    id: "old-connection-id",
-    params: { ...request.params, itemId: "persistent-question-call" },
   };
-  handleServerRequest(reconnectRequest);
-  const reconnectCard = state.requestCards.get("old-connection-id");
-  const savedAnswer = reconnectCard.querySelector(".request-freeform");
-  savedAnswer.value = "Keep my answer across reconnects";
-  handleServerRequest(reconnectRequest);
-  assert.equal(state.requestCards.get("old-connection-id"), reconnectCard, "a duplicate request must preserve the existing answer draft");
-  reconnectCard.requestDisconnected = true;
-  state.ready = false;
-  renderRequests();
-  const reconnectSubmit = descendants(reconnectCard, (node) => node.tagName === "button")[0];
-  assert.equal(reconnectSubmit.disabled, true);
-  state.ready = true;
-  renderRequests();
-  assert.equal(reconnectSubmit.disabled, true, "old connection IDs must stay blocked after reconnect until the request is replayed");
-  const beforeReplay = rpcMessages.length;
-  reconnectSubmit.listeners.get("click")();
-  assert.equal(rpcMessages.length, beforeReplay);
-  handleServerRequest({ ...reconnectRequest, id: "new-connection-id" });
-  assert.equal(state.requestCards.has("old-connection-id"), false);
-  assert.equal(state.requestCards.get("new-connection-id"), reconnectCard);
-  assert.equal(savedAnswer.value, "Keep my answer across reconnects");
-  assert.equal(reconnectSubmit.disabled, false);
-  reconnectSubmit.listeners.get("click")();
-  assert.deepEqual(rpcMessages.at(-1), {
-    id: "new-connection-id",
-    result: { answers: { deployment: { answers: ["Keep my answer across reconnects"] } } },
+  handleServerRequest(several);
+  await answer("A village");
+  assert.equal(responseTo(several.id), undefined, "collect all native answers before returning the tool result");
+  assert.equal(state.requestCards.get(several.id).inputIndex, 1);
+  assert.ok([...state.items.values()].some((item) => item.text === "Question 2 of 2\n\nWho is the hero?"));
+  await answer("An octopus");
+  assert.deepEqual(responseTo(several.id).result, {
+    answers: { place: { answers: ["A village"] }, hero: { answers: ["An octopus"] } },
   });
 
-  handleServerRequest({ ...request, id: "completed-offline-question" });
-  const completedOfflineCard = state.requestCards.get("completed-offline-question");
-  completedOfflineCard.requestDisconnected = true;
+  handleServerRequest({ ...question, id: "secret-question", params: {
+    ...question.params, questions: [{ id: "secret", question: "Enter the value", isSecret: true }],
+  } });
+  await answer("private value");
+  assert.deepEqual(responseTo("secret-question").result, { answers: { secret: { answers: ["private value"] } } });
+  assert.equal([...state.items.values()].some((item) => item.text === "private value"), false);
+
+  const reconnectQuestion = { ...question, id: "old-id", params: {
+    ...question.params, itemId: "persistent-question-call", isBlocking: false,
+  } };
+  handleServerRequest(reconnectQuestion);
+  assert.equal(ui.thinkingLabel.textContent, "Working — question pending");
+  const reconnectRequest = state.requestCards.get("old-id");
+  ui.prompt.value = "Keep my answer across reconnects";
+  handlePromptInput();
+  handleServerRequest(reconnectQuestion);
+  assert.equal(state.requestCards.get("old-id"), reconnectRequest);
+  state.ready = false;
+  disconnectRequests();
+  state.ready = true;
+  updateControls();
+  assert.equal(ui.send.disabled, true, "a native request must not answer a stale connection ID");
+  await answer(ui.prompt.value);
+  assert.equal(responseTo("old-id"), undefined);
+  handleServerRequest({ ...reconnectQuestion, id: "new-id" });
+  assert.equal(ui.send.disabled, false);
+  assert.equal(ui.prompt.value, "Keep my answer across reconnects");
+  assert.equal(state.requestCards.get("new-id"), reconnectRequest);
+  await answer(ui.prompt.value);
+  assert.deepEqual(responseTo("new-id").result, {
+    answers: { deployment: { answers: ["Keep my answer across reconnects"] } },
+  });
+
+  // An unrelated request may reuse an ID after reconnect, without replacing
+  // the saved native question that must still be answered in its own thread.
+  handleServerRequest({ ...reconnectQuestion, id: 1 });
+  const oldRequest = state.requestCards.get("1");
+  disconnectRequests();
+  handleServerRequest({ ...question, id: 1, params: {
+    ...question.params, threadId: "other-input-thread", turnId: "other-input-turn", itemId: "other-call",
+  } });
+  assert.notEqual(state.requestCards.get("1"), oldRequest);
+  handleServerRequest({ ...reconnectQuestion, id: 2 });
+  assert.equal(state.requestCards.get("2"), oldRequest);
+  handleNotification("serverRequest/resolved", { requestId: 1 });
+  assert.equal(state.requestCards.get("2"), oldRequest);
+  await answer("Preserve the original recording");
+  assert.deepEqual(responseTo(2).result, { answers: { deployment: { answers: ["Preserve the original recording"] } } });
+
+  handleServerRequest({ ...question, id: "completed-offline-question" });
+  state.requestCards.get("completed-offline-question").requestDisconnected = true;
   mergeThreadSnapshot({
-    id: "questions-thread",
-    status: { type: "idle" },
+    id: "questions-thread", status: { type: "idle" },
     turns: [{ id: "questions-turn", status: "completed", items: [] }],
   });
-  assert.equal(state.requestCards.has("completed-offline-question"), false,
-    "a terminal resumed turn must remove its stale question even without a completion notification");
-  assert.equal(completedOfflineCard.parentNode, null);
+  assert.equal(state.requestCards.has("completed-offline-question"), false);
 
-  handleServerRequest({
-    ...request,
-    id: "omitted-turn-question",
-    params: { ...request.params, threadId: "offline-question-thread", turnId: "omitted-turn" },
-  });
-  const omittedTurnCard = state.requestCards.get("omitted-turn-question");
-  omittedTurnCard.requestDisconnected = true;
-  cacheThreadSnapshot({
-    id: "offline-question-thread",
-    status: { type: "active", activeFlags: [] },
-    turns: [],
-  });
-  assert.equal(state.requestCards.get("omitted-turn-question"), omittedTurnCard,
-    "a partial active snapshot that omits the question's turn must preserve its saved answer");
-  mergeThreadSnapshot({ id: "offline-question-thread", status: { type: "idle" }, turns: [] });
-  assert.equal(state.requestCards.has("omitted-turn-question"), false,
-    "an idle resumed thread with no active turn must clear stale disconnected questions");
-
-  const reusedIdRequest = {
-    ...request,
-    id: 1,
-    params: {
-      ...request.params,
-      threadId: "reused-request-thread-a",
-      turnId: "reused-request-turn-a",
-      itemId: "reused-request-call-a",
-    },
-  };
-  handleServerRequest(reusedIdRequest);
-  const previousConnectionCard = state.requestCards.get("1");
-  previousConnectionCard.querySelector(".request-freeform").value = "Preserve this draft when IDs are reused";
-  disconnectRequests();
-  assert.equal(state.requestCards.has("1"), false, "stale IDs must not occupy the new connection's request namespace");
-  handleServerRequest({
-    ...reusedIdRequest,
-    params: {
-      ...reusedIdRequest.params,
-      threadId: "reused-request-thread-b",
-      turnId: "reused-request-turn-b",
-      itemId: "reused-request-call-b",
-    },
-  });
-  const newConnectionCard = state.requestCards.get("1");
-  assert.notEqual(newConnectionCard, previousConnectionCard);
-  assert.equal([...state.requestCards.values()].includes(previousConnectionCard), true,
-    "a reused ID for another question must not discard the old answer draft");
-  handleServerRequest({ ...reusedIdRequest, id: 2 });
-  assert.equal(state.requestCards.get("1"), newConnectionCard);
-  assert.equal(state.requestCards.get("2"), previousConnectionCard);
-  assert.equal(previousConnectionCard.querySelector(".request-freeform").value, "Preserve this draft when IDs are reused");
-  handleNotification("serverRequest/resolved", { requestId: 1 });
-  assert.equal(state.requestCards.has("1"), false);
-  assert.equal(newConnectionCard.parentNode, null);
-  assert.equal(state.requestCards.get("2"), previousConnectionCard,
-    "resolving a reused ID must only remove the current connection's matching question");
-  descendants(previousConnectionCard, (node) => node.tagName === "button")[0].listeners.get("click")();
-  assert.deepEqual(rpcMessages.at(-1), {
-    id: 2,
-    result: { answers: { deployment: { answers: ["Preserve this draft when IDs are reused"] } } },
-  });
+  // Question controls are removed; existing command approvals are unaffected.
+  handleServerRequest({ id: "approval-stays", method: "item/commandExecution/requestApproval", params: {
+    threadId: state.threadId, turnId: "approval-turn", command: "example command",
+  } });
+  const approval = state.requestCards.get("approval-stays");
+  assert.equal(approval.parentNode, ui.requests);
+  const decline = descendants(approval, (node) => node.tagName === "button" && node.textContent === "Decline")[0];
+  decline.listeners.get("click")();
+  assert.deepEqual(responseTo("approval-stays").result, { decision: "decline" });
+  assert.equal(ui.requests.children.length, 0);
 }
 
 let capturedSearchRequest;

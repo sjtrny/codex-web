@@ -166,7 +166,6 @@ const state = {
   promptHistoryDraft: "",
   items: new Map(),
   requestCards: new Map(),
-  asyncQuestionCards: new Map(),
   reconnectTimer: null,
   defaultCwd: "/workspaces",
   attachments: [],
@@ -264,12 +263,13 @@ function notice(text = "") {
 function updateControls() {
   const busy = selectedThreadBusy();
   const turnId = selectedTurnId();
-  const blocked = selectedThreadSubmitting() || (busy && !turnId);
+  const inputRequest = selectedInputRequest();
+  const blocked = selectedThreadSubmitting() || (busy && !turnId) || inputRequest?.requestDisconnected;
   ui.send.disabled = !state.ready || blocked || state.uploading;
   ui.send.textContent = turnId ? "Reply" : "Send";
   ui.send.title = turnId ? "Send a reply to the current task" : "Start a new turn";
   ui.prompt.placeholder = turnId ? "Reply or add instructions while Codex works…" : "Ask Codex…";
-  ui.fileInput.disabled = blocked || state.uploading;
+  ui.fileInput.disabled = blocked || state.uploading || Boolean(inputRequest);
   ui.stop.disabled = !state.ready || !state.threadId || !turnId;
   ui.settingsToggle.disabled = !state.ready;
   ui.settingsFields.disabled = !state.ready;
@@ -3565,6 +3565,11 @@ async function submitPrompt(event) {
   const attachments = [...state.attachments];
   const input = buildTurnInput(text, attachments);
   if (!input.length || !state.ready || selectedThreadSubmitting() || state.uploading) return;
+  const inputRequest = selectedInputRequest();
+  if (inputRequest) {
+    submitUserInput(inputRequest, text);
+    return;
+  }
   if (selectedThreadBusy()) {
     const turnId = selectedTurnId();
     if (turnId) await submitSteer({ draftText, text, attachments, input, turnId });
@@ -3742,7 +3747,7 @@ function reconcileSteersFromThread(thread) {
   }
 }
 
-async function submitSteer({ draftText, text, attachments, input, turnId, preserveComposer = false }) {
+async function submitSteer({ draftText, text, attachments, input, turnId }) {
   const threadId = state.threadId;
   const composerKey = state.composerKey;
   const id = globalThis.crypto?.randomUUID?.()
@@ -3755,11 +3760,9 @@ async function submitSteer({ draftText, text, attachments, input, turnId, preser
   };
   state.pendingSteers.set(id, pending);
   state.steeringThreads.add(threadId);
-  if (!preserveComposer) {
-    clearComposerDraft(composerKey);
-    state.attachments = [];
-    renderAttachments();
-  }
+  clearComposerDraft(composerKey);
+  state.attachments = [];
+  renderAttachments();
   notice("");
   jumpToPresent();
   renderPendingSteer(pending);
@@ -3772,36 +3775,25 @@ async function submitSteer({ draftText, text, attachments, input, turnId, preser
     // Receipt does not mean the input has been consumed. In particular, do not
     // mark a turn active here: completion may already have arrived.
     void reconcileThreadHistory(threadId);
-    return true;
   } catch (error) {
-    const echoed = !state.pendingSteers.has(id);
     if (state.pendingSteers.has(id)) {
       removePendingSteer(pending);
-      const questionCard = state.asyncQuestionCards.get(threadId);
-      const keptInCard = preserveComposer && questionCard
-        && questionCard.requestParams.turnId === turnId
-        && String(resolvedThreadItemId(threadId, turnId, questionCard.requestParams.itemId))
-          === String(resolvedThreadItemId(threadId, turnId, pending.asyncQuestionId));
-      if (keptInCard) questionCard.failedAnswer = draftText;
-      else {
-        const currentDraft = state.composerDrafts.get(composerKey) || "";
-        state.composerDrafts.set(composerKey, currentDraft ? `${draftText}\n\n${currentDraft}` : draftText);
-        if (state.threadId === threadId && state.composerKey === composerKey) {
-          restoreComposerDraft(composerKey);
-          state.attachments = [...attachments, ...state.attachments];
-          renderAttachments();
-        } else if (attachments.length) {
-          state.failedSteerAttachments.set(composerKey, attachments);
-        }
+      const currentDraft = state.composerDrafts.get(composerKey) || "";
+      state.composerDrafts.set(composerKey, currentDraft ? `${draftText}\n\n${currentDraft}` : draftText);
+      if (state.threadId === threadId && state.composerKey === composerKey) {
+        restoreComposerDraft(composerKey);
+        state.attachments = [...attachments, ...state.attachments];
+        renderAttachments();
+      } else if (attachments.length) {
+        state.failedSteerAttachments.set(composerKey, attachments);
       }
-      notice(`Reply not confirmed: ${error.message}. Your ${keptInCard ? "answer was kept in the question card" : "reply was kept as a draft"}; it was not sent again.`);
+      notice(`Reply not confirmed: ${error.message}. Your reply was kept as a draft; it was not sent again.`);
     } else {
       notice(`The reply is in the conversation, but confirmation failed: ${error.message}`);
     }
     // A stale expectedTurnId can mean work ended just before the reply. Refresh
     // state and leave resubmission to the user instead of starting another task.
     if (state.ready) void reconcileThreadHistory(threadId);
-    return echoed;
   } finally {
     state.steeringThreads.delete(threadId);
     updateControls();
@@ -3827,8 +3819,12 @@ function removeRequest(id) {
 }
 
 function renderRequests() {
-  renderAsyncQuestionCards();
+  const inputRequest = selectedInputRequest();
   for (const card of state.requestCards.values()) {
+    if (card.requestKind === "input") {
+      if (card === inputRequest) renderInputQuestion(card);
+      continue;
+    }
     card.hidden = card.requestParams.threadId !== state.threadId;
     for (const button of card.requestActions) {
       button.disabled = !state.ready || card.requestDisconnected;
@@ -3851,87 +3847,7 @@ function removeRequestsForTurn(threadId, turnId = null) {
 function clearRequests() {
   for (const card of state.requestCards.values()) card.remove();
   state.requestCards.clear();
-  for (const card of state.asyncQuestionCards.values()) card.remove();
-  state.asyncQuestionCards.clear();
   updateControls();
-}
-
-function renderAsyncQuestionCards() {
-  for (const threadId of new Set([...state.asyncQuestionCards.keys(), state.threadId])) {
-    if (!threadId) continue;
-    const cached = cachedThread(threadId, false);
-    const question = pendingAsyncQuestion(threadId);
-    const turnId = state.activeTurns.get(threadId)
-      || (question && [...(cached?.thread.turns || [])].reverse().find((turn) => turn.status === "inProgress")?.id);
-    const disconnected = !state.ready || cached?.generation !== state.connectionGeneration;
-    let card = state.asyncQuestionCards.get(threadId);
-    const sameQuestion = card && question && card.requestParams.turnId === turnId
-      && String(resolvedThreadItemId(threadId, turnId, card.requestParams.itemId)) === String(question.id)
-      && card.questionsKey === JSON.stringify(question.questions);
-    // Keep existing controls while reconnecting. A fresh history snapshot will
-    // establish whether this question still needs an answer before re-enabling it.
-    if (card && !sameQuestion && !(disconnected && !question)) {
-      if (card.failedAnswer) {
-        const composerKey = threadComposerKey(threadId);
-        const draft = state.composerDrafts.get(composerKey) || "";
-        state.composerDrafts.set(composerKey, draft ? `${card.failedAnswer}\n\n${draft}` : card.failedAnswer);
-        if (state.composerKey === composerKey) restoreComposerDraft(composerKey);
-      }
-      card.remove();
-      state.asyncQuestionCards.delete(threadId);
-      card = null;
-    }
-    if (!card && question) {
-      const params = {
-        threadId, turnId, itemId: question.id, isBlocking: false,
-        questions: question.questions.map((entry, index) => ({
-          ...entry,
-          id: String(index),
-          question: entry.title || entry.question,
-          options: entry.options?.map((option) => typeof option === "string" ? { label: option } : option),
-        })),
-      };
-      card = createUserInputCard(params, submitAsyncQuestion);
-      card.requestParams = params;
-      card.questionsKey = JSON.stringify(question.questions);
-      state.asyncQuestionCards.set(threadId, card);
-      ui.requests.append(card);
-    }
-    if (!card) continue;
-    card.hidden = threadId !== state.threadId;
-    const blocked = disconnected || !turnId || state.activeTurns.get(threadId) !== turnId || state.steeringThreads.has(threadId)
-      || state.submittingThreads.has(threadId);
-    card.submitButton.disabled = blocked;
-    for (const { control, freeform } of card.answerControls) {
-      control.disabled = blocked;
-      if (freeform) freeform.disabled = blocked;
-    }
-  }
-}
-
-async function submitAsyncQuestion(card, answers) {
-  const { threadId, turnId } = card.requestParams;
-  if (state.asyncQuestionCards.get(threadId) !== card || threadId !== state.threadId
-    || card.submitButton.disabled || selectedTurnId() !== turnId) return;
-  const entries = card.requestParams.questions.map((question) => ({
-    question: question.question,
-    answer: answers[question.id]?.answers[0] || "",
-  }));
-  if (entries.some((entry) => !entry.answer.trim())) {
-    showRequestError(card, "Choose an answer or write your own for each question.");
-    return;
-  }
-  const text = entries.length === 1 ? entries[0].answer
-    : entries.map((entry) => `${entry.question}\n${entry.answer}`).join("\n\n");
-  card.querySelector(".request-error")?.remove();
-  card.failedAnswer = null;
-  const accepted = await submitSteer({
-    text, draftText: text, attachments: [], input: [{ type: "text", text }], turnId,
-    preserveComposer: true,
-  });
-  if (!accepted && state.asyncQuestionCards.get(threadId) === card) {
-    showRequestError(card, "Your answer was not confirmed. It is saved here; you can try again.");
-  }
 }
 
 function disconnectRequests() {
@@ -3963,19 +3879,15 @@ function sendRequestResponse(card, result = null, error = null) {
     respond(card.requestId, result, error);
     removeRequest(card.requestId);
   } catch (sendError) {
-    showRequestError(card, `${sendError.message}. Your answer has not been sent. Try again when connected.`);
+    let alert = card.querySelector(".request-error");
+    if (!alert) {
+      alert = document.createElement("p");
+      alert.className = "request-error";
+      alert.setAttribute("role", "alert");
+      card.append(alert);
+    }
+    alert.textContent = `${sendError.message}. Your answer has not been sent. Try again when connected.`;
   }
-}
-
-function showRequestError(card, message) {
-  let alert = card.querySelector(".request-error");
-  if (!alert) {
-    alert = document.createElement("p");
-    alert.className = "request-error";
-    alert.setAttribute("role", "alert");
-    card.append(alert);
-  }
-  alert.textContent = message;
 }
 
 function approvalRequest(message, kind) {
@@ -4004,81 +3916,65 @@ function approvalRequest(message, kind) {
   addRequest(message.id, card, params, "approval", message.method);
 }
 
-function createUserInputCard(params, onSubmit) {
-  const card = document.createElement("article");
-  card.className = "request";
-  const title = document.createElement("strong");
-  title.textContent = params.isBlocking === false ? "Question while Codex works" : "Codex needs input";
-  card.append(title);
-  const controls = [];
-
-  for (const question of params.questions || []) {
-    const group = document.createElement("div");
-    group.className = "request-question";
-    const label = document.createElement("label");
-    const prompt = document.createElement("span");
-    prompt.textContent = `${question.header || "Question"}: ${question.question}`;
-    let control;
-    let freeform = null;
-    if (question.options?.length) {
-      control = document.createElement("select");
-      control.className = "request-choice";
-      const placeholder = document.createElement("option");
-      placeholder.value = "";
-      placeholder.textContent = "Choose an answer…";
-      control.append(placeholder);
-      for (const option of question.options) {
-        const choice = document.createElement("option");
-        choice.value = option.label;
-        choice.textContent = option.description ? `${option.label} — ${option.description}` : option.label;
-        control.append(choice);
-      }
-      control.value = "";
-      freeform = document.createElement("input");
-      freeform.className = "request-answer request-freeform";
-      freeform.type = question.isSecret ? "password" : "text";
-      freeform.autocomplete = "off";
-      freeform.addEventListener("input", () => { control.value = ""; });
-      control.addEventListener("change", () => { freeform.value = ""; });
-    } else {
-      control = document.createElement("input");
-      control.className = "request-answer";
-      control.type = question.isSecret ? "password" : "text";
-      control.autocomplete = "off";
-    }
-    label.append(prompt, control);
-    group.append(label);
-    if (freeform) {
-      const otherLabel = document.createElement("label");
-      const otherPrompt = document.createElement("span");
-      otherPrompt.textContent = "Or write your own answer";
-      otherLabel.append(otherPrompt, freeform);
-      group.append(otherLabel);
-    }
-    card.append(group);
-    controls.push({ id: question.id, control, freeform });
-  }
-
-  const actions = document.createElement("div");
-  actions.className = "actions";
-  card.answerControls = controls;
-  card.submitButton = actionButton("Submit", () => {
-    const answers = {};
-    for (const entry of controls) {
-      const value = entry.freeform?.value || entry.control.value;
-      answers[entry.id] = { answers: value ? [value] : [] };
-    }
-    return onSubmit(card, answers);
-  });
-  actions.append(card.submitButton);
-  card.append(actions);
-  return card;
+function userInputRequest(message) {
+  // Keep the native request's lifecycle metadata, but render no separate form.
+  const request = document.createElement("div");
+  request.inputIndex = 0;
+  request.inputAnswers = {};
+  request.inputMessageId = `user-input:${state.connectionGeneration}:${message.id}`;
+  addRequest(message.id, request, message.params || {}, "input", message.method);
 }
 
-function userInputRequest(message) {
-  const params = message.params || {};
-  const card = createUserInputCard(params, (request, answers) => sendRequestResponse(request, { answers }));
-  addRequest(message.id, card, params, "input", message.method);
+function selectedInputRequest() {
+  return [...state.requestCards.values()].find((request) => (
+    request.requestKind === "input" && request.requestParams.threadId === state.threadId
+  ));
+}
+
+function renderInputMessage(request, role, text) {
+  const { threadId, turnId } = request.requestParams;
+  const id = `${request.inputMessageId}:${request.inputIndex}:${role}`;
+  const key = renderedItemKey(id, threadId, turnId);
+  if (state.items.has(key)) return;
+  const item = role === "agent"
+    ? { id, type: "agentMessage", phase: "commentary", text }
+    : { id, type: "userMessage", content: [{ type: "text", text }] };
+  cacheItemUpdate({ threadId, turnId, item });
+  upsertMessage(id, role, text, false, threadId, turnId);
+}
+
+function renderInputQuestion(request) {
+  const questions = request.requestParams.questions || [];
+  const question = questions[request.inputIndex];
+  if (!question) return;
+  const progress = questions.length > 1 ? `Question ${request.inputIndex + 1} of ${questions.length}\n\n` : "";
+  const options = (question.options || []).map((option) => (
+    `- ${option.label}${option.description ? ` — ${option.description}` : ""}`
+  ));
+  renderInputMessage(request, "agent", `${progress}${question.question}${options.length ? `\n\n${options.join("\n")}` : ""}`);
+}
+
+function submitUserInput(request, text) {
+  if (!text || request.requestDisconnected || !state.ready
+    || state.requestCards.get(String(request.requestId)) !== request) return;
+  const questions = request.requestParams.questions || [];
+  const question = questions[request.inputIndex];
+  if (!question) return;
+  const answers = { ...request.inputAnswers, [question.id]: { answers: [text] } };
+  const complete = request.inputIndex === questions.length - 1;
+  try {
+    if (complete) respond(request.requestId, { answers });
+  } catch (error) {
+    notice(`${error.message}. Your answer is still in the text box; it has not been sent again.`);
+    return;
+  }
+  renderInputMessage(request, "user", question.isSecret ? "[Private answer sent]" : text);
+  request.inputAnswers = answers;
+  request.inputIndex += 1;
+  clearComposerDraft(state.composerKey);
+  notice("");
+  if (complete) removeRequest(request.requestId);
+  else updateControls();
 }
 
 function unsupportedRequest(message) {
@@ -4123,7 +4019,7 @@ function addRequest(id, card, params, kind, method) {
   card.requestConnectionNotice = connectionNotice;
   card.append(connectionNotice);
   state.requestCards.set(String(id), card);
-  ui.requests.append(card);
+  if (kind !== "input") ui.requests.append(card);
   updateControls();
 }
 

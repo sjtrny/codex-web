@@ -425,10 +425,6 @@ button:disabled { cursor: default; opacity: .45; }
 .request strong, .request p, .request pre { display: block; margin: 0 0 9px; }
 .request pre { max-height: 220px; overflow: auto; white-space: pre-wrap; color: var(--request-output); }
 .request .actions { display: flex; flex-wrap: wrap; gap: 7px; }
-.request label { display: grid; gap: 5px; margin: 10px 0; }
-.request-question { min-width: 0; }
-.request-question + .request-question { margin-top: 16px; padding-top: 4px; border-top: 1px solid var(--request-control-border); }
-.request select, .request input { min-width: 0; max-width: 100%; width: 100%; padding: 7px; border: 1px solid var(--request-control-border); border-radius: 6px; background: var(--control-bg); color: inherit; }
 .request .request-error { margin: 10px 0 0; color: var(--request-output); }
 .request .request-connection { margin: 10px 0 0; }
 .request .request-connection[hidden] { display: none; }
