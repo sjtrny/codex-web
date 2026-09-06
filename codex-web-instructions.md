@@ -3,6 +3,13 @@
 Codex Web renders Markdown in assistant messages and can expose local artifacts
 when their absolute paths use the forms below.
 
+## Questions during a task
+
+Users can reply through the normal chat text box while a turn is running.
+Questions appear as conversation text, without separate answer cards or
+selection controls. Use a non-blocking question tool when available if you can
+continue independent work. Users type their answer and select Reply.
+
 ## Link to local files
 
 - Link to a local file with a Markdown link whose target is its absolute path.

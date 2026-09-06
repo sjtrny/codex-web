@@ -248,6 +248,7 @@ const {
   mergeProvisionalThreads,
   mergeThreadSnapshot,
   handleNotification,
+  handleServerRequest,
   handleMessagesScroll,
   handleMessagesTouchEnd,
   handleMessagesTouchMove,
@@ -261,6 +262,7 @@ const {
   jumpToPresent,
   normalizeSearchResponse,
   defaultChatSettingOption,
+  disconnectRequests,
   effectiveChatSettings,
   normalizeChatSettings,
   openThread,
@@ -271,12 +273,14 @@ const {
   promptKeydown,
   renderThreadHistory,
   renderThinkingIndicator,
+  renderRequests,
   renderLocalPrompt,
   renderChatSettings,
   renderThemeControl,
   renderThreads,
   selectedThreadBusy,
   selectedTurnId,
+  submitPrompt,
   applyPreferredSidebarWidth,
   cancelSidebarSwipe,
   cancelSidebarResize,
@@ -1265,7 +1269,7 @@ const thinkingScrollWrites = ui.messages.scrollWrites;
 setThreadActivity("thread-a", "turn-a");
 assert.equal(selectedThreadBusy(), true, "selected active thread should be busy");
 assert.equal(selectedTurnId(), "turn-a");
-assert.equal(ui.send.disabled, true);
+assert.equal(ui.send.disabled, false, "a known active turn accepts steering replies");
 assert.equal(ui.stop.disabled, false);
 assert.equal(ui.thinkingIndicator.hidden, false, "selected active turn should show thinking");
 assert.equal(ui.messages.getAttribute("aria-busy"), "true");
@@ -1276,6 +1280,17 @@ assert.equal(ui.jumpPresent.hidden, false, "off-screen thinking should offer Jum
 upsertMessage("busy-agent", "agent", "response started");
 assert.equal(ui.messages.children.at(-1), ui.thinkingIndicator, "streaming output stays before thinking");
 assert.equal(ui.messages.scrollTop, thinkingScrollTop, "streaming beside thinking preserves reader position");
+
+setThreadActivity("thread-a", null);
+assert.equal(ui.send.disabled, true, "a busy thread without a known turn id cannot be steered safely");
+assert.equal(ui.stop.disabled, true);
+setThreadActivity("thread-a", "turn-a");
+state.submittingThreads.add("thread-a");
+updateControls();
+assert.equal(ui.send.disabled, true, "a reply in flight must prevent duplicate submission");
+state.submittingThreads.delete("thread-a");
+updateControls();
+assert.equal(ui.send.disabled, false);
 
 state.threadId = "thread-b";
 updateControls();
@@ -1709,6 +1724,18 @@ handleNotification("item/started", {
   threadId: "reconcile-thread",
   turnId: "correlation-turn",
   item: {
+    id: "steering-before-original-echo",
+    type: "userMessage",
+    content: [{ type: "text", text: "A later steering reply in this turn" }],
+  },
+});
+assert.equal(state.pendingUser.id, "pending-correlation",
+  "a steering reply in the same turn must not consume the original optimistic prompt");
+assert.notEqual(pendingNode.parentNode, null);
+handleNotification("item/started", {
+  threadId: "reconcile-thread",
+  turnId: "correlation-turn",
+  item: {
     id: "canonical-correlation-user",
     type: "userMessage",
     content: [{ type: "text", text: "optimistic prompt" }],
@@ -1966,6 +1993,637 @@ assert.equal(threadDateFallback.textContent, " · conversation date");
 assert.match(threadDateFallback.title, /conversation's timestamp/);
 
 const originalFetch = globalThis.fetch;
+
+function descendants(node, predicate) {
+  return node.children.flatMap((child) => [
+    ...(predicate(child) ? [child] : []),
+    ...descendants(child, predicate),
+  ]);
+}
+
+// Minimal fixtures from the real asynchronous-question protocol. These are
+// agentMessage items, not item/tool/requestUserInput server requests.
+function asyncQuestionTurn(topic) {
+  const sky = topic === "sky";
+  const title = sky
+    ? "How should I explain why the sky is blue?"
+    : "Where should a tiny fictional adventure take place?";
+  const options = sky
+    ? ["One simple sentence", "A short scientific explanation"]
+    : ["An abandoned space station", "A village inside a giant tree"];
+  return {
+    id: `${topic}-turn`,
+    status: "completed",
+    items: [
+      { id: `${topic}-prompt`, type: "userMessage", content: [{ type: "text", text: "Ask me a question." }] },
+      {
+        id: `${topic}-question`,
+        type: "agentMessage",
+        phase: "final_answer",
+        text: `${title}\n${options.map((option) => `- ${option}`).join("\n")}`,
+        questions: [{ title, options }],
+      },
+      { id: `${topic}-sleep`, type: "sleep" },
+      { id: `${topic}-reply`, type: "userMessage", content: [{ type: "text", text: sky ? "One simple sentence" : "A village" }] },
+      {
+        id: `${topic}-answer`,
+        type: "agentMessage",
+        phase: "final_answer",
+        text: sky ? "Air scatters blue sunlight more than other colors." : "The village lit its lanterns.",
+        questions: null,
+      },
+    ],
+  };
+}
+
+function assertRenderedItemOrder(threadId, turnId, items) {
+  const positions = items.map((item) => {
+    const entry = state.items.get(renderedItemKey(item.id, threadId, turnId));
+    assert.ok(entry, `${item.id} should be rendered`);
+    return ui.messages.children.indexOf(entry.node);
+  });
+  assert.ok(positions.every((position, index) => index === 0 || positions[index - 1] < position),
+    `conversation items must stay chronological: ${items.map((item) => item.id).join(" → ")}`);
+}
+
+async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, latestSteer }) {
+  const sky = asyncQuestionTurn("sky");
+  const adventure = asyncQuestionTurn("adventure");
+  const completed = mergeThreadSnapshot({
+    id: "async-question-history",
+    status: { type: "idle" },
+    turns: [sky, adventure],
+  }).thread;
+  state.threadId = completed.id;
+  renderThreadHistory(completed);
+  for (const [index, turn] of [sky, adventure].entries()) {
+    assert.deepEqual(completed.turns[index].items.map((item) => item.id), turn.items.map((item) => item.id),
+      "a question marked final_answer must remain before its user reply and response");
+    assertRenderedItemOrder(completed.id, turn.id, turn.items);
+  }
+  assert.equal(ui.thinkingIndicator.hidden, true, "answered historical questions must not show a waiting indicator");
+
+  const activeTurn = { ...sky, status: "inProgress", items: sky.items.slice(0, 3) };
+  const reconnected = mergeThreadSnapshot({
+    id: "async-question-reconnect",
+    status: { type: "active", activeFlags: [] },
+    turns: [activeTurn],
+  }).thread;
+  state.threadId = reconnected.id;
+  renderThreadHistory(reconnected);
+  assertRenderedItemOrder(reconnected.id, sky.id, activeTurn.items);
+  assert.equal(ui.thinkingIndicator.hidden, false);
+  assert.equal(ui.thinkingLabel.textContent, "Waiting for your answer",
+    "an active snapshot must restore waiting from the question even without waiting flags");
+  assert.equal(ui.messages.getAttribute("aria-busy"), "false");
+  assert.equal(ui.thinkingIndicator.classList.contains("waiting"), true);
+
+  const answeredReconnect = mergeThreadSnapshot({
+    ...reconnected,
+    turns: [{ ...activeTurn, items: sky.items.slice(0, 4) }],
+  }).thread;
+  renderThreadHistory(answeredReconnect);
+  assert.equal(ui.thinkingLabel.textContent, "Codex is thinking",
+    "a user reply in an active snapshot must clear the question's waiting state");
+  assert.equal(ui.messages.getAttribute("aria-busy"), "true");
+
+  const laterTurn = {
+    id: "later-turn",
+    status: "inProgress",
+    items: [{ id: "later-prompt", type: "userMessage", content: [{ type: "text", text: "Continue." }] }],
+  };
+  const historicalQuestion = { ...adventure, items: adventure.items.slice(0, 3) };
+  const laterThread = mergeThreadSnapshot({
+    id: "async-question-later-turn",
+    status: { type: "active", activeFlags: [] },
+    turns: [historicalQuestion, laterTurn],
+  }).thread;
+  state.threadId = laterThread.id;
+  renderThreadHistory(laterThread);
+  assert.equal(ui.thinkingLabel.textContent, "Codex is thinking",
+    "even an unanswered question in a completed turn must not mark a later turn as waiting");
+
+  // A previous answer is not the terminal answer once the user adds a reply.
+  const continuedItems = [sky.items[0], sky.items[4], sky.items[3], adventure.items[4]];
+  const continued = mergeThreadSnapshot({
+    id: "async-question-continued",
+    status: { type: "idle" },
+    turns: [{ id: "continued-turn", status: "completed", items: continuedItems }],
+  }).thread;
+  assert.deepEqual(continued.turns[0].items.map((item) => item.id), continuedItems.map((item) => item.id),
+    "an earlier final answer must remain before the later user reply");
+
+  selectActiveThread("async-question-live", sky.id);
+  const sendItem = (item, method = "item/completed") => handleNotification(method, {
+    threadId: "async-question-live", turnId: sky.id, item,
+  });
+  sendItem(sky.items[1], "item/started");
+  assert.equal(ui.thinkingLabel.textContent, "Waiting for your answer",
+    "a live agentMessage.questions event must update the status immediately");
+  assert.equal(ui.messages.getAttribute("aria-busy"), "false");
+  assert.equal(ui.send.disabled, false, "the composer must accept the asynchronous answer");
+  assert.equal(ui.send.textContent, "Reply");
+  sendItem({ id: "async-wait-commentary", type: "agentMessage", phase: "commentary", text: "I'll wait for your answer.", questions: null });
+  sendItem(sky.items[2]);
+  assert.equal(ui.thinkingLabel.textContent, "Waiting for your answer",
+    "commentary and sleep after the question must not restore the thinking label");
+
+  handleNotification("item/agentMessage/delta", {
+    threadId: "async-question-live", turnId: sky.id, itemId: sky.items[1].id, delta: "\nChoose one.",
+  });
+  sendItem({ id: sky.items[1].id, type: "agentMessage", text: `${sky.items[1].text}\nChoose one.` });
+  const cachedQuestion = cachedThread("async-question-live").thread.turns[0].items.find((item) => item.id === sky.items[1].id);
+  assert.deepEqual(cachedQuestion.questions, sky.items[1].questions,
+    "text-only updates must preserve question choices when phase and questions are omitted");
+  assert.equal(cachedQuestion.phase, "final_answer");
+  assert.equal(ui.thinkingLabel.textContent, "Waiting for your answer");
+
+  const withoutMetadata = mergeThreadSnapshot({
+    id: "async-question-live",
+    status: { type: "active", activeFlags: [] },
+    turns: [{
+      id: sky.id,
+      status: "inProgress",
+      items: cachedThread("async-question-live").thread.turns[0].items.map((item) => (
+        item.id === sky.items[1].id ? { ...item, questions: null } : item
+      )),
+    }],
+  }).thread;
+  assert.deepEqual(withoutMetadata.turns[0].items.find((item) => item.id === sky.items[1].id).questions, sky.items[1].questions,
+    "a snapshot without question metadata must preserve known live choices");
+  renderThreadHistory(withoutMetadata);
+  assert.equal(ui.thinkingLabel.textContent, "Waiting for your answer");
+
+  selectActiveThread("async-question-unrelated", "async-other-turn");
+  assert.equal(ui.thinkingLabel.textContent, "Codex is thinking", "an asynchronous question must remain scoped to its conversation");
+  state.threadId = "async-question-live";
+  state.composerKey = threadComposerKey(state.threadId, state.selectionId);
+  renderThreadHistory(cachedThread(state.threadId).thread);
+  sendItem(sky.items[3]);
+  assert.equal(ui.thinkingLabel.textContent, "Codex is thinking",
+    "a user-message event must clear waiting even when the reply comes from another client");
+  assert.equal(ui.thinkingIndicator.classList.contains("waiting"), false);
+  sendItem(sky.items[4]);
+  assertRenderedItemOrder("async-question-live", sky.id, sky.items.slice(1));
+
+  // Failed replies keep the question pending; accepted replies clear it before
+  // the canonical user-message echo arrives from the server.
+  sendItem({ ...adventure.items[1], id: "async-next-question" });
+  ui.prompt.value = "A village";
+  const failedReply = submitPrompt({ preventDefault() {} });
+  settle(latestSteer(), null, "Connection lost");
+  await failedReply;
+  assert.equal(ui.thinkingLabel.textContent, "Waiting for your answer");
+  assert.equal(ui.prompt.value, "A village", "a rejected answer must be available for retry");
+  const acceptedReply = submitPrompt({ preventDefault() {} });
+  settle(latestSteer(), { turnId: sky.id });
+  await acceptedReply;
+  assert.equal(ui.thinkingLabel.textContent, "Codex is thinking",
+    "an accepted answer must clear waiting without waiting for the user-message echo");
+  assert.equal(ui.messages.getAttribute("aria-busy"), "true");
+
+  notify("turn/completed", {
+    threadId: "async-question-live", turn: { id: sky.id, status: "completed", items: [] },
+  });
+  assert.equal(ui.thinkingIndicator.hidden, true);
+}
+
+async function checkMidTurnInteractions(rpcMessages) {
+  function settle(message, result, error = null) {
+    assert.ok(message, "the expected RPC must have been sent");
+    const pending = state.pending.get(message.id);
+    assert.ok(pending, "the RPC must still await its response");
+    window.clearTimeout(pending.timer);
+    state.pending.delete(message.id);
+    if (error) pending.reject(new Error(error));
+    else pending.resolve(result);
+  }
+
+  function selectActiveThread(threadId, turnId) {
+    state.ready = true;
+    state.selectionId += 1;
+    state.threadId = threadId;
+    state.composerKey = threadComposerKey(threadId, state.selectionId);
+    state.attachments = [];
+    state.pendingUser = null;
+    state.submittingThreads.clear();
+    state.submittingViews.clear();
+    const thread = {
+      id: threadId,
+      status: { type: "active", activeFlags: [] },
+      turns: [{
+        id: turnId,
+        status: "inProgress",
+        items: [{
+          id: `${threadId}-original-prompt`,
+          type: "userMessage",
+          content: [{ type: "text", text: "Original task" }],
+        }],
+      }],
+    };
+    cacheThreadSnapshot(thread);
+    renderThreadHistory(thread);
+    setThreadActivity(threadId, turnId);
+  }
+
+  function latestSteer() {
+    return rpcMessages.findLast((message) => message.method === "turn/steer");
+  }
+
+  function notifyWithoutBackgroundRpc(method, params) {
+    state.ready = false;
+    handleNotification(method, params);
+    state.ready = true;
+    updateControls();
+  }
+
+  selectActiveThread("steer-thread", "steer-turn");
+  setThreadActivity("steer-thread", null);
+  ui.prompt.value = "Wait for the active turn id";
+  const beforeUnknownTurn = rpcMessages.length;
+  await submitPrompt({ preventDefault() {} });
+  assert.equal(rpcMessages.length, beforeUnknownTurn, "an unknown active turn must not fall back to turn/start");
+  assert.equal(ui.prompt.value, "Wait for the active turn id");
+  setThreadActivity("steer-thread", "steer-turn");
+  ui.prompt.value = "Keep it running; deploy separately";
+  handlePromptInput();
+  const beforeSteer = rpcMessages.length;
+  const submission = submitPrompt({ preventDefault() {} });
+  const steer = latestSteer();
+  assert.ok(steer, "replying during work must send turn/steer");
+  assert.deepEqual(steer.params.input, [{ type: "text", text: "Keep it running; deploy separately" }]);
+  assert.equal(steer.params.threadId, "steer-thread");
+  assert.equal(steer.params.expectedTurnId, "steer-turn");
+  assert.equal(typeof steer.params.clientUserMessageId, "string");
+  assert.ok(steer.params.clientUserMessageId.length > 0);
+  assert.equal(
+    rpcMessages.slice(beforeSteer).some((message) => ["thread/start", "turn/start", "turn/interrupt"].includes(message.method)),
+    false,
+    "steering must not start another turn or interrupt current work",
+  );
+  assert.equal(ui.send.disabled, true);
+  assert.equal(ui.prompt.value, "", "the submitted draft should leave the composer");
+  const optimistic = state.pendingSteers.get(steer.params.clientUserMessageId);
+  assert.ok(optimistic, "the reply should be visible while the server accepts it");
+  assert.equal(optimistic.turnId, "steer-turn");
+  ui.prompt.value = "Duplicate click";
+  await submitPrompt({ preventDefault() {} });
+  assert.equal(rpcMessages.filter((message) => message.method === "turn/steer").length, 1);
+  ui.prompt.value = "";
+  settle(steer, { turnId: "steer-turn" });
+  await submission;
+  assert.equal(state.activeTurns.get("steer-thread"), "steer-turn");
+  assert.equal(ui.send.disabled, false, "a delivered reply must not block later steering");
+
+  ui.prompt.value = "Use the existing deployment settings";
+  const secondSubmission = submitPrompt({ preventDefault() {} });
+  const secondSteer = latestSteer();
+  settle(secondSteer, { turnId: "steer-turn" });
+  await secondSubmission;
+  assert.equal(state.pendingSteers.has(steer.params.clientUserMessageId), true);
+  assert.equal(state.pendingSteers.has(secondSteer.params.clientUserMessageId), true);
+
+  notifyWithoutBackgroundRpc("item/completed", {
+    threadId: "steer-thread",
+    turnId: "steer-turn",
+    item: {
+      id: "steer-thread-original-prompt",
+      type: "userMessage",
+      content: [{ type: "text", text: "Original task" }],
+    },
+  });
+  assert.equal(state.pendingSteers.has(steer.params.clientUserMessageId), true, "the original prompt in the same turn must not consume a steering reply");
+
+  notifyWithoutBackgroundRpc("item/started", {
+    threadId: "steer-thread",
+    turnId: "steer-turn",
+    item: {
+      id: "unrelated-user-reply",
+      type: "userMessage",
+      content: [{ type: "text", text: "Another client's message" }],
+    },
+  });
+  assert.equal(state.pendingSteers.has(steer.params.clientUserMessageId), true);
+  notifyWithoutBackgroundRpc("item/started", {
+    threadId: "steer-thread",
+    turnId: "steer-turn",
+    item: {
+      id: steer.params.clientUserMessageId,
+      type: "userMessage",
+      content: steer.params.input,
+    },
+  });
+  assert.equal(state.pendingSteers.has(steer.params.clientUserMessageId), false);
+  assert.equal(state.pendingSteers.has(secondSteer.params.clientUserMessageId), true, "one echo must not consume another pending reply");
+  assert.equal(
+    [...state.items.values()].filter((entry) => entry.body?.textContent === "Keep it running; deploy separately").length,
+    1,
+    "the server echo must replace the optimistic reply without duplication",
+  );
+  notifyWithoutBackgroundRpc("item/started", {
+    threadId: "steer-thread",
+    turnId: "steer-turn",
+    item: {
+      id: secondSteer.params.clientUserMessageId,
+      type: "userMessage",
+      content: secondSteer.params.input,
+    },
+  });
+  assert.equal(state.pendingSteers.has(secondSteer.params.clientUserMessageId), false);
+
+  ui.prompt.value = "  Preserve this reply after a failed steer  ";
+  state.attachments = [attachments[1]];
+  handlePromptInput();
+  const failedSubmission = submitPrompt({ preventDefault() {} });
+  const failedSteer = latestSteer();
+  assert.notEqual(failedSteer.id, steer.id);
+  assert.deepEqual(failedSteer.params.input, buildTurnInput("Preserve this reply after a failed steer", [attachments[1]]));
+  settle(failedSteer, null, "The active turn changed");
+  await failedSubmission;
+  assert.equal(ui.prompt.value, "  Preserve this reply after a failed steer  ");
+  assert.deepEqual(state.attachments, [attachments[1]], "failed steering must retain attachments for retry");
+  assert.equal(state.pendingSteers.has(failedSteer.params.clientUserMessageId), false);
+  assert.equal(state.activeTurns.get("steer-thread"), "steer-turn", "a rejected reply must not stop work");
+  assert.match(ui.notice.textContent, /active turn changed/);
+
+  selectActiveThread("canonical-steer-thread", "canonical-steer-turn");
+  ui.prompt.value = "Original task";
+  const canonicalSubmission = submitPrompt({ preventDefault() {} });
+  const canonicalSteer = latestSteer();
+  settle(canonicalSteer, { turnId: "canonical-steer-turn" });
+  await canonicalSubmission;
+  const originalCanonicalItem = {
+    id: "canonical-original-user",
+    type: "userMessage",
+    content: [{ text_elements: [], text: "Original task", type: "text" }],
+  };
+  const canonicalSnapshot = {
+    id: "canonical-steer-thread",
+    status: { type: "active", activeFlags: [] },
+    turns: [{ id: "canonical-steer-turn", status: "inProgress", items: [originalCanonicalItem] }],
+  };
+  const canonicalResume = rpcMessages.findLast((message) => message.method === "thread/resume"
+    && message.params.threadId === "canonical-steer-thread");
+  const canonicalReconciliation = state.threadReconciliations.get("canonical-steer-thread").promise;
+  settle(canonicalResume, { thread: canonicalSnapshot });
+  await canonicalReconciliation;
+  assert.equal(state.pendingSteers.has(canonicalSteer.params.clientUserMessageId), true,
+    "renaming the original user item must not consume a same-text steering reply");
+  const withCanonicalReply = mergeThreadSnapshot({
+    ...canonicalSnapshot,
+    turns: [{
+      ...canonicalSnapshot.turns[0],
+      items: [originalCanonicalItem, { ...originalCanonicalItem, id: "canonical-reply-user" }],
+    }],
+  });
+  renderThreadHistory(withCanonicalReply.thread);
+  assert.equal(state.pendingSteers.has(canonicalSteer.params.clientUserMessageId), false,
+    "a resumed canonical reply must reconcile despite default text_elements and property order");
+  assert.equal([...state.items.values()].filter((entry) => entry.body?.textContent === "Original task").length, 2,
+    "history must contain the original prompt and one reply, with no optimistic duplicate");
+
+  const identicalSteers = [];
+  for (let index = 0; index < 2; index += 1) {
+    ui.prompt.value = "Repeat this instruction";
+    const repeatedSubmission = submitPrompt({ preventDefault() {} });
+    const repeatedSteer = latestSteer();
+    settle(repeatedSteer, { turnId: "canonical-steer-turn" });
+    await repeatedSubmission;
+    identicalSteers.push(repeatedSteer.params.clientUserMessageId);
+  }
+  const repeatedEcho = {
+    threadId: "canonical-steer-thread",
+    turnId: "canonical-steer-turn",
+    item: {
+      id: "first-identical-echo",
+      type: "userMessage",
+      content: [{ text_elements: [], text: "Repeat this instruction", type: "text" }],
+    },
+  };
+  notifyWithoutBackgroundRpc("item/started", repeatedEcho);
+  assert.equal(state.pendingSteers.has(identicalSteers[0]), false);
+  assert.equal(state.pendingSteers.has(identicalSteers[1]), true);
+  notifyWithoutBackgroundRpc("item/completed", repeatedEcho);
+  assert.equal(state.pendingSteers.has(identicalSteers[1]), true,
+    "started/completed notifications for one reply must not consume two identical pending replies");
+  notifyWithoutBackgroundRpc("item/completed", {
+    ...repeatedEcho,
+    item: { ...repeatedEcho.item, id: "second-identical-echo" },
+  });
+  assert.equal(state.pendingSteers.has(identicalSteers[1]), false);
+  assert.equal([...state.items.values()].filter((entry) => entry.body?.textContent === "Repeat this instruction").length, 2);
+
+  selectActiveThread("late-steer-thread", "late-steer-turn");
+  ui.prompt.value = "A reply just before completion";
+  const lateSubmission = submitPrompt({ preventDefault() {} });
+  const lateSteer = latestSteer();
+  notifyWithoutBackgroundRpc("turn/completed", {
+    threadId: "late-steer-thread",
+    turn: { id: "late-steer-turn", status: "completed", items: [] },
+  });
+  assert.equal(state.activeTurns.has("late-steer-thread"), false);
+  settle(lateSteer, { turnId: "late-steer-turn" });
+  await lateSubmission;
+  assert.equal(state.activeTurns.has("late-steer-thread"), false, "a late steer response must not resurrect completed work");
+  assert.equal(ui.thinkingIndicator.hidden, true);
+
+  selectActiveThread("background-failure-thread", "background-failure-turn");
+  const failedComposerKey = state.composerKey;
+  ui.prompt.value = "Keep this background reply";
+  state.attachments = [attachments[1]];
+  const backgroundSubmission = submitPrompt({ preventDefault() {} });
+  const backgroundSteer = latestSteer();
+  selectActiveThread("other-open-thread", "other-open-turn");
+  ui.prompt.value = "Do not overwrite this other chat's draft";
+  handlePromptInput();
+  settle(backgroundSteer, null, "Connection lost");
+  await backgroundSubmission;
+  assert.equal(ui.prompt.value, "Do not overwrite this other chat's draft");
+  assert.deepEqual(state.attachments, []);
+  state.threadId = "background-failure-thread";
+  state.composerKey = failedComposerKey;
+  restoreComposerDraft();
+  assert.equal(ui.prompt.value, "Keep this background reply");
+  assert.deepEqual(state.attachments, [attachments[1]], "a background failure must retain its own reply attachments");
+
+  await checkAsyncQuestionMessages({
+    selectActiveThread,
+    notify: notifyWithoutBackgroundRpc,
+    settle,
+    latestSteer,
+  });
+
+  selectActiveThread("questions-thread", "questions-turn");
+  await checkQuestionsInComposer(rpcMessages);
+
+  // Drain background refreshes without leaving 60-second RPC timers behind.
+  state.ready = false;
+  for (const message of rpcMessages) {
+    if (message.method === "thread/list" && state.pending.has(message.id)) {
+      settle(message, { data: [] });
+    }
+    if (message.method === "thread/resume" && state.pending.has(message.id)) {
+      settle(message, { thread: cachedThread(message.params.threadId)?.thread });
+    }
+  }
+  await Promise.all([...state.threadReconciliations.values()].map((entry) => entry.promise));
+}
+
+async function checkQuestionsInComposer(rpcMessages) {
+  function updateStatus(threadId, activeFlags) {
+    state.ready = false;
+    handleNotification("thread/status/changed", {
+      threadId, status: { type: "active", activeFlags },
+    });
+    state.ready = true;
+    updateControls();
+  }
+  async function answer(text) {
+    ui.prompt.value = text;
+    handlePromptInput();
+    await submitPrompt({ preventDefault() {} });
+  }
+  const responseTo = (id) => rpcMessages.findLast((message) => message.id === id && !message.method);
+  const question = {
+    id: "question-options", method: "item/tool/requestUserInput",
+    params: {
+      threadId: "questions-thread", turnId: "questions-turn", isBlocking: true,
+      questions: [{ id: "deployment", header: "Deployment", question: "How should I deploy?",
+        options: [
+          { label: "Keep running", description: "Deploy separately" },
+          { label: "Finish safely", description: "Then update" },
+        ],
+      }],
+    },
+  };
+
+  updateStatus("questions-thread", ["waitingOnUserInput"]);
+  assert.equal(ui.thinkingLabel.textContent, "Waiting for your answer");
+  assert.equal(ui.messages.getAttribute("aria-busy"), "false");
+  updateStatus("questions-thread", ["waitingOnApproval"]);
+  assert.equal(ui.thinkingLabel.textContent, "Waiting for approval");
+  updateStatus("questions-thread", []);
+  updateStatus("other-open-thread", ["waitingOnUserInput"]);
+  assert.equal(ui.thinkingLabel.textContent, "Codex is thinking");
+
+  handleServerRequest(question);
+  const request = state.requestCards.get(question.id);
+  assert.equal(request.parentNode, null, "a user-input request must not create a card or form");
+  assert.equal(ui.requests.children.length, 0);
+  const prompt = [...state.items.values()].find((item) => item.text?.startsWith("How should I deploy?"));
+  assert.ok(prompt, "native questions must appear as ordinary conversation messages");
+  assert.match(prompt.text, /Keep running — Deploy separately/);
+  assert.equal(ui.send.disabled, false);
+  assert.equal(ui.send.textContent, "Reply");
+  assert.equal(responseTo(question.id), undefined, "showing options must never submit an answer");
+  await answer("   ");
+  assert.equal(responseTo(question.id), undefined);
+
+  state.ws.readyState = 3;
+  await answer("Deploy tomorrow after the recording finishes");
+  assert.equal(responseTo(question.id), undefined);
+  assert.equal(ui.prompt.value, "Deploy tomorrow after the recording finishes");
+  assert.match(ui.notice.textContent, /still in the text box/);
+  assert.equal(state.requestCards.get(question.id), request);
+  state.ws.readyState = 1;
+  await answer(ui.prompt.value);
+  assert.deepEqual(responseTo(question.id).result, {
+    answers: { deployment: { answers: ["Deploy tomorrow after the recording finishes"] } },
+  });
+  assert.equal(ui.prompt.value, "");
+  assert.equal(state.requestCards.has(question.id), false);
+  assert.equal(ui.requests.children.length, 0);
+  const localReply = [...state.items.values()].find((item) => item.text === "Deploy tomorrow after the recording finishes");
+  assert.ok(localReply);
+  assert.ok(ui.messages.children.indexOf(prompt.node) < ui.messages.children.indexOf(localReply.node));
+
+  const several = {
+    ...question, id: "several-questions", params: {
+      ...question.params, questions: [
+        { id: "place", question: "Where should it happen?", options: [{ label: "A village" }] },
+        { id: "hero", question: "Who is the hero?" },
+      ],
+    },
+  };
+  handleServerRequest(several);
+  await answer("A village");
+  assert.equal(responseTo(several.id), undefined, "collect all native answers before returning the tool result");
+  assert.equal(state.requestCards.get(several.id).inputIndex, 1);
+  assert.ok([...state.items.values()].some((item) => item.text === "Question 2 of 2\n\nWho is the hero?"));
+  await answer("An octopus");
+  assert.deepEqual(responseTo(several.id).result, {
+    answers: { place: { answers: ["A village"] }, hero: { answers: ["An octopus"] } },
+  });
+
+  handleServerRequest({ ...question, id: "secret-question", params: {
+    ...question.params, questions: [{ id: "secret", question: "Enter the value", isSecret: true }],
+  } });
+  await answer("private value");
+  assert.deepEqual(responseTo("secret-question").result, { answers: { secret: { answers: ["private value"] } } });
+  assert.equal([...state.items.values()].some((item) => item.text === "private value"), false);
+
+  const reconnectQuestion = { ...question, id: "old-id", params: {
+    ...question.params, itemId: "persistent-question-call", isBlocking: false,
+  } };
+  handleServerRequest(reconnectQuestion);
+  assert.equal(ui.thinkingLabel.textContent, "Working — question pending");
+  const reconnectRequest = state.requestCards.get("old-id");
+  ui.prompt.value = "Keep my answer across reconnects";
+  handlePromptInput();
+  handleServerRequest(reconnectQuestion);
+  assert.equal(state.requestCards.get("old-id"), reconnectRequest);
+  state.ready = false;
+  disconnectRequests();
+  state.ready = true;
+  updateControls();
+  assert.equal(ui.send.disabled, true, "a native request must not answer a stale connection ID");
+  await answer(ui.prompt.value);
+  assert.equal(responseTo("old-id"), undefined);
+  handleServerRequest({ ...reconnectQuestion, id: "new-id" });
+  assert.equal(ui.send.disabled, false);
+  assert.equal(ui.prompt.value, "Keep my answer across reconnects");
+  assert.equal(state.requestCards.get("new-id"), reconnectRequest);
+  await answer(ui.prompt.value);
+  assert.deepEqual(responseTo("new-id").result, {
+    answers: { deployment: { answers: ["Keep my answer across reconnects"] } },
+  });
+
+  // An unrelated request may reuse an ID after reconnect, without replacing
+  // the saved native question that must still be answered in its own thread.
+  handleServerRequest({ ...reconnectQuestion, id: 1 });
+  const oldRequest = state.requestCards.get("1");
+  disconnectRequests();
+  handleServerRequest({ ...question, id: 1, params: {
+    ...question.params, threadId: "other-input-thread", turnId: "other-input-turn", itemId: "other-call",
+  } });
+  assert.notEqual(state.requestCards.get("1"), oldRequest);
+  handleServerRequest({ ...reconnectQuestion, id: 2 });
+  assert.equal(state.requestCards.get("2"), oldRequest);
+  handleNotification("serverRequest/resolved", { requestId: 1 });
+  assert.equal(state.requestCards.get("2"), oldRequest);
+  await answer("Preserve the original recording");
+  assert.deepEqual(responseTo(2).result, { answers: { deployment: { answers: ["Preserve the original recording"] } } });
+
+  handleServerRequest({ ...question, id: "completed-offline-question" });
+  state.requestCards.get("completed-offline-question").requestDisconnected = true;
+  mergeThreadSnapshot({
+    id: "questions-thread", status: { type: "idle" },
+    turns: [{ id: "questions-turn", status: "completed", items: [] }],
+  });
+  assert.equal(state.requestCards.has("completed-offline-question"), false);
+
+  // Question controls are removed; existing command approvals are unaffected.
+  handleServerRequest({ id: "approval-stays", method: "item/commandExecution/requestApproval", params: {
+    threadId: state.threadId, turnId: "approval-turn", command: "example command",
+  } });
+  const approval = state.requestCards.get("approval-stays");
+  assert.equal(approval.parentNode, ui.requests);
+  const decline = descendants(approval, (node) => node.tagName === "button" && node.textContent === "Decline")[0];
+  decline.listeners.get("click")();
+  assert.deepEqual(responseTo("approval-stays").result, { decision: "decline" });
+  assert.equal(ui.requests.children.length, 0);
+}
+
 let capturedSearchRequest;
 globalThis.fetch = async (url, options) => {
   capturedSearchRequest = { url, options };
@@ -2047,6 +2705,7 @@ performSearch({ preventDefault() {} }).then(async () => {
     cachedThread("rpc-reconcile-thread").thread.turns[0].items.map((item) => item.id),
     ["rpc-reconcile-user", "rpc-reconcile-command"],
   );
+  await checkMidTurnInteractions(rpcMessages);
   state.ws = originalSocket;
   state.ready = originalReady;
   if (originalWebSocket === undefined) delete globalThis.WebSocket;
