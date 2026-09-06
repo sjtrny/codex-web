@@ -11,7 +11,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE || "../demo/node_modu
 
 const root = path.resolve(__dirname, "..");
 const staticRoot = path.join(root, "static");
-const artifacts = path.resolve(root, "../artifacts/questions/composer-layout");
+const artifacts = path.resolve(root, "../artifacts/questions/stacked-controls");
 const contentTypes = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml" };
 const server = http.createServer(async (request, response) => {
   try {
@@ -192,9 +192,15 @@ async function main() {
       assert.ok((await folder.boundingBox()).width >= 240, `${name} working folder must have readable width`);
       const attachBox = await page.locator('.file-picker').boundingBox();
       const sendBox = await page.locator('#send').boundingBox();
+      const settingsBox = await settingsButton.boundingBox();
+      const promptBox = await page.locator('#prompt').boundingBox();
       const composerRight = await page.locator('#composer').evaluate(node => node.getBoundingClientRect().right - parseFloat(getComputedStyle(node).paddingRight));
-      assert.ok(Math.abs(attachBox.y - sendBox.y) <= 1 && sendBox.x - (attachBox.x + attachBox.width) <= 10,
-        `${name} Attach and Send are adjacent on the same row`);
+      assert.ok(attachBox.y >= settingsBox.y + settingsBox.height && sendBox.y >= attachBox.y + attachBox.height,
+        `${name} Settings, Attach, and Send are stacked vertically`);
+      assert.ok(Math.abs(attachBox.x - sendBox.x) <= 1 && Math.abs(settingsBox.x - sendBox.x) <= 1,
+        `${name} controls share one narrow column`);
+      assert.ok(promptBox.x + promptBox.width <= sendBox.x && promptBox.width >= 200,
+        `${name} text box stays beside the controls with usable width`);
       assert.ok(Math.abs(composerRight - sendBox.x - sendBox.width) <= 1, `${name} buttons align to the right`);
       await page.screenshot({ path: path.join(artifacts, `settings-${name}.png`), fullPage: true, animations: "disabled" });
     }

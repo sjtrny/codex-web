@@ -122,7 +122,7 @@ the current path, uses the chat's folder by default, and keeps your changes with
 that chat. Clear it to return to the chat's default folder. Changing it does not
 move files or affect a task already running.
 
-Settings, Attach, and Send/Reply/Stop are grouped on the right of the composer.
+Settings, Attach, and Send/Reply/Stop are stacked vertically to the right of the text box.
 
 Questions appear as ordinary conversation text. Answer using the same text box
 and **Reply** button; there are no separate question cards or answer controls.

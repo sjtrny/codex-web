@@ -421,7 +421,8 @@ button:disabled { cursor: default; opacity: .45; }
 
 .composer { grid-row: 5; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "attachments attachments" "prompt tools"; gap: 10px; padding: 14px max(20px, calc((100% - 850px) / 2)) 18px; border-top: 1px solid var(--border-subtle); }
 .composer.drop-target { background: var(--drop-bg); box-shadow: inset 0 2px var(--success); }
-.composer-tools { grid-area: tools; align-self: end; justify-self: end; display: flex; align-items: center; gap: 8px; }
+.composer-tools { grid-area: tools; align-self: end; justify-self: end; display: grid; gap: 6px; }
+.composer-tools > .composer-settings, .composer-tools > .file-picker { width: 100%; }
 .composer-settings { display: inline-grid; place-items: center; width: 38px; min-height: 38px; padding: 0; }
 .composer-settings svg, .file-picker svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .attachments { grid-area: attachments; display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
@@ -565,8 +566,6 @@ button:disabled { cursor: default; opacity: .45; }
   .jump-present { bottom: 10px; min-height: 44px; }
   .requests { padding: 0 10px; }
   .composer {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "attachments" "prompt" "tools";
     gap: 8px;
     padding: 9px 10px calc(9px + env(safe-area-inset-bottom));
     background: var(--composer-bg);

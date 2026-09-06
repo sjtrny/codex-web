@@ -1141,7 +1141,7 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
                 ".thread.running { border-left-color: var(--success); }", stylesheet
             )
             self.assertIn(
-                'grid-template-areas: "attachments" "prompt" "tools";',
+                'grid-template-areas: "attachments attachments" "prompt tools";',
                 stylesheet,
             )
             self.assertIn(
