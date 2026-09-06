@@ -112,7 +112,7 @@ empty. Type a message or attach a file to switch it to **Reply**. Send an answer
 correction, or additional instruction without stopping the task. Pressing Enter
 in an empty text box does not stop the task.
 
-Open **Model and chat settings** beside **Attach** to change the model,
+Open **Model and chat settings** beside the paperclip (**Attach**) to change the model,
 reasoning, and other chat options in a modal. Changes are saved for the chat and
 apply to the next new turn. Replies use the current task's settings.
 
