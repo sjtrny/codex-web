@@ -362,6 +362,9 @@ async function run() {
     const snapshotSession = await context.newCDPSession(snapshotPage);
     let frameNumber = 0;
     const capture = async () => {
+      if (await webPage.locator(".thread").count() > 1) {
+        throw new Error("Unexpected extra sidebar threads appeared.");
+      }
       await writeQueue;
       const screen = await terminalPage.evaluate(() => window.demoScreen());
       await snapshotPage.evaluate((text) => window.setScreen(text), screen);
@@ -372,12 +375,6 @@ async function run() {
     };
 
     for (let index = 0; index < 7; index += 1) await capture();
-    await webPage.locator("#settings-toggle").click();
-    await webPage.locator("#settings-dialog").waitFor({ state: "visible" });
-    for (let index = 0; index < 14; index += 1) await capture();
-    await webPage.locator("#settings-close").click();
-    await webPage.locator("#settings-dialog").waitFor({ state: "hidden" });
-    for (let index = 0; index < 4; index += 1) await capture();
     for (let index = 0; index < prompt.length; index += 2) {
       terminalProcess.write(prompt.slice(index, index + 2));
       await delay(90);

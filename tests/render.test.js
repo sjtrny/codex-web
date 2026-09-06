@@ -1442,6 +1442,50 @@ state.threadId = selectedThreadBeforeStart;
 renderThreads(unsortedThreads);
 
 state.ready = false;
+const sidebarBeforeSystemThread = state.threads.map((thread) => thread.id);
+const temporarySystemThread = {
+  id: "thread-system-temporary",
+  ephemeral: true,
+  source: "vscode",
+  threadSource: "system",
+  preview: "",
+  name: null,
+  createdAt: 700,
+  updatedAt: 700,
+  status: { type: "idle" },
+};
+handleNotification("thread/started", { thread: temporarySystemThread });
+assert.deepEqual(
+  state.threads.map((thread) => thread.id),
+  sidebarBeforeSystemThread,
+  "temporary system threads must not appear in the chat sidebar",
+);
+assert.equal(
+  state.provisionalThreads.has(temporarySystemThread.id),
+  false,
+  "temporary threads must not survive saved-chat refreshes as provisional chats",
+);
+assert.equal(
+  mergeProvisionalThreads(unsortedThreads).some((thread) => thread.id === temporarySystemThread.id),
+  false,
+);
+const untitledChat = {
+  ...temporarySystemThread,
+  id: "thread-real-untitled",
+  ephemeral: false,
+  threadSource: "user",
+};
+handleNotification("thread/started", { thread: untitledChat });
+assert.equal(state.threads[0].id, untitledChat.id, "real untitled chats must still appear immediately");
+assert.equal(state.provisionalThreads.has(untitledChat.id), true);
+assert.equal(
+  mergeProvisionalThreads(unsortedThreads).some((thread) => thread.id === untitledChat.id),
+  true,
+  "real chats must survive a delayed saved-chat response",
+);
+state.provisionalThreads.delete(untitledChat.id);
+renderThreads(unsortedThreads);
+
 handleNotification("turn/started", {
   threadId: "thread-b",
   turn: { id: "turn-b", status: "inProgress" },

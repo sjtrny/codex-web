@@ -3476,7 +3476,8 @@ function renderThreads(threads, reconcileActivity = false) {
 }
 
 function showStartedThread(thread) {
-  if (!thread?.id) return false;
+  // Ephemeral threads never enter the saved-chat list, so they cannot be confirmed.
+  if (!thread?.id || thread.ephemeral === true) return false;
   state.provisionalThreads.set(thread.id, thread);
   renderThreads([
     thread,
