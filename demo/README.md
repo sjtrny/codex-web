@@ -2,7 +2,8 @@
 
 Creates `docs/sync-demo.gif` with fresh conversation state.
 The recording shows the composer controls, sends a CLI prompt, and shows the
-same response in both clients. The settings dialog stays closed.
+same response in both clients. The web capture is framed as a browser and the
+CLI capture is framed as a terminal. The settings dialog stays closed.
 
 ```bash
 ./setup.sh
