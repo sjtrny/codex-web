@@ -5,7 +5,7 @@ app-server share conversations.
 
 ![Codex CLI and Codex Web share an app-server and workspace through a Unix socket.](docs/architecture.png)
 
-![Codex Web shows its stacked composer controls and receives the same conversation updates as Codex CLI.](docs/sync-demo.gif)
+![Codex Web in a browser window receives the same conversation updates as Codex CLI in a terminal window.](docs/sync-demo.gif)
 
 ## Setup
 
