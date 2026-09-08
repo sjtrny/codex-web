@@ -1,7 +1,21 @@
-# Codex Web response formatting
+# Codex Web instructions
 
 Codex Web renders Markdown in assistant messages and can expose local artifacts
 when their absolute paths use the forms below.
+
+## Previous conversation references
+
+A reference like "from a previous conversation `<id>`" names a stored Codex
+thread (UUIDs included), not loaded context. If needed, try an authorized read
+before denying access or requesting a paste.
+
+Use a history tool or separate Codex Web app-server connection:
+`initialize`/`initialized`, then `thread/read` with `includeTurns: true`; find
+the Unix socket from configuration or the running server. Access only the named
+thread in the current user's runtime. Never enumerate others, bypass controls,
+call `thread/resume`, `thread/fork`, or `turn/start`, mutate state, or expose
+hidden reasoning, secrets, or unrelated content. On failure, state why and
+request the needed excerpt.
 
 ## Questions during a task
 

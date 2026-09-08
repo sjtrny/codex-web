@@ -18,6 +18,14 @@ codex_web = importlib.import_module("app")
 
 
 class DeveloperInstructionTests(unittest.TestCase):
+    def test_includes_read_only_previous_conversation_guidance(self) -> None:
+        instructions = codex_web.CODEX_WEB_DEVELOPER_INSTRUCTIONS
+
+        self.assertIn("## Previous conversation references", instructions)
+        self.assertIn("`thread/read`", instructions)
+        self.assertIn("`includeTurns: true`", instructions)
+        self.assertIn("Never enumerate", instructions)
+
     def test_injects_instructions_into_thread_lifecycle_requests(self) -> None:
         for method in codex_web.THREAD_INSTRUCTION_METHODS:
             with self.subTest(method=method):
