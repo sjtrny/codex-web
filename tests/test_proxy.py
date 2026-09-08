@@ -24,7 +24,7 @@ class DeveloperInstructionTests(unittest.TestCase):
         self.assertIn("## Previous conversation references", instructions)
         self.assertIn("`thread/read`", instructions)
         self.assertIn("`includeTurns: true`", instructions)
-        self.assertIn("Do not call `thread/resume`", instructions)
+        self.assertIn("Never enumerate", instructions)
 
     def test_injects_instructions_into_thread_lifecycle_requests(self) -> None:
         for method in codex_web.THREAD_INSTRUCTION_METHODS:
