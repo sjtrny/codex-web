@@ -80,12 +80,14 @@ See the provided [`compose.yaml`](compose.yaml) for all configuration options;
 
 Open `http://HOST_IP:8765`.
 
-### Agent response formatting
+### Agent instructions
 
 Codex Web bundles [`codex-web-instructions.md`](codex-web-instructions.md) in
 the application image and adds it to `thread/start`, `thread/resume`, and
 `thread/fork` requests as app-server developer instructions. These instructions
-teach Codex how this UI renders links to local files and inline local images.
+teach Codex how to retrieve a referenced previous conversation without
+resuming it and how this UI renders links to local files and inline local
+images.
 
 The bundled file is stored under `/app` in the image. The normal workspace bind
 mount targets `/workspaces`, so mounting a user's projects does not replace the
