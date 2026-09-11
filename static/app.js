@@ -137,6 +137,7 @@ const state = {
   pending: new Map(),
   threadId: null,
   activeTurns: new Map(),
+  liveThreadStatuses: new Map(),
   submittingThreads: new Set(),
   steeringThreads: new Set(),
   interruptingTurns: new Set(),
@@ -337,7 +338,9 @@ function renderThinkingIndicator(busy = selectedThreadBusy()) {
     card.requestParams?.threadId === state.threadId && !card.requestDisconnected
   ));
   const inputs = requests.filter((card) => card.requestKind === "input");
-  const flags = cachedThread(state.threadId, false)?.thread.status?.activeFlags || [];
+  const status = state.liveThreadStatuses.get(state.threadId)
+    || cachedThread(state.threadId, false)?.thread.status;
+  const flags = status?.activeFlags || [];
   const waitingOnInput = inputs.some((card) => card.requestParams.isBlocking !== false)
     || flags.includes("waitingOnUserInput")
     || Boolean(pendingAsyncQuestion(state.threadId));
@@ -357,10 +360,21 @@ function renderThinkingIndicator(busy = selectedThreadBusy()) {
   presentContentChanged(shouldFollow);
 }
 
+function rememberThreadStatus(threadId, status) {
+  // Saved-chat snapshots can lag behind notifications, including completion.
+  // Keep the latest live status authoritative until the connection is reset.
+  state.liveThreadStatuses.set(threadId, status);
+  const cached = cachedThread(threadId, false);
+  if (cached) cached.thread.status = status;
+}
+
 function setThreadActivity(threadId, turnId = null) {
   if (!threadId) return;
   state.submittingThreads.delete(threadId);
   state.activeTurns.set(threadId, turnId || null);
+  const status = state.liveThreadStatuses.get(threadId);
+  rememberThreadStatus(threadId, status?.type === "active" ? status : { type: "active", activeFlags: [] });
+  renderThreads(state.threads);
   updateControls();
 }
 
@@ -368,8 +382,8 @@ function clearThreadActivity(threadId) {
   if (!threadId) return;
   state.submittingThreads.delete(threadId);
   state.activeTurns.delete(threadId);
-  const cached = cachedThread(threadId, false);
-  if (cached) cached.thread.status = { type: "idle" };
+  rememberThreadStatus(threadId, { type: "idle" });
+  renderThreads(state.threads);
   updateControls();
 }
 
@@ -2444,6 +2458,8 @@ async function connect() {
     if (state.ws !== socket) return;
     state.ready = false;
     state.activeTurns.clear();
+    state.liveThreadStatuses.clear();
+    state.threadRefreshId += 1;
     state.submittingThreads.clear();
     state.submittingViews.clear();
     disconnectRequests();
@@ -2541,6 +2557,8 @@ function handleNotification(method, params) {
       return;
     case "thread/deleted":
       removeRequestsForTurn(params.threadId);
+      state.liveThreadStatuses.delete(params.threadId);
+      state.activeTurns.delete(params.threadId);
       state.provisionalThreads.delete(params.threadId);
       state.threadCache.delete(params.threadId);
       state.threadReconciliations.delete(params.threadId);
@@ -2550,9 +2568,7 @@ function handleNotification(method, params) {
       refreshThreads();
       return;
     case "thread/status/changed":
-      if (cachedThread(params.threadId, false)) {
-        cachedThread(params.threadId, false).thread.status = params.status;
-      }
+      rememberThreadStatus(params.threadId, params.status);
       if (params.status?.type === "active") {
         if (!state.activeTurns.has(params.threadId)) {
           state.activeTurns.set(params.threadId, null);
@@ -2561,6 +2577,7 @@ function handleNotification(method, params) {
         state.activeTurns.delete(params.threadId);
         removeRequestsForTurn(params.threadId);
       }
+      renderThreads(state.threads);
       updateControls();
       refreshThreads();
       return;
@@ -2569,12 +2586,6 @@ function handleNotification(method, params) {
       {
         const hasLocalPrompt = setPendingUserTurn(params.threadId, params.turn?.id);
         if (!hasLocalPrompt) void reconcileThreadHistory(params.threadId);
-      }
-      if (cachedThread(params.threadId, false)) {
-        cachedThread(params.threadId, false).thread.status = {
-          type: "active",
-          activeFlags: [],
-        };
       }
       setThreadActivity(params.threadId, params.turn?.id);
       refreshThreads();
@@ -3342,11 +3353,16 @@ function renderThreadHistory(thread) {
     appendMessageNode(empty);
   }
   const activeTurn = [...turns].reverse().find((turn) => turn.status === "inProgress");
-  if (thread.status?.type === "active" || activeTurn) {
-    state.activeTurns.set(thread.id, activeTurn?.id || null);
+  const liveStatus = state.liveThreadStatuses.get(thread.id);
+  const active = liveStatus ? liveStatus.type === "active"
+    : thread.status?.type === "active" || activeTurn;
+  if (active) {
+    const liveTurnId = liveStatus ? state.activeTurns.get(thread.id) : null;
+    state.activeTurns.set(thread.id, liveTurnId || activeTurn?.id || null);
   } else if (!state.submittingThreads.has(thread.id)) {
     state.activeTurns.delete(thread.id);
   }
+  renderThreads(state.threads);
   updateControls();
   jumpToPresent();
 }
@@ -3440,14 +3456,17 @@ function renderThreads(threads, reconcileActivity = false) {
   state.threads = sortedThreads;
   ui.threads.replaceChildren();
   for (const thread of sortedThreads) {
+    const status = state.liveThreadStatuses.get(thread.id) || thread.status;
     if (reconcileActivity) {
-      if (thread.status?.type === "active" && !state.activeTurns.has(thread.id)) {
+      if (status?.type === "active" && !state.activeTurns.has(thread.id)) {
         state.activeTurns.set(thread.id, null);
-      } else if (thread.status?.type !== "active" && !state.submittingThreads.has(thread.id)) {
+      } else if (status?.type !== "active" && !state.submittingThreads.has(thread.id)
+        && !state.activeTurns.get(thread.id)) {
+        // A known in-progress turn from thread/resume also outranks thread/list.
         state.activeTurns.delete(thread.id);
       }
     }
-    const running = thread.status?.type === "active"
+    const running = status?.type === "active"
       || state.activeTurns.has(thread.id)
       || state.submittingThreads.has(thread.id);
     const link = document.createElement("a");
@@ -3462,7 +3481,7 @@ function renderThreads(threads, reconcileActivity = false) {
     const timestamp = activityTimestamp
       ? new Date(activityTimestamp * 1000).toLocaleString()
       : "Unknown time";
-    meta.textContent = `${timestamp} · ${running ? "active" : (thread.status?.type || "unknown")}`;
+    meta.textContent = `${timestamp} · ${running ? "active" : (status?.type || "unknown")}`;
     link.append(title, meta);
     link.addEventListener("click", (event) => {
       if (!plainPrimaryClick(event)) return;
@@ -3505,6 +3524,7 @@ async function refreshThreads() {
     const result = await rpc("thread/list", THREAD_LIST_PARAMS);
     if (refreshId !== state.threadRefreshId) return;
     renderThreads(mergeProvisionalThreads(result?.data), true);
+    updateControls();
   } catch (error) {
     notice(error.message);
   }
@@ -3638,6 +3658,7 @@ async function submitPrompt(event) {
   notice("");
   state.submittingViews.add(selectionId);
   if (targetThreadId) state.submittingThreads.add(targetThreadId);
+  renderThreads(state.threads);
   updateControls();
 
   const pendingId = globalThis.crypto?.randomUUID?.()
@@ -3735,6 +3756,7 @@ async function submitPrompt(event) {
   } finally {
     state.submittingViews.delete(selectionId);
     if (targetThreadId) state.submittingThreads.delete(targetThreadId);
+    renderThreads(state.threads);
     updateControls();
   }
 }

@@ -142,6 +142,9 @@ dependencies and Chromium with `demo/setup.sh`, then run
 `npm run test:browser:questions`. This check uses simulated app-server events
 and does not start Codex tasks or change the running service.
 
+Run `npm run test:browser:sidebar` with the same browser dependencies to check
+sidebar activity with delayed history responses, background tasks, and reconnects.
+
 ### Chat settings defaults
 
 Unset chat settings use these instance defaults. Set them in `.env` for Docker
