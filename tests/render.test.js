@@ -1492,6 +1492,14 @@ handleNotification("turn/started", {
 });
 assert.equal(state.activeTurns.get("thread-b"), "turn-b");
 assert.equal(ui.thinkingIndicator.hidden, false, "turn start should show thinking for the selected thread");
+assert.equal(ui.threads.children[1].classList.contains("running"), true,
+  "turn start must update the sidebar before the saved-chat request finishes");
+assert.equal(ui.threads.children[1].getAttribute("aria-busy"), "true");
+assert.match(ui.threads.children[1].children[1].textContent, / · active$/);
+renderThreads(unsortedThreads, true);
+assert.equal(state.activeTurns.get("thread-b"), "turn-b",
+  "a stale idle saved-chat snapshot must not clear a live turn");
+assert.equal(ui.threads.children[1].classList.contains("running"), true);
 handleNotification("turn/completed", {
   threadId: "thread-b",
   turn: { id: "turn-b", status: "completed" },
@@ -1499,6 +1507,49 @@ handleNotification("turn/completed", {
 assert.equal(state.activeTurns.has("thread-b"), false);
 assert.equal(ui.thinkingIndicator.hidden, true, "turn completion should hide thinking");
 assert.equal(state.activeTurns.get("thread-a"), "turn-a", "other active turns must be preserved");
+assert.equal(ui.threads.children[1].classList.contains("running"), false,
+  "completion must update the sidebar without waiting for the saved-chat request");
+assert.match(ui.threads.children[1].children[1].textContent, / · idle$/);
+const staleActiveThreads = unsortedThreads.map((thread) => thread.id === "thread-b"
+  ? { ...thread, status: { type: "active", activeFlags: [] } } : thread);
+renderThreads(staleActiveThreads, true);
+assert.equal(state.activeTurns.has("thread-b"), false,
+  "a stale active saved-chat snapshot must not resurrect completed work");
+assert.equal(ui.threads.children[1].getAttribute("aria-busy"), "false");
+renderThreadHistory({
+  id: "thread-b", status: { type: "active", activeFlags: [] },
+  turns: [{ id: "turn-b", status: "inProgress", items: [] }],
+});
+assert.equal(state.activeTurns.has("thread-b"), false,
+  "a delayed history render must respect live completion too");
+assert.equal(ui.thinkingIndicator.hidden, true);
+
+handleNotification("thread/status/changed", {
+  threadId: "thread-b", status: { type: "active", activeFlags: ["waitingOnUserInput"] },
+});
+assert.equal(ui.threads.children[1].classList.contains("running"), true,
+  "status-only activity must immediately update the sidebar");
+renderThreads(unsortedThreads, true);
+assert.equal(state.activeTurns.has("thread-b"), true,
+  "stale idle snapshots must preserve activity even before its turn id is known");
+assert.equal(ui.threads.children[1].getAttribute("aria-busy"), "true");
+assert.equal(ui.thinkingLabel.textContent, "Waiting for your answer");
+handleNotification("thread/status/changed", {
+  threadId: "thread-b", status: { type: "idle" },
+});
+assert.equal(ui.threads.children[1].classList.contains("running"), false);
+assert.equal(ui.thinkingIndicator.hidden, true);
+handleNotification("thread/status/changed", {
+  threadId: "thread-c", status: { type: "active", activeFlags: [] },
+});
+assert.equal(ui.threads.children[2].classList.contains("running"), true,
+  "background status changes must update their own sidebar row immediately");
+assert.equal(ui.thinkingIndicator.hidden, true, "background events must not activate the selected chat");
+handleNotification("thread/status/changed", {
+  threadId: "thread-c", status: { type: "systemError" },
+});
+assert.equal(ui.threads.children[2].getAttribute("aria-busy"), "false");
+assert.match(ui.threads.children[2].children[1].textContent, / · systemError$/);
 
 state.threadId = "thread-a";
 const previousSelection = state.selectionId;
