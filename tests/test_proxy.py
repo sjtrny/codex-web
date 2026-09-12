@@ -272,6 +272,15 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
                         if method == "thread/read":
                             thread_id = payload["params"]["threadId"]
                             behavior = self.search_thread_behaviors.get(thread_id, {})
+                            if started := behavior.get("started"):
+                                started.set()
+                            if release := behavior.get("release"):
+                                try:
+                                    await release.wait()
+                                except asyncio.CancelledError:
+                                    if cancelled := behavior.get("cancelled"):
+                                        cancelled.set()
+                                    raise
                             if behavior.get("close"):
                                 await socket.close()
                                 break
@@ -299,12 +308,14 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             return socket
 
         backend.router.add_get("/", echo)
-        self.backend_runner = web.AppRunner(backend)
+        self.backend_runner = web.AppRunner(backend, handler_cancellation=True)
         await self.backend_runner.setup()
         self.backend_site = web.UnixSite(self.backend_runner, self.socket_path)
         await self.backend_site.start()
 
-        self.frontend_runner = web.AppRunner(codex_web.create_app())
+        self.frontend_runner = web.AppRunner(
+            codex_web.create_app(), handler_cancellation=True
+        )
         await self.frontend_runner.setup()
         self.frontend_site = web.TCPSite(self.frontend_runner, "127.0.0.1", 0)
         await self.frontend_site.start()
@@ -965,6 +976,167 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             if message.get("method") == "thread/read"
         ]
         self.assertNotIn("after-deadline", read_thread_ids)
+
+    def streaming_search_fixture(self) -> tuple[asyncio.Event, asyncio.Event, asyncio.Event]:
+        started, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        self.search_list_pages = {
+            (False, None): {
+                "data": [{"id": "first"}, {"id": "slow"}, {"id": "last"}],
+                "nextCursor": None,
+            }
+        }
+        self.search_thread_reads = {
+            thread_id: {
+                "thread": {
+                    "id": thread_id,
+                    "name": f"Conversation {thread_id}",
+                    "createdAt": timestamp,
+                    "turns": [{
+                        "id": f"turn-{thread_id}",
+                        "startedAt": timestamp,
+                        "items": [{
+                            "id": f"message-{thread_id}",
+                            "type": "agentMessage",
+                            "text": "A Straße match",
+                        }],
+                    }],
+                }
+            }
+            for thread_id, timestamp in (
+                ("first", 1704153600), ("slow", 1704240000), ("last", 1704067200)
+            )
+        }
+        self.search_thread_behaviors = {
+            "slow": {"started": started, "release": release, "cancelled": cancelled}
+        }
+        return started, release, cancelled
+
+    async def test_streams_matches_before_slow_history_finishes_with_bounded_sort(self) -> None:
+        for sort, expected in (("newest", ["slow", "first"]), ("oldest", ["last", "first"])):
+            with self.subTest(sort=sort):
+                started, release, _ = self.streaming_search_fixture()
+                try:
+                    async with (
+                        asyncio.timeout(3),
+                        ClientSession() as session,
+                        session.post(
+                            f"http://127.0.0.1:{self.port}/api/search",
+                            headers={"Accept": "application/x-ndjson"},
+                            json={"q": "STRASSE", "sort": sort, "limit": 2,
+                                  "from": "2024-01-01", "to": "2024-01-03"},
+                        ) as response,
+                    ):
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual(response.content_type, "application/x-ndjson")
+                        self.assertEqual(response.headers["Cache-Control"], "no-store")
+                        self.assertEqual(response.headers["X-Accel-Buffering"], "no")
+                        self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+                        initial = json.loads(await response.content.readline())
+                        self.assertFalse(initial["done"])
+                        self.assertEqual(initial["scannedThreads"], 0)
+                        first = json.loads(await response.content.readline())
+                        self.assertFalse(first["done"])
+                        self.assertEqual(first["scannedThreads"], 1)
+                        self.assertEqual(first["totalThreads"], 3)
+                        self.assertEqual(first["total"], 1)
+                        self.assertEqual(first["results"][0]["threadId"], "first")
+                        self.assertEqual(first["results"][0]["matchedText"], "Straße")
+                        self.assertNotIn("_timestamp", first["results"][0])
+                        await started.wait()
+                        self.assertFalse(release.is_set())
+                        release.set()
+                        remaining = [json.loads(line) async for line in response.content]
+                finally:
+                    release.set()
+                final = remaining[-1]
+                self.assertTrue(final["done"])
+                self.assertFalse(final["partial"])
+                self.assertTrue(final["truncated"])
+                self.assertEqual(final["total"], 3)
+                self.assertEqual([row["threadId"] for row in final["results"]], expected)
+
+    async def test_disconnecting_a_search_cancels_the_backend_scan(self) -> None:
+        started, release, cancelled = self.streaming_search_fixture()
+        try:
+            async with asyncio.timeout(4), ClientSession() as session:
+                response = await session.post(
+                    f"http://127.0.0.1:{self.port}/api/search",
+                    headers={"Accept": "application/x-ndjson"},
+                    json={"q": "STRASSE"},
+                )
+                await response.content.readline()
+                first = json.loads(await response.content.readline())
+                self.assertEqual(first["results"][0]["threadId"], "first")
+                await started.wait()
+                response.close()
+                await cancelled.wait()
+                self.assertNotIn("last", [
+                    message["params"]["threadId"] for message in self.backend_messages
+                    if message.get("method") == "thread/read"
+                ])
+        finally:
+            release.set()
+
+    async def test_stream_reports_errors_after_delivering_matches(self) -> None:
+        _, release, _ = self.streaming_search_fixture()
+        release.set()
+        self.search_thread_reads["slow"] = {
+            "error": {"code": -32601, "message": "thread/read unavailable"}
+        }
+        async with (
+            ClientSession() as session,
+            session.post(
+                f"http://127.0.0.1:{self.port}/api/search",
+                headers={"Accept": "application/x-ndjson"},
+                json={"q": "STRASSE"},
+            ) as response,
+        ):
+            records = [json.loads(line) async for line in response.content]
+        self.assertEqual(records[-2]["results"][0]["threadId"], "first")
+        self.assertEqual(records[-1], {"error": "Could not search chat history", "done": True})
+
+    async def test_stream_deadline_finishes_with_partial_matches(self) -> None:
+        _, release, _ = self.streaming_search_fixture()
+        try:
+            with patch.object(codex_web, "SEARCH_TIMEOUT_SECONDS", 0.1):
+                async with (
+                    asyncio.timeout(3),
+                    ClientSession() as session,
+                    session.post(
+                        f"http://127.0.0.1:{self.port}/api/search",
+                        headers={"Accept": "application/x-ndjson"},
+                        json={"q": "STRASSE"},
+                    ) as response,
+                ):
+                    records = [json.loads(line) async for line in response.content]
+        finally:
+            release.set()
+        final = records[-1]
+        self.assertTrue(final["done"])
+        self.assertTrue(final["timedOut"])
+        self.assertTrue(final["partial"])
+        self.assertEqual(final["skippedThreads"], 2)
+        self.assertEqual(final["results"][0]["threadId"], "first")
+
+    async def test_empty_search_stream_and_invalid_stream_request(self) -> None:
+        self.search_list_pages = {}
+        async with ClientSession() as session:
+            async with session.post(
+                f"http://127.0.0.1:{self.port}/api/search",
+                headers={"Accept": "application/x-ndjson"},
+                json={"q": "missing"},
+            ) as response:
+                records = [json.loads(line) async for line in response.content]
+            self.assertEqual(len(records), 1)
+            self.assertTrue(records[0]["done"])
+            self.assertEqual(records[0]["results"], [])
+            async with session.post(
+                f"http://127.0.0.1:{self.port}/api/search",
+                headers={"Accept": "application/x-ndjson"},
+                json={},
+            ) as response:
+                self.assertEqual(response.status, 400)
+                self.assertEqual((await response.json())["error"], "q is required")
 
     async def test_search_validates_query_sort_dates_and_limit(self) -> None:
         cases = (

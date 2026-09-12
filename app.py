@@ -14,7 +14,7 @@ import re
 import shutil
 import stat
 import uuid
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from datetime import date, datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote
@@ -325,6 +325,11 @@ class UploadRejected(Exception):
 @web.middleware
 async def security_headers(request: web.Request, handler):
     response = await handler(request)
+    set_security_headers(response)
+    return response
+
+
+def set_security_headers(response: web.StreamResponse) -> None:
     response.headers.update(
         {
             "Cache-Control": "no-store",
@@ -338,7 +343,6 @@ async def security_headers(request: web.Request, handler):
             "X-Frame-Options": "DENY",
         }
     )
-    return response
 
 
 async def index(_: web.Request) -> web.FileResponse:
@@ -1015,6 +1019,7 @@ async def search_backend_history(
     to_date: date | None,
     filter_zone: ZoneInfo,
     limit: int,
+    on_progress: Callable[[dict[str, object]], Awaitable[None]] | None = None,
 ) -> tuple[list[dict[str, object]], int, int, bool]:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + SEARCH_TIMEOUT_SECONDS
@@ -1094,7 +1099,30 @@ async def search_backend_history(
         matched_count = 0
         skipped_threads = 0
         timed_out = False
+
+        async def report_progress(scanned_threads: int) -> None:
+            if on_progress is None:
+                return
+            # Send bounded, sorted snapshots. Copy rows so serialization never
+            # removes the private sort keys still needed by the ongoing scan.
+            await on_progress(
+                {
+                    "results": [
+                        {key: value for key, value in match.items() if not key.startswith("_")}
+                        for match in matches
+                    ],
+                    "total": matched_count,
+                    "truncated": matched_count > len(matches),
+                    "partial": skipped_threads > 0,
+                    "skippedThreads": skipped_threads,
+                    "scannedThreads": scanned_threads,
+                    "totalThreads": len(thread_ids),
+                    "done": False,
+                }
+            )
+
         for index, thread_id in enumerate(thread_ids):
+            await report_progress(index)
             if loop.time() >= deadline:
                 skipped_threads += len(thread_ids) - index
                 timed_out = True
@@ -1179,7 +1207,7 @@ async def search_backend_history(
         await close_connection()
 
 
-async def search_chat_history(request: web.Request) -> web.Response:
+async def search_chat_history(request: web.Request) -> web.StreamResponse:
     try:
         params = await request.json()
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -1227,6 +1255,32 @@ async def search_chat_history(request: web.Request) -> web.Response:
     }
     if sort_value not in sort_directions:
         return web.json_response({"error": "sort must be newest or oldest"}, status=400)
+
+    stream: web.StreamResponse | None = None
+    wants_stream = "application/x-ndjson" in request.headers.get("Accept", "")
+
+    async def send_progress(payload: dict[str, object]) -> None:
+        nonlocal stream
+        if stream is None:
+            stream = web.StreamResponse(
+                headers={
+                    "Content-Type": "application/x-ndjson; charset=utf-8",
+                    "X-Accel-Buffering": "no",
+                }
+            )
+            # Streaming headers must be set before prepare(), not afterwards
+            # when the middleware receives the finished response.
+            set_security_headers(stream)
+            await stream.prepare(request)
+        await stream.write((json.dumps(payload, separators=(",", ":")) + "\n").encode())
+
+    async def finish(payload: dict[str, object], status: int = 200) -> web.StreamResponse:
+        if stream is None and (not wants_stream or status != 200):
+            return web.json_response(payload, status=status)
+        await send_progress({**payload, "done": True})
+        await stream.write_eof()
+        return stream
+
     try:
         matches, total, skipped_threads, timed_out = await search_backend_history(
             query,
@@ -1235,17 +1289,21 @@ async def search_chat_history(request: web.Request) -> web.Response:
             to_date,
             filter_zone,
             limit,
+            send_progress if wants_stream else None,
         )
     except TimeoutError:
-        return web.json_response({"error": "Chat history search timed out"}, status=504)
+        return await finish({"error": "Chat history search timed out"}, status=504)
+    except ConnectionResetError:
+        # A disconnected browser must stop its scan, not trigger backend retries.
+        raise
     except RuntimeError as exc:
         LOG.warning("chat history search backend unavailable: %s", exc)
-        return web.json_response({"error": "Codex backend is unavailable"}, status=503)
+        return await finish({"error": "Codex backend is unavailable"}, status=503)
     except (BackendRPCError, BackendProtocolError, ClientError, OSError) as exc:
         LOG.warning("chat history search failed: %s", exc)
-        return web.json_response({"error": "Could not search chat history"}, status=502)
+        return await finish({"error": "Could not search chat history"}, status=502)
 
-    return web.json_response(
+    return await finish(
         {
             "results": matches,
             "total": total,

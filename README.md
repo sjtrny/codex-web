@@ -145,6 +145,24 @@ and does not start Codex tasks or change the running service.
 Run `npm run test:browser:sidebar` with the same browser dependencies to check
 sidebar activity with delayed history responses, background tasks, and reconnects.
 
+### Search chat history
+
+Open **Search chats** to find matching messages. Conversations appear as the
+search checks your history, with a running count. You can open a result before
+the search finishes. Date filters and oldest/newest sorting still apply.
+
+Submit another query, change a filter, or select **Clear** to cancel the previous
+search. Opening a conversation also stops the remaining scan. If the search is
+interrupted, results already found stay visible.
+
+The browser requests newline-delimited JSON from `POST /api/search` using
+`Accept: application/x-ndjson`. Each record contains a bounded, sorted result
+snapshot and progress; the final record has `done: true`. Clients that request
+ordinary JSON still receive one complete response.
+
+Run `npm run test:browser:search` with the demo's Playwright dependencies for an
+isolated desktop/mobile streaming check.
+
 ### Chat settings defaults
 
 Unset chat settings use these instance defaults. Set them in `.env` for Docker

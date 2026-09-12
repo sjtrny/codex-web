@@ -189,6 +189,7 @@ const state = {
   searchRequestId: 0,
   searchAbortController: null,
   searchResults: [],
+  searchResultNodes: new Map(),
   followPresent: true,
   lastMessagesScrollTop: 0,
   messagesTouchY: null,
@@ -1754,6 +1755,13 @@ function syncSidebarBreakpoint() {
 
 function setSearchOpen(open, moveFocus = true) {
   state.searchOpen = Boolean(open);
+  if (!state.searchOpen && state.searchAbortController) {
+    state.searchAbortController.abort();
+    state.searchAbortController = null;
+    state.searchRequestId += 1;
+    setSearchBusy(false);
+    setSearchStatus("Search stopped. Search again to finish checking your history.");
+  }
   ui.chat.classList.toggle("search-active", state.searchOpen);
   ui.searchView.hidden = !state.searchOpen;
   ui.searchChats.setAttribute("aria-pressed", String(state.searchOpen));
@@ -1776,8 +1784,9 @@ function setSearchStatus(text, kind = "") {
 
 function setSearchBusy(busy) {
   ui.searchResults.setAttribute("aria-busy", String(Boolean(busy)));
-  ui.searchSubmit.disabled = Boolean(busy);
-  ui.searchSubmit.textContent = busy ? "Searching…" : "Search";
+  // A new query can replace an in-progress search.
+  ui.searchSubmit.disabled = false;
+  ui.searchSubmit.textContent = "Search";
 }
 
 function searchValue(objects, keys) {
@@ -1933,7 +1942,10 @@ function normalizeSearchResponse(payload) {
     : Number(payload?.skippedThreads ?? payload?.skipped_threads ?? 0);
   const skippedThreads = Number.isFinite(skippedValue) && skippedValue > 0 ? skippedValue : 0;
   const partial = !Array.isArray(payload) && Boolean(payload?.partial || skippedThreads);
-  return { results, total, truncated, partial, skippedThreads };
+  const searching = payload?.done === false;
+  const scannedThreads = Math.max(0, Number(payload?.scannedThreads) || 0);
+  const totalThreads = Math.max(scannedThreads, Number(payload?.totalThreads) || 0);
+  return { results, total, truncated, partial, skippedThreads, searching, scannedThreads, totalThreads };
 }
 
 function formatSearchDate(date) {
@@ -2076,22 +2088,17 @@ async function openSearchResult(result, query, link) {
 
 function renderSearchResults(response, query) {
   state.searchResults = response.results;
-  ui.searchResults.replaceChildren();
-  if (!response.results.length) {
-    let summary = `No conversations found for “${query}”.`;
-    if (response.partial) {
-      const skipped = response.skippedThreads
-        ? `${response.skippedThreads.toLocaleString()} conversation${response.skippedThreads === 1 ? "" : "s"}`
-        : "Some conversations";
-      summary += ` ${skipped} could not be searched.`;
-    }
-    setSearchStatus(summary, response.partial ? "error" : "empty");
-    return;
-  }
-
   const shown = response.results.length;
   let summary;
-  if (response.truncated || response.total > shown) {
+  if (response.searching) {
+    summary = `Searching… ${response.total.toLocaleString()} matching conversation${response.total === 1 ? "" : "s"} found so far.`;
+    if (response.totalThreads) {
+      summary += ` Checked ${response.scannedThreads.toLocaleString()} of ${response.totalThreads.toLocaleString()} conversations.`;
+    }
+    if (response.truncated) summary += ` Showing ${shown.toLocaleString()} results.`;
+  } else if (!shown) {
+    summary = `No conversations found for “${query}”.`;
+  } else if (response.truncated || response.total > shown) {
     summary = `Showing ${shown.toLocaleString()} of ${response.total.toLocaleString()} matching conversations. Refine your search or date range to narrow the results.`;
   } else {
     summary = `${response.total.toLocaleString()} matching conversation${response.total === 1 ? "" : "s"} found.`;
@@ -2102,59 +2109,80 @@ function renderSearchResults(response, query) {
       : "Some conversations";
     summary += ` ${skipped} could not be searched.`;
   }
-  setSearchStatus(summary, response.partial ? "error" : "");
+  setSearchStatus(summary, response.searching ? "loading" : (response.partial ? "error" : (shown ? "" : "empty")));
 
-  for (const result of response.results) {
-    const item = document.createElement("li");
-    item.className = "search-result";
-    const link = document.createElement("a");
-    link.className = "search-result-button";
-    if (result.threadId) link.setAttribute("href", threadHref(result.threadId));
-    else link.setAttribute("aria-disabled", "true");
-
-    const heading = document.createElement("span");
-    heading.className = "search-result-heading";
-    const title = document.createElement("strong");
-    title.className = "search-result-title";
-    title.textContent = result.title;
-    heading.append(title);
-
-    const snippet = document.createElement("span");
-    snippet.className = "search-result-snippet";
-    appendHighlightedText(snippet, result.snippet, result.matchedText || query);
-
-    const meta = document.createElement("span");
-    meta.className = "search-result-meta";
-    if (result.date) {
-      const time = document.createElement("time");
-      time.setAttribute("datetime", result.date.toISOString());
-      time.textContent = formatSearchDate(result.date);
-      meta.append(time);
-    } else {
-      meta.textContent = "Date unavailable";
+  const nextNodes = new Map();
+  const focused = ui.searchResults.contains(document.activeElement) ? document.activeElement : null;
+  for (const [index, result] of response.results.entries()) {
+    const key = JSON.stringify([query, result.threadId, result.turnId, result.itemId,
+      result.title, result.snippet, result.matchedText, result.date, result.dateSource]);
+    const item = state.searchResultNodes.get(key) || createSearchResult(result, query);
+    nextNodes.set(key, item);
+    const current = ui.searchResults.children[index];
+    if (current !== item) {
+      if (current) ui.searchResults.insertBefore(item, current);
+      else ui.searchResults.append(item);
     }
-    if (result.dateSource !== "message") {
-      const fallback = document.createElement("span");
-      const turnTime = result.dateSource.includes("turn");
-      fallback.className = "search-result-fallback";
-      fallback.textContent = turnTime ? " · turn time" : " · conversation date";
-      fallback.title = turnTime
-        ? "An exact message timestamp was unavailable; this is the matching turn's timestamp."
-        : "An exact message timestamp was unavailable; this is the conversation's timestamp.";
-      meta.append(fallback);
-    }
-    if (!result.threadId) meta.textContent += " · conversation unavailable";
-
-    link.append(heading, snippet, meta);
-    link.addEventListener("click", (event) => {
-      if (!plainPrimaryClick(event)) return;
-      event.preventDefault();
-      if (link.getAttribute("aria-disabled") === "true") return;
-      openSearchResult(result, query, link);
-    });
-    item.append(link);
-    ui.searchResults.append(item);
   }
+  for (const [key, item] of state.searchResultNodes) {
+    if (!nextNodes.has(key)) item.remove();
+  }
+  state.searchResultNodes = nextNodes;
+  if (focused && document.activeElement !== focused && ui.searchResults.contains(focused)) {
+    focused.focus({ preventScroll: true });
+  }
+}
+
+function createSearchResult(result, query) {
+  const item = document.createElement("li");
+  item.className = "search-result";
+  const link = document.createElement("a");
+  link.className = "search-result-button";
+  if (result.threadId) link.setAttribute("href", threadHref(result.threadId));
+  else link.setAttribute("aria-disabled", "true");
+
+  const heading = document.createElement("span");
+  heading.className = "search-result-heading";
+  const title = document.createElement("strong");
+  title.className = "search-result-title";
+  title.textContent = result.title;
+  heading.append(title);
+
+  const snippet = document.createElement("span");
+  snippet.className = "search-result-snippet";
+  appendHighlightedText(snippet, result.snippet, result.matchedText || query);
+
+  const meta = document.createElement("span");
+  meta.className = "search-result-meta";
+  if (result.date) {
+    const time = document.createElement("time");
+    time.setAttribute("datetime", result.date.toISOString());
+    time.textContent = formatSearchDate(result.date);
+    meta.append(time);
+  } else {
+    meta.textContent = "Date unavailable";
+  }
+  if (result.dateSource !== "message") {
+    const fallback = document.createElement("span");
+    const turnTime = result.dateSource.includes("turn");
+    fallback.className = "search-result-fallback";
+    fallback.textContent = turnTime ? " · turn time" : " · conversation date";
+    fallback.title = turnTime
+      ? "An exact message timestamp was unavailable; this is the matching turn's timestamp."
+      : "An exact message timestamp was unavailable; this is the conversation's timestamp.";
+    meta.append(fallback);
+  }
+  if (!result.threadId) meta.textContent += " · conversation unavailable";
+
+  link.append(heading, snippet, meta);
+  link.addEventListener("click", (event) => {
+    if (!plainPrimaryClick(event)) return;
+    event.preventDefault();
+    if (link.getAttribute("aria-disabled") === "true") return;
+    openSearchResult(result, query, link);
+  });
+  item.append(link);
+  return item;
 }
 
 function validateSearchDates() {
@@ -2175,6 +2203,9 @@ async function performSearch(event) {
   state.searchAbortController?.abort();
   state.searchAbortController = null;
   const requestId = ++state.searchRequestId;
+  state.searchResults = [];
+  state.searchResultNodes.clear();
+  ui.searchResults.replaceChildren();
   const query = ui.searchQuery.value.trim();
   if (!query) {
     setSearchBusy(false);
@@ -2207,10 +2238,17 @@ async function performSearch(event) {
     const response = await fetch("/api/search", {
       method: "POST",
       cache: "no-store",
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      headers: { Accept: "application/x-ndjson, application/json", "Content-Type": "application/json" },
       body: JSON.stringify(params),
       signal: controller.signal,
     });
+    if (response.ok && response.headers?.get("Content-Type")?.includes("application/x-ndjson")) {
+      await readSearchStream(response, (payload) => {
+        if (requestId !== state.searchRequestId) return;
+        renderSearchResults(normalizeSearchResponse(payload), query);
+      });
+      return;
+    }
     let payload;
     try {
       payload = await response.json();
@@ -2227,8 +2265,10 @@ async function performSearch(event) {
     renderSearchResults(normalizeSearchResponse(payload), query);
   } catch (error) {
     if (error.name === "AbortError" || requestId !== state.searchRequestId) return;
-    ui.searchResults.replaceChildren();
-    setSearchStatus(error.message || "Search is temporarily unavailable.", "error");
+    const keptResults = state.searchResults.length
+      ? " Results found so far are shown. Search again to finish checking your history."
+      : "";
+    setSearchStatus((error.message || "Search is temporarily unavailable.") + keptResults, "error");
   } finally {
     if (requestId === state.searchRequestId) {
       state.searchAbortController = null;
@@ -2237,11 +2277,46 @@ async function performSearch(event) {
   }
 }
 
+async function readSearchStream(response, onUpdate) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let buffer = "";
+  function acceptLine(line) {
+    const payload = JSON.parse(line);
+    if (payload?.error) throw new Error(payload.error);
+    if (!Array.isArray(payload?.results) || typeof payload.done !== "boolean") {
+      throw new Error("Invalid search response.");
+    }
+    onUpdate(payload);
+    return payload.done;
+  }
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      let newline;
+      while ((newline = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (line && acceptLine(line)) return;
+      }
+      if (done) {
+        if (buffer.trim() && acceptLine(buffer.trim())) return;
+        throw new Error("Search ended before all conversations were checked.");
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 function clearSearch() {
   state.searchAbortController?.abort();
   state.searchAbortController = null;
   state.searchRequestId += 1;
   state.searchResults = [];
+  state.searchResultNodes.clear();
   ui.searchQuery.value = "";
   ui.searchFrom.value = "";
   ui.searchTo.value = "";
