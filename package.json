@@ -11,7 +11,8 @@
     "test:theme": "node tests/theme.test.js",
     "test:render": "node tests/render.test.js",
     "test:browser:questions": "node tests/questions.browser.cjs",
-    "test:browser:sidebar": "node tests/sidebar-activity.browser.cjs"
+    "test:browser:sidebar": "node tests/sidebar-activity.browser.cjs",
+    "test:browser:search": "node tests/search.browser.cjs"
   },
   "dependencies": {
     "dompurify": "3.4.13",

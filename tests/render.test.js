@@ -2742,6 +2742,75 @@ async function checkQuestionsInComposer(rpcMessages) {
   assert.equal(ui.requests.children.length, 0);
 }
 
+async function checkStreamingSearch() {
+  const encoder = new TextEncoder();
+  const requests = [];
+  globalThis.fetch = async () => {
+    const request = {};
+    requests.push(request);
+    return new Response(new ReadableStream({
+      start(controller) { request.controller = controller; },
+      cancel() { request.cancelled = true; },
+    }), { headers: { "Content-Type": "application/x-ndjson" } });
+  };
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  async function send(request, payload) {
+    request.controller.enqueue(encoder.encode(JSON.stringify(payload) + "\n"));
+    await settle();
+  }
+  const row = (id) => ({ threadId: id, itemId: id, title: id, snippet: "needle café" });
+  const progress = (id, done = false) => ({ results: [row(id)], total: 1, done });
+
+  ui.searchQuery.value = "needle";
+  const oldSearch = performSearch();
+  await send(requests[0], { results: [], total: 0, scannedThreads: 0, totalThreads: 3, done: false });
+  assert.match(ui.searchStatus.textContent, /Searching/);
+  assert.doesNotMatch(ui.searchStatus.textContent, /No conversations/);
+  const encoded = encoder.encode(JSON.stringify(progress("early")) + "\n");
+  const split = encoded.indexOf(0xc3) + 1; // Split café inside its UTF-8 character.
+  requests[0].controller.enqueue(encoded.slice(0, split));
+  await settle();
+  assert.equal(state.searchResults.length, 0, "an incomplete record must not render");
+  requests[0].controller.enqueue(encoded.slice(split));
+  await settle();
+  assert.equal(state.searchResults[0].snippet, "needle café");
+  assert.equal(ui.searchResults.getAttribute("aria-busy"), "true");
+  const earlyLink = ui.searchResults.children[0].children[0];
+  await send(requests[0], progress("early"));
+  assert.equal(ui.searchResults.children[0].children[0], earlyLink, "progress preserves existing links");
+
+  // Deliberately ignore fetch's AbortSignal to deliver an already-buffered stale record.
+  ui.searchQuery.value = "replacement";
+  const newSearch = performSearch();
+  await send(requests[0], progress("stale", true));
+  await oldSearch;
+  assert.equal(state.searchResults.length, 0);
+  assert.equal(ui.searchResults.getAttribute("aria-busy"), "true", "old completion cannot clear new busy state");
+  await send(requests[1], progress("current", true));
+  await newSearch;
+  assert.equal(state.searchResults[0].threadId, "current");
+  assert.equal(ui.searchResults.getAttribute("aria-busy"), "false");
+
+  const clearedSearch = performSearch();
+  clearSearch();
+  await send(requests[2], progress("after-clear", true));
+  await clearedSearch;
+  assert.equal(state.searchResults.length, 0);
+  assert.equal(ui.searchResults.children.length, 0);
+
+  ui.searchQuery.value = "needle";
+  const interruptedSearch = performSearch();
+  await send(requests[3], progress("kept"));
+  requests[3].controller.close();
+  await interruptedSearch;
+  assert.equal(state.searchResults[0].threadId, "kept");
+  assert.match(ui.searchStatus.textContent, /ended before all conversations/);
+  assert.match(ui.searchStatus.textContent, /Results found so far/);
+  assert.equal(ui.searchResults.getAttribute("aria-busy"), "false");
+  assert.ok(requests.slice(0, 3).every((request) => request.cancelled));
+  clearSearch();
+}
+
 let capturedSearchRequest;
 globalThis.fetch = async (url, options) => {
   capturedSearchRequest = { url, options };
@@ -2762,12 +2831,15 @@ performSearch({ preventDefault() {} }).then(async () => {
   assert.equal(capturedSearchRequest.url, "/api/search");
   assert.equal(capturedSearchRequest.options.method, "POST");
   assert.equal(capturedSearchRequest.options.headers["Content-Type"], "application/json");
+  assert.match(capturedSearchRequest.options.headers.Accept, /application\/x-ndjson/);
   const requestBody = JSON.parse(capturedSearchRequest.options.body);
   assert.equal(requestBody.q, "needle");
   assert.equal(requestBody.from, "2024-01-01");
   assert.equal(requestBody.to, "2024-01-31");
   assert.equal(requestBody.sort, "oldest");
   assert.equal(typeof requestBody.timezone, "string");
+  await checkStreamingSearch();
+  globalThis.fetch = originalFetch;
 
   const originalSocket = state.ws;
   const originalReady = state.ready;
