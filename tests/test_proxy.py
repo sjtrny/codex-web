@@ -155,28 +155,10 @@ class SearchHelperTests(unittest.TestCase):
 class ProxyTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.enterContext(patch.dict(os.environ))
         self.socket_path = str(Path(self.tempdir.name) / "fake-codex.sock")
         self.upload_path = Path(self.tempdir.name) / "uploads"
-        self.old_env = {
-            name: os.environ.get(name)
-            for name in (
-                "CODEX_APP_SERVER_SOCKET",
-                "CODEX_APP_SERVER_URL",
-                "CODEX_WORKSPACE_ROOT",
-                "CODEX_DEFAULT_MODEL",
-                "CODEX_DEFAULT_REASONING_EFFORT",
-                "CODEX_DEFAULT_SERVICE_TIER",
-                "CODEX_DEFAULT_PERSONALITY",
-                "CODEX_DEFAULT_REASONING_SUMMARY",
-                "CODEX_DEFAULT_APPROVAL_POLICY",
-                "CODEX_DEFAULT_PERMISSION_PROFILE",
-                "CODEX_UPLOAD_DIR",
-                "CODEX_UPLOAD_HOST_DIR",
-                "CODEX_UPLOAD_MAX_BYTES",
-                "CODEX_UPLOAD_MAX_FILES",
-                "CODEX_UPLOAD_TOTAL_BYTES",
-            )
-        }
         for name in codex_web.CHAT_SETTING_ENV_VARS.values():
             os.environ.pop(name, None)
         os.environ["CODEX_APP_SERVER_SOCKET"] = self.socket_path
@@ -310,6 +292,7 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
         backend.router.add_get("/", echo)
         self.backend_runner = web.AppRunner(backend, handler_cancellation=True)
         await self.backend_runner.setup()
+        self.addAsyncCleanup(self.backend_runner.cleanup)
         self.backend_site = web.UnixSite(self.backend_runner, self.socket_path)
         await self.backend_site.start()
 
@@ -317,20 +300,11 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             codex_web.create_app(), handler_cancellation=True
         )
         await self.frontend_runner.setup()
+        self.addAsyncCleanup(self.frontend_runner.cleanup)
         self.frontend_site = web.TCPSite(self.frontend_runner, "127.0.0.1", 0)
         await self.frontend_site.start()
         socket = self.frontend_site._server.sockets[0]
         self.port = socket.getsockname()[1]
-
-    async def asyncTearDown(self) -> None:
-        await self.frontend_runner.cleanup()
-        await self.backend_runner.cleanup()
-        self.tempdir.cleanup()
-        for name, value in self.old_env.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
 
     async def test_proxies_json_over_unix_websocket(self) -> None:
         async with (
@@ -346,6 +320,58 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             await socket.send_json(payload)
             echoed = json.loads((await socket.receive()).data)
             self.assertEqual(echoed, payload)
+
+    async def test_headers_apply_to_files_errors_and_websocket_handshakes(self) -> None:
+        def check_headers(headers) -> None:
+            self.assertEqual(headers["Cache-Control"], "no-store")
+            self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+            self.assertEqual(headers["Referrer-Policy"], "no-referrer")
+            self.assertEqual(headers["X-Frame-Options"], "DENY")
+            self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
+
+        base_url = f"http://127.0.0.1:{self.port}"
+        async with ClientSession() as session:
+            for route, status in (
+                ("/", 200),
+                ("/static/app.js", 200),
+                ("/api/config", 200),
+                ("/api/files", 400),
+                ("/missing", 404),
+            ):
+                with self.subTest(route=route):
+                    async with session.get(base_url + route) as response:
+                        self.assertEqual(response.status, status)
+                        check_headers(response.headers)
+            async with session.ws_connect(base_url + "/ws") as socket:
+                check_headers(socket._response.headers)
+                await socket.receive()
+
+    async def test_proxy_closes_both_connections_when_either_peer_disconnects(self) -> None:
+        self.search_list_pages = {}
+        self.search_thread_behaviors = {"disconnect": {"close": True}}
+        async with ClientSession() as session:
+            for peer in ("browser", "backend"):
+                with self.subTest(peer=peer):
+                    async with session.ws_connect(
+                        f"http://127.0.0.1:{self.port}/ws"
+                    ) as socket:
+                        await socket.receive()
+                        if peer == "browser":
+                            await socket.close()
+                        else:
+                            await socket.send_json(
+                                {
+                                    "id": 1,
+                                    "method": "thread/read",
+                                    "params": {"threadId": "disconnect"},
+                                }
+                            )
+                            async with asyncio.timeout(1):
+                                message = await socket.receive()
+                            self.assertEqual(message.type, WSMsgType.CLOSE)
+                    async with asyncio.timeout(1):
+                        while self.backend_runner.server.connections:
+                            await asyncio.sleep(0.01)
 
     async def test_adds_developer_instructions_to_thread_requests(self) -> None:
         async with (

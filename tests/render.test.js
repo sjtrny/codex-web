@@ -5,220 +5,47 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-class FakeElement {
-  constructor(tagName, fragment = false) {
-    this.tagName = tagName;
-    this.fragment = fragment;
-    this.children = [];
-    this.parentNode = null;
-    this.className = "";
-    this.hidden = false;
-    this.open = false;
-    this.disabled = false;
-    this.value = "";
-    this.selectionStart = 0;
-    this.selectionEnd = 0;
-    this._textContent = "";
-    this._scrollTop = 0;
-    this._scrollHeight = null;
-    this.clientHeight = 0;
-    this.scrollWrites = 0;
-    this.attributes = new Map();
-    this.focusCount = 0;
-    this.inert = false;
-    this.title = "";
-    this._left = 0;
-    this.pointerCaptures = new Set();
-    const styles = new Map();
-    this.style = {
-      setProperty: (name, value) => styles.set(name, String(value)),
-      getPropertyValue: (name) => styles.get(name) ?? "",
-      removeProperty: (name) => styles.delete(name),
-    };
-    this.classList = {
-      add: (...names) => {
-        const classes = new Set(this.className.split(/\s+/).filter(Boolean));
-        for (const name of names) classes.add(name);
-        this.className = [...classes].join(" ");
-      },
-      remove: (...names) => {
-        const classes = new Set(this.className.split(/\s+/).filter(Boolean));
-        for (const name of names) classes.delete(name);
-        this.className = [...classes].join(" ");
-      },
-      toggle: (name, force) => {
-        const classes = new Set(this.className.split(/\s+/).filter(Boolean));
-        const enabled = force === undefined ? !classes.has(name) : Boolean(force);
-        if (enabled) classes.add(name);
-        else classes.delete(name);
-        this.className = [...classes].join(" ");
-        return enabled;
-      },
-      contains: (name) => this.className.split(/\s+/).includes(name),
-    };
-    this.listeners = new Map();
-  }
+const { mock } = require("node:test");
+const { JSDOM } = require("jsdom");
 
-  append(...nodes) {
-    for (const node of nodes) {
-      if (node.fragment) {
-        this.append(...node.children.splice(0));
-      } else {
-        node.parentNode = this;
-        this.children.push(node);
-      }
-    }
-  }
-
-  insertBefore(node, reference) {
-    const index = this.children.indexOf(reference);
-    if (index < 0) throw new Error("Reference node is not a child");
-    const nodes = node.fragment ? node.children.splice(0) : [node];
-    for (const child of nodes) {
-      if (child.parentNode) child.remove();
-      child.parentNode = this;
-    }
-    this.children.splice(index, 0, ...nodes);
-  }
-
-  replaceChildren(...nodes) {
-    for (const child of this.children) child.parentNode = null;
-    this.children = [];
-    this.append(...nodes);
-  }
-
-  querySelector(selector) {
-    const className = selector.startsWith(".") ? selector.slice(1) : null;
-    for (const child of this.children) {
-      if (className && child.className.split(/\s+/).includes(className)) return child;
-      const nested = child.querySelector(selector);
-      if (nested) return nested;
-    }
-    return null;
-  }
-
-  remove() {
-    if (!this.parentNode) return;
-    this.parentNode.children = this.parentNode.children.filter(
-      (child) => child !== this,
-    );
-    this.parentNode = null;
-  }
-
-  contains(node) {
-    if (this === node) return true;
-    return this.children.some((child) => child.contains(node));
-  }
-
-  addEventListener(name, handler) {
-    this.listeners.set(name, handler);
-  }
-
-  setAttribute(name, value) {
-    this.attributes.set(name, String(value));
-  }
-
-  getAttribute(name) {
-    return this.attributes.get(name) ?? null;
-  }
-
-  removeAttribute(name) {
-    this.attributes.delete(name);
-  }
-
-  focus() {
-    this.focusCount += 1;
-    globalThis.document.activeElement = this;
-  }
-
-  setSelectionRange(start, end) {
-    this.selectionStart = start;
-    this.selectionEnd = end;
-  }
-
-  getBoundingClientRect() {
-    return { left: this._left };
-  }
-
-  setPointerCapture(pointerId) {
-    this.pointerCaptures.add(pointerId);
-  }
-
-  releasePointerCapture(pointerId) {
-    this.pointerCaptures.delete(pointerId);
-  }
-
-  hasPointerCapture(pointerId) {
-    return this.pointerCaptures.has(pointerId);
-  }
-
-  showModal() {
-    this.open = true;
-    this.setAttribute("open", "");
-  }
-
-  close() {
-    this.open = false;
-    this.removeAttribute("open");
-  }
-
-  set textContent(value) {
-    this._textContent = String(value);
-  }
-
-  get textContent() {
-    return this._textContent;
-  }
-
-  get scrollHeight() {
-    return this._scrollHeight ?? this.children.length;
-  }
-
-  set scrollTop(value) {
-    this._scrollTop = value;
-    this.scrollWrites += 1;
-  }
-
-  get scrollTop() {
-    return this._scrollTop;
-  }
+// Parse the real page. Mock only APIs that need layout or a browser window.
+const dom = new JSDOM(fs.readFileSync(path.join(__dirname, "../static/index.html"), "utf8"), {
+  url: "http://localhost/",
+});
+const { window } = dom;
+const { document } = window;
+Object.assign(globalThis, {
+  window, document, localStorage: window.localStorage, Option: window.Option,
+});
+let mobileViewport = false;
+window.innerWidth = 1280;
+window.matchMedia = () => ({ matches: mobileViewport });
+for (const dialog of document.querySelectorAll("dialog")) {
+  dialog.showModal = () => { dialog.open = true; };
+  dialog.close = () => { dialog.open = false; };
 }
 
-const elements = new Map();
-let mobileViewport = false;
-const storedValues = new Map();
-globalThis.document = {
-  activeElement: null,
-  getElementById(id) {
-    if (!elements.has(id)) elements.set(id, new FakeElement(id));
-    return elements.get(id);
+const focusSpies = new Map(
+  [...document.querySelectorAll("[id]")].map((element) => [element, mock.method(element, "focus")]),
+);
+const focusCount = (element) => focusSpies.get(element).mock.callCount();
+
+const messageViewport = { top: 0, height: null, clientHeight: 0, writes: 0 };
+const messages = document.getElementById("messages");
+Object.defineProperties(messages, {
+  scrollHeight: { get: () => messageViewport.height ?? messages.children.length },
+  clientHeight: { get: () => messageViewport.clientHeight },
+  scrollTop: {
+    get: () => messageViewport.top,
+    set(value) { messageViewport.top = value; messageViewport.writes += 1; },
   },
-  createElement(tagName) {
-    return new FakeElement(tagName);
-  },
-  createDocumentFragment() {
-    return new FakeElement("fragment", true);
-  },
-};
-globalThis.window = {
-  innerWidth: 1280,
-  matchMedia() {
-    return { matches: mobileViewport };
-  },
-  setTimeout,
-  clearTimeout,
-};
-globalThis.localStorage = {
-  getItem(key) {
-    return storedValues.get(key) ?? null;
-  },
-  setItem(key, value) {
-    storedValues.set(key, String(value));
-  },
-  removeItem(key) {
-    storedValues.delete(key);
-  },
-};
+});
+for (const element of document.querySelectorAll("#sidebar-resizer, #sidebar-swipe-edge")) {
+  const captures = new Set();
+  element.setPointerCapture = (id) => captures.add(id);
+  element.releasePointerCapture = (id) => captures.delete(id);
+  element.hasPointerCapture = (id) => captures.has(id);
+}
 globalThis.CODEX_WEB_TEST = true;
 
 const script = fs.readFileSync(path.join(__dirname, "../static/app.js"), "utf8");
@@ -342,7 +169,7 @@ assert.equal(ui.preferencesToggle.getAttribute("aria-expanded"), "true");
 setPreferencesOpen(false);
 assert.equal(ui.preferencesDialog.open, false);
 assert.equal(ui.preferencesToggle.getAttribute("aria-expanded"), "false");
-assert.equal(ui.preferencesToggle.focusCount, 1);
+assert.equal(focusCount(ui.preferencesToggle), 1);
 
 const items = Array.from({ length: 400 }, (_, index) => ({
   id: `reasoning-${index}`,
@@ -373,10 +200,10 @@ renderThreadHistory({
 
 assert.equal(state.items.size, 3, "empty reasoning entries should be omitted");
 assert.equal(ui.messages.children.length, 4, "history should contain useful entries and the indicator");
-assert.equal(ui.messages.children.at(-1), ui.thinkingIndicator, "indicator stays after chat history");
+assert.equal(ui.messages.lastElementChild, ui.thinkingIndicator, "indicator stays after chat history");
 assert.equal(ui.thinkingIndicator.hidden, true, "idle history should not show thinking");
 assert.equal(ui.messages.getAttribute("aria-busy"), "false");
-assert.equal(ui.messages.scrollWrites, 1, "history should trigger one final scroll");
+assert.equal(messageViewport.writes, 1, "history should trigger one final scroll");
 assert.equal(ui.jumpPresent.hidden, true, "history starts at the present");
 const command = state.items.get(renderedItemKey("command", "history-thread", "turn"));
 assert.ok(command.body.textContent.includes("characters omitted"));
@@ -414,19 +241,19 @@ const markdownAgent = state.items.get(renderedItemKey(
 ));
 assert.deepEqual(markdownInputs, ["# Agent heading"]);
 assert.equal(markdownAgent.body.classList.contains("plain-text"), false);
-assert.equal(markdownAgent.body.children[0].tagName, "h1");
+assert.equal(markdownAgent.body.children[0].localName, "h1");
 globalThis.CodexMarkdown = previousMarkdown;
 
-ui.messages._scrollHeight = 1000;
-ui.messages.clientHeight = 200;
-ui.messages._scrollTop = 240;
+messageViewport.height = 1000;
+messageViewport.clientHeight = 200;
+messageViewport.top = 240;
 handleMessagesScroll();
 assert.equal(state.followPresent, false, "scrolling up disables automatic following");
 const scrolledTop = ui.messages.scrollTop;
-const scrolledWrites = ui.messages.scrollWrites;
+const scrolledWrites = messageViewport.writes;
 upsertMessage("live-agent", "agent", "new output below the viewport");
 assert.equal(ui.messages.scrollTop, scrolledTop, "new output must preserve reader position");
-assert.equal(ui.messages.scrollWrites, scrolledWrites, "new output must not write scrollTop");
+assert.equal(messageViewport.writes, scrolledWrites, "new output must not write scrollTop");
 assert.equal(ui.jumpPresent.hidden, false, "new off-screen output shows the jump control");
 
 const localPrompt = renderLocalPrompt(
@@ -448,41 +275,41 @@ assert.equal(state.followPresent, true);
 assert.equal(ui.messages.scrollTop, ui.messages.scrollHeight);
 assert.equal(ui.jumpPresent.hidden, true);
 
-const resistedScrollWrites = ui.messages.scrollWrites;
+const resistedScrollWrites = messageViewport.writes;
 handleMessagesWheel({ deltaY: -4 });
 assert.equal(state.followPresent, false, "an upward wheel gesture immediately stops following");
 upsertMessage("live-agent", "agent", " while the wheel gesture is pending", true);
 assert.equal(
-  ui.messages.scrollWrites,
+  messageViewport.writes,
   resistedScrollWrites,
   "streaming output must not cancel an upward gesture before its scroll event",
 );
 assert.equal(ui.jumpPresent.hidden, false);
-ui.messages._scrollTop = 790;
+messageViewport.top = 790;
 handleMessagesScroll();
 assert.equal(
   state.followPresent,
   false,
   "upward movement inside the near-bottom threshold must stay detached",
 );
-ui.messages._scrollTop = 800;
+messageViewport.top = 800;
 handleMessagesScroll();
 assert.equal(state.followPresent, true, "moving back toward the bottom resumes following");
 assert.equal(ui.jumpPresent.hidden, true);
 
-const queuedScrollWrites = ui.messages.scrollWrites;
-ui.messages._scrollTop = 790;
+const queuedScrollWrites = messageViewport.writes;
+messageViewport.top = 790;
 upsertMessage("live-agent", "agent", " before the queued scroll event", true);
 assert.equal(state.followPresent, false, "incoming output detects upward movement before scroll fires");
 assert.equal(
-  ui.messages.scrollWrites,
+  messageViewport.writes,
   queuedScrollWrites,
   "a queued upward scroll must not be overwritten by streaming output",
 );
 
-ui.messages._scrollTop = 700;
+messageViewport.top = 700;
 handleMessagesScroll();
-ui.messages._scrollTop = 790;
+messageViewport.top = 790;
 upsertMessage("live-agent", "agent", " while returning to the present", true);
 assert.equal(state.followPresent, false, "streaming does not preempt a queued downward scroll");
 handleMessagesScroll();
@@ -496,17 +323,17 @@ handleMessagesTouchEnd();
 assert.equal(state.messagesTouchY, null);
 jumpToPresent();
 
-ui.messages._scrollHeight = 1200;
-ui.messages._scrollTop = 1200 - ui.messages.clientHeight - PRESENT_THRESHOLD_PX + 1;
+messageViewport.height = 1200;
+messageViewport.top = 1200 - ui.messages.clientHeight - PRESENT_THRESHOLD_PX + 1;
 handleMessagesScroll();
 assert.equal(state.followPresent, true, "the near-bottom threshold keeps following active");
 upsertMessage("live-agent", "agent", " and more", true);
 assert.equal(ui.messages.scrollTop, ui.messages.scrollHeight, "near-bottom output follows the present");
 assert.equal(ui.jumpPresent.hidden, true);
 
-ui.messages._scrollHeight = 1400;
-ui.messages._scrollTop = 1199;
-const typingScrollWrites = ui.messages.scrollWrites;
+messageViewport.height = 1400;
+messageViewport.top = 1199;
+const typingScrollWrites = messageViewport.writes;
 ui.prompt.value = "typing at the present";
 handlePromptInput();
 assert.equal(
@@ -514,19 +341,19 @@ assert.equal(
   ui.messages.scrollHeight,
   "typing must keep followed history pinned to the present",
 );
-assert.equal(ui.messages.scrollWrites, typingScrollWrites + 1);
+assert.equal(messageViewport.writes, typingScrollWrites + 1);
 
 state.followPresent = false;
-ui.messages._scrollTop = 300;
-const readingScrollWrites = ui.messages.scrollWrites;
+messageViewport.top = 300;
+const readingScrollWrites = messageViewport.writes;
 ui.prompt.value = "typing while reading history";
 handlePromptInput();
 assert.equal(ui.messages.scrollTop, 300, "typing must preserve an older reading position");
-assert.equal(ui.messages.scrollWrites, readingScrollWrites);
+assert.equal(messageViewport.writes, readingScrollWrites);
 state.followPresent = true;
 
-ui.messages._scrollHeight = null;
-ui.messages.clientHeight = 0;
+messageViewport.height = null;
+messageViewport.clientHeight = 0;
 
 let submitCount = 0;
 let preventCount = 0;
@@ -888,7 +715,7 @@ for (const select of [
   ui.settingPermissions,
 ]) {
   assert.equal(
-    select.children.some((option) => option.textContent.includes("Inherit current thread")),
+    [...select.children].some((option) => option.textContent.includes("Inherit current thread")),
     false,
   );
 }
@@ -905,7 +732,7 @@ assert.equal(state.sidebarWidth, 320);
 assert.equal(ui.shell.style.getPropertyValue("--sidebar-width"), "320px");
 assert.equal(ui.sidebarResizer.getAttribute("aria-valuenow"), "320");
 assert.equal(ui.sidebarResizer.getAttribute("aria-valuetext"), "320 pixels");
-assert.equal(storedValues.get(SIDEBAR_WIDTH_STORAGE_KEY), "320");
+assert.equal(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY), "320");
 
 setSidebarCollapsed(true, false);
 assert.equal(state.sidebarCollapsed, true);
@@ -942,34 +769,34 @@ assert.equal(ui.sidebarToggle.title, "Collapse conversations sidebar");
 assert.equal(ui.menu.hidden, true);
 
 ui.searchChats.focus();
-const toggleFocusBeforeContentCollapse = ui.sidebarToggle.focusCount;
+const toggleFocusBeforeContentCollapse = focusCount(ui.sidebarToggle);
 setSidebarCollapsed(true, false);
 assert.equal(
-  ui.sidebarToggle.focusCount,
+  focusCount(ui.sidebarToggle),
   toggleFocusBeforeContentCollapse + 1,
   "collapsing must move focus out of the hidden conversation content",
 );
 setSidebarCollapsed(false, false);
 
 ui.sidebarResizer.focus();
-const toggleFocusBeforeResizerCollapse = ui.sidebarToggle.focusCount;
+const toggleFocusBeforeResizerCollapse = focusCount(ui.sidebarToggle);
 setSidebarCollapsed(true, false);
 assert.equal(
-  ui.sidebarToggle.focusCount,
+  focusCount(ui.sidebarToggle),
   toggleFocusBeforeResizerCollapse + 1,
   "collapsing must move focus off the hidden resize separator",
 );
 setSidebarCollapsed(false, false);
 
 setSearchOpen(true, false);
-const searchChatsFocusBeforeClose = ui.searchChats.focusCount;
+const searchChatsFocusBeforeClose = focusCount(ui.searchChats);
 setSearchOpen(false);
-assert.equal(ui.searchChats.focusCount, searchChatsFocusBeforeClose + 1);
+assert.equal(focusCount(ui.searchChats), searchChatsFocusBeforeClose + 1);
 setSidebarCollapsed(true, false);
 setSearchOpen(true, false);
-const railFocusBeforeSearchClose = ui.sidebarToggle.focusCount;
+const railFocusBeforeSearchClose = focusCount(ui.sidebarToggle);
 setSearchOpen(false);
-assert.equal(ui.sidebarToggle.focusCount, railFocusBeforeSearchClose + 1);
+assert.equal(focusCount(ui.sidebarToggle), railFocusBeforeSearchClose + 1);
 setSidebarCollapsed(false, false);
 
 let prevented = false;
@@ -984,7 +811,7 @@ assert.equal(state.sidebarWidth, MIN_SIDEBAR_WIDTH);
 resizeSidebarFromKeyboard({ key: "End", preventDefault() {} });
 assert.equal(state.sidebarWidth, MAX_SIDEBAR_WIDTH);
 
-ui.shell._left = 20;
+ui.shell.getBoundingClientRect = () => ({ left: 20 });
 let pointerPrevented = false;
 startSidebarResize({
   button: 0,
@@ -995,37 +822,37 @@ startSidebarResize({
 assert.equal(pointerPrevented, true);
 assert.equal(state.sidebarWidth, 340);
 assert.equal(ui.shell.classList.contains("sidebar-resizing"), true);
-assert.equal(ui.sidebarResizer.pointerCaptures.has(7), true);
+assert.equal(ui.sidebarResizer.hasPointerCapture(7), true);
 moveSidebarResize({ clientX: 400, pointerId: 7, preventDefault() {} });
 assert.equal(state.sidebarWidth, 380);
 finishSidebarResize({ clientX: 410, pointerId: 7, type: "pointerup" });
 assert.equal(state.sidebarWidth, 390);
 assert.equal(ui.shell.classList.contains("sidebar-resizing"), false);
-assert.equal(ui.sidebarResizer.pointerCaptures.has(7), false);
-assert.equal(storedValues.get(SIDEBAR_WIDTH_STORAGE_KEY), "390");
+assert.equal(ui.sidebarResizer.hasPointerCapture(7), false);
+assert.equal(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY), "390");
 
 startSidebarResize({ button: 0, clientX: 400, pointerId: 8, preventDefault() {} });
 cancelSidebarResize();
 assert.equal(state.sidebarResizePointerId, null);
 assert.equal(ui.shell.classList.contains("sidebar-resizing"), false);
-assert.equal(ui.sidebarResizer.pointerCaptures.has(8), false);
+assert.equal(ui.sidebarResizer.hasPointerCapture(8), false);
 
 startSidebarResize({ button: 0, clientX: 400, pointerId: 9, preventDefault() {} });
-ui.sidebarResizer.pointerCaptures.delete(9);
+ui.sidebarResizer.releasePointerCapture(9);
 handleSidebarCaptureLoss({ pointerId: 9 });
 assert.equal(state.sidebarResizePointerId, null);
 assert.equal(ui.shell.classList.contains("sidebar-resizing"), false);
 assert.equal(
-  storedValues.get(SIDEBAR_WIDTH_STORAGE_KEY),
+  localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY),
   String(state.sidebarPreferredWidth),
   "losing capture must clean up and persist the last usable width",
 );
 
 setSidebarCollapsed(true);
-assert.equal(storedValues.get(SIDEBAR_COLLAPSED_STORAGE_KEY), "true");
+assert.equal(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY), "true");
 toggleSidebar();
 assert.equal(state.sidebarCollapsed, false);
-assert.equal(storedValues.get(SIDEBAR_COLLAPSED_STORAGE_KEY), "false");
+assert.equal(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY), "false");
 
 globalThis.window.innerWidth = 1280;
 setSidebarWidth(500, true);
@@ -1035,7 +862,7 @@ globalThis.window.innerWidth = 390;
 syncSidebarBreakpoint();
 assert.equal(state.sidebarWidth, MIN_SIDEBAR_WIDTH);
 assert.equal(state.sidebarPreferredWidth, 500);
-assert.equal(storedValues.get(SIDEBAR_WIDTH_STORAGE_KEY), "500");
+assert.equal(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY), "500");
 assert.equal(ui.sidebarResizer.hidden, true);
 assert.equal(ui.sidebarToggle.hidden, true);
 assert.equal(ui.menu.hidden, false);
@@ -1049,8 +876,8 @@ assert.equal(ui.sidebarSwipeEdge.hidden, true);
 assert.equal(ui.chat.inert, true);
 assert.equal(ui.menu.getAttribute("aria-expanded"), "true");
 assert.equal(ui.menu.textContent, "Chats");
-assert.equal(ui.closeSidebar.focusCount, 1);
-const sidebarToggleFocusBeforeBreakpoint = ui.sidebarToggle.focusCount;
+assert.equal(focusCount(ui.closeSidebar), 1);
+const sidebarToggleFocusBeforeBreakpoint = focusCount(ui.sidebarToggle);
 mobileViewport = false;
 globalThis.window.innerWidth = 1280;
 syncSidebarBreakpoint();
@@ -1062,7 +889,7 @@ assert.equal(ui.chat.inert, false);
 assert.equal(state.sidebarWidth, 500);
 assert.equal(state.sidebarPreferredWidth, 500);
 assert.equal(
-  ui.sidebarToggle.focusCount,
+  focusCount(ui.sidebarToggle),
   sidebarToggleFocusBeforeBreakpoint + 1,
 );
 assert.equal(ui.sidebarToggle.hidden, false);
@@ -1075,16 +902,16 @@ assert.equal(
 setSidebarCollapsed(false, false);
 
 ui.sidebarToggle.focus();
-const menuFocusBeforeMobile = ui.menu.focusCount;
+const menuFocusBeforeMobile = focusCount(ui.menu);
 mobileViewport = true;
 globalThis.window.innerWidth = 390;
 syncSidebarBreakpoint();
-assert.equal(ui.menu.focusCount, menuFocusBeforeMobile + 1);
+assert.equal(focusCount(ui.menu), menuFocusBeforeMobile + 1);
 assert.equal(ui.sidebarResizer.hidden, true);
 setSidebarOpen(true);
 setSidebarOpen(false);
 assert.equal(ui.menu.getAttribute("aria-expanded"), "false");
-assert.equal(ui.menu.focusCount, menuFocusBeforeMobile + 2);
+assert.equal(focusCount(ui.menu), menuFocusBeforeMobile + 2);
 
 startSidebarSwipe({
   button: 0,
@@ -1097,7 +924,7 @@ assert.equal(state.sidebarSwipePointerId, null, "secondary pointers must be igno
 
 startSidebarSwipe({ button: 0, clientX: 4, clientY: 100, pointerId: 20 });
 assert.equal(state.sidebarSwipePointerId, 20);
-assert.equal(ui.sidebarSwipeEdge.pointerCaptures.has(20), true);
+assert.equal(ui.sidebarSwipeEdge.hasPointerCapture(20), true);
 finishSidebarSwipe({
   clientX: 4 + SIDEBAR_SWIPE_OPEN_DISTANCE - 1,
   clientY: 100,
@@ -1106,7 +933,7 @@ finishSidebarSwipe({
 });
 assert.equal(state.sidebarOpen, false, "a short edge drag must not open the drawer");
 assert.equal(state.sidebarSwipePointerId, null);
-assert.equal(ui.sidebarSwipeEdge.pointerCaptures.has(20), false);
+assert.equal(ui.sidebarSwipeEdge.hasPointerCapture(20), false);
 
 startSidebarSwipe({ button: 0, clientX: 4, clientY: 100, pointerId: 21 });
 finishSidebarSwipe({
@@ -1121,7 +948,7 @@ assert.equal(
   "a mostly vertical edge gesture must not open the drawer",
 );
 
-const closeFocusBeforeSwipe = ui.closeSidebar.focusCount;
+const closeFocusBeforeSwipe = focusCount(ui.closeSidebar);
 let swipePrevented = false;
 startSidebarSwipe({ button: 0, clientX: 4, clientY: 100, pointerId: 22 });
 moveSidebarSwipe({
@@ -1170,15 +997,15 @@ finishSidebarSwipe({
 });
 assert.equal(state.sidebarOpen, true, "release should settle a completed swipe open");
 assert.equal(state.sidebarSwipePointerId, null);
-assert.equal(ui.sidebarSwipeEdge.pointerCaptures.has(22), false);
+assert.equal(ui.sidebarSwipeEdge.hasPointerCapture(22), false);
 assert.equal(ui.sidebarSwipeEdge.hidden, true);
 assert.equal(ui.sidebar.classList.contains("sidebar-swiping"), false);
 assert.equal(ui.sidebarScrim.classList.contains("sidebar-swiping"), false);
 assert.equal(ui.sidebar.style.getPropertyValue("--sidebar-swipe-translate"), "");
 assert.equal(ui.sidebarScrim.style.getPropertyValue("--sidebar-swipe-opacity"), "");
-assert.equal(ui.closeSidebar.focusCount, closeFocusBeforeSwipe + 1);
+assert.equal(focusCount(ui.closeSidebar), closeFocusBeforeSwipe + 1);
 
-const menuFocusBeforeScrimClick = ui.menu.focusCount;
+const menuFocusBeforeScrimClick = focusCount(ui.menu);
 let scrimClickPrevented = false;
 handleSidebarScrimPointerDown({
   button: 0,
@@ -1189,10 +1016,10 @@ assert.equal(scrimClickPrevented, true);
 assert.equal(state.sidebarOpen, false, "the first outside pointerdown should close it");
 assert.equal(ui.sidebarScrim.hidden, true);
 assert.equal(ui.sidebarSwipeEdge.hidden, false);
-assert.equal(ui.menu.focusCount, menuFocusBeforeScrimClick + 1);
+assert.equal(focusCount(ui.menu), menuFocusBeforeScrimClick + 1);
 handleSidebarScrimClick({ preventDefault() {} });
 assert.equal(
-  ui.menu.focusCount,
+  focusCount(ui.menu),
   menuFocusBeforeScrimClick + 1,
   "a follow-up click must not trigger a second close",
 );
@@ -1215,19 +1042,19 @@ assert.equal(ui.sidebar.classList.contains("sidebar-swiping"), false);
 assert.equal(ui.sidebarScrim.hidden, true);
 
 startSidebarSwipe({ button: 0, clientX: 4, clientY: 100, pointerId: 24 });
-ui.sidebarSwipeEdge.pointerCaptures.delete(24);
+ui.sidebarSwipeEdge.releasePointerCapture(24);
 handleSidebarSwipeCaptureLoss({ pointerId: 24 });
 assert.equal(state.sidebarSwipePointerId, null);
 cancelSidebarSwipe();
 
 ui.searchMenu.focus();
 state.searchOpen = true;
-const railFocusBeforeSearchBreakpoint = ui.sidebarToggle.focusCount;
+const railFocusBeforeSearchBreakpoint = focusCount(ui.sidebarToggle);
 mobileViewport = false;
 globalThis.window.innerWidth = 1280;
 syncSidebarBreakpoint();
 assert.equal(
-  ui.sidebarToggle.focusCount,
+  focusCount(ui.sidebarToggle),
   railFocusBeforeSearchBreakpoint + 1,
   "a mobile Chats control must not retain focus when it becomes hidden",
 );
@@ -1240,12 +1067,12 @@ setSidebarOpen(true, false);
 setPreferencesOpen(true, false);
 ui.preferencesClose.focus();
 setSidebarOpen(false, false);
-const menuFocusBeforeMobilePreferencesClose = ui.menu.focusCount;
-const preferencesFocusBeforeMobileClose = ui.preferencesToggle.focusCount;
+const menuFocusBeforeMobilePreferencesClose = focusCount(ui.menu);
+const preferencesFocusBeforeMobileClose = focusCount(ui.preferencesToggle);
 setPreferencesOpen(false);
-assert.equal(ui.menu.focusCount, menuFocusBeforeMobilePreferencesClose + 1);
+assert.equal(focusCount(ui.menu), menuFocusBeforeMobilePreferencesClose + 1);
 assert.equal(
-  ui.preferencesToggle.focusCount,
+  focusCount(ui.preferencesToggle),
   preferencesFocusBeforeMobileClose,
   "closing settings must not restore focus inside a closed mobile drawer",
 );
@@ -1256,8 +1083,8 @@ syncSidebarBreakpoint();
 assert.equal(state.sidebarWidth, 500);
 assert.equal(ui.shell.classList.contains("sidebar-collapsed"), false);
 
-storedValues.set(SIDEBAR_WIDTH_STORAGE_KEY, "not-a-width");
-storedValues.set(SIDEBAR_COLLAPSED_STORAGE_KEY, "true");
+localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, "not-a-width");
+localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, "true");
 initializeSidebarLayout();
 assert.equal(state.sidebarWidth, DEFAULT_SIDEBAR_WIDTH);
 assert.equal(state.sidebarCollapsed, true);
@@ -1267,12 +1094,12 @@ state.ready = true;
 state.threadId = "thread-a";
 ui.prompt.value = "";
 state.attachments = [];
-ui.messages._scrollHeight = 1000;
-ui.messages.clientHeight = 200;
-ui.messages._scrollTop = 240;
+messageViewport.height = 1000;
+messageViewport.clientHeight = 200;
+messageViewport.top = 240;
 handleMessagesScroll();
 const thinkingScrollTop = ui.messages.scrollTop;
-const thinkingScrollWrites = ui.messages.scrollWrites;
+const thinkingScrollWrites = messageViewport.writes;
 setThreadActivity("thread-a", "turn-a");
 assert.equal(selectedThreadBusy(), true, "selected active thread should be busy");
 assert.equal(selectedTurnId(), "turn-a");
@@ -1288,12 +1115,12 @@ handlePromptInput();
 assert.equal(ui.send.textContent, "Stop", "whitespace is not a reply");
 assert.equal(ui.thinkingIndicator.hidden, false, "selected active turn should show thinking");
 assert.equal(ui.messages.getAttribute("aria-busy"), "true");
-assert.equal(ui.messages.children.at(-1), ui.thinkingIndicator, "visible indicator stays last");
+assert.equal(ui.messages.lastElementChild, ui.thinkingIndicator, "visible indicator stays last");
 assert.equal(ui.messages.scrollTop, thinkingScrollTop, "thinking must not pull a reader to the bottom");
-assert.equal(ui.messages.scrollWrites, thinkingScrollWrites, "thinking must not write scrollTop while reading history");
+assert.equal(messageViewport.writes, thinkingScrollWrites, "thinking must not write scrollTop while reading history");
 assert.equal(ui.jumpPresent.hidden, false, "off-screen thinking should offer Jump to present");
 upsertMessage("busy-agent", "agent", "response started");
-assert.equal(ui.messages.children.at(-1), ui.thinkingIndicator, "streaming output stays before thinking");
+assert.equal(ui.messages.lastElementChild, ui.thinkingIndicator, "streaming output stays before thinking");
 assert.equal(ui.messages.scrollTop, thinkingScrollTop, "streaming beside thinking preserves reader position");
 
 setThreadActivity("thread-a", null);
@@ -1314,8 +1141,8 @@ assert.equal(ui.send.disabled, false, "an idle selected thread can start a turn"
 assert.equal(ui.send.textContent, "Send", "Stop only targets the selected active thread");
 assert.equal(ui.thinkingIndicator.hidden, true, "background work must not mark the selected thread as thinking");
 assert.equal(ui.messages.getAttribute("aria-busy"), "false");
-ui.messages._scrollHeight = null;
-ui.messages.clientHeight = 0;
+messageViewport.height = null;
+messageViewport.clientHeight = 0;
 renderThinkingIndicator();
 
 const unsortedThreads = [
@@ -1370,16 +1197,14 @@ assert.equal(threadIdFromSearch("?thread=%20%20"), null);
 assert.equal(ui.threads.children[0].classList.contains("running"), true);
 assert.equal(ui.threads.children[0].getAttribute("aria-busy"), "true");
 assert.equal(ui.threads.children[1].classList.contains("active"), true);
-assert.equal(ui.threads.children[0].tagName, "a", "sidebar chats should be browser links");
+assert.equal(ui.threads.children[0].localName, "a", "sidebar chats should be browser links");
 assert.equal(ui.threads.children[0].getAttribute("href"), "/?thread=thread-a");
 assert.equal(ui.threads.children[1].getAttribute("aria-current"), "page");
-let modifiedClickPrevented = false;
-ui.threads.children[0].listeners.get("click")({
-  button: 0,
-  ctrlKey: true,
-  preventDefault() { modifiedClickPrevented = true; },
+const modifiedClick = Object.assign(new window.Event("click", { cancelable: true }), {
+  button: 0, ctrlKey: true,
 });
-assert.equal(modifiedClickPrevented, false, "modified clicks must retain native new-window behavior");
+ui.threads.children[0].dispatchEvent(modifiedClick);
+assert.equal(modifiedClick.defaultPrevented, false, "modified clicks must retain native new-window behavior");
 
 state.ready = false;
 state.threadId = "thread-b";
@@ -1802,9 +1627,9 @@ assert.deepEqual(
 state.threadId = "reconcile-thread";
 renderThreadHistory(reconciled.thread);
 assert.ok(
-  ui.messages.children.indexOf(
+  [...ui.messages.children].indexOf(
     state.items.get(renderedItemKey("reconcile-user", "reconcile-thread", "reconcile-turn")).node,
-  ) < ui.messages.children.indexOf(
+  ) < [...ui.messages.children].indexOf(
     state.items.get(renderedItemKey("reconcile-command", "reconcile-thread", "reconcile-turn")).node,
   ),
   "the repaired user message should render before the command that followed it",
@@ -1982,8 +1807,8 @@ assert.equal(state.items.get(oldAgentKey).body.textContent, "old response");
 assert.equal(state.items.get(newUserKey).body.textContent, "new prompt");
 assert.equal(state.items.get(newAgentKey).body.textContent, "new response");
 assert.ok(
-  ui.messages.children.indexOf(state.items.get(oldAgentKey).node)
-    < ui.messages.children.indexOf(state.items.get(newUserKey).node),
+  [...ui.messages.children].indexOf(state.items.get(oldAgentKey).node)
+    < [...ui.messages.children].indexOf(state.items.get(newUserKey).node),
   "a reused item ID must not move a later turn into an older node's position",
 );
 
@@ -1997,7 +1822,7 @@ assert.equal(state.searchOpen, true);
 assert.equal(ui.searchView.hidden, false);
 assert.equal(ui.chat.classList.contains("search-active"), true);
 assert.equal(ui.searchChats.getAttribute("aria-pressed"), "true");
-assert.equal(ui.searchQuery.focusCount, 1);
+assert.equal(focusCount(ui.searchQuery), 1);
 setSearchOpen(false, false);
 assert.equal(ui.searchView.hidden, true);
 assert.equal(ui.chat.classList.contains("search-active"), false);
@@ -2058,23 +1883,21 @@ assert.equal(ui.searchResults.children.length, 1);
 assert.match(ui.searchStatus.textContent, /Showing 1 of 3 matching conversations/);
 assert.match(ui.searchStatus.textContent, /2 conversations could not be searched/);
 const searchResultLink = ui.searchResults.children[0].children[0];
-assert.equal(searchResultLink.tagName, "a", "search results should be browser links");
+assert.equal(searchResultLink.localName, "a", "search results should be browser links");
 assert.equal(searchResultLink.getAttribute("href"), "/?thread=search-thread");
 assert.equal(searchResultLink.getAttribute("aria-disabled"), null);
 assert.equal(searchResultLink.children[0].children[0].textContent, "Search result title");
 assert.equal(searchResultLink.children[0].children.length, 1, "search results should not show a per-message role");
 const highlightedSnippet = searchResultLink.children[1];
-const highlight = highlightedSnippet.children.find((child) => child.tagName === "mark");
+const highlight = highlightedSnippet.querySelector("mark");
 assert.equal(highlight.textContent, "Straße", "search highlighting should safely preserve Unicode matches");
-assert.equal(searchResultLink.children[2].children[0].tagName, "time");
-let searchModifiedClickPrevented = false;
-searchResultLink.listeners.get("click")({
-  button: 0,
-  ctrlKey: true,
-  preventDefault() { searchModifiedClickPrevented = true; },
+assert.equal(searchResultLink.children[2].children[0].localName, "time");
+const searchModifiedClick = Object.assign(new window.Event("click", { cancelable: true }), {
+  button: 0, ctrlKey: true,
 });
+searchResultLink.dispatchEvent(searchModifiedClick);
 assert.equal(
-  searchModifiedClickPrevented,
+  searchModifiedClick.defaultPrevented,
   false,
   "modified search-result clicks must retain native new-window behavior",
 );
@@ -2108,14 +1931,16 @@ const threadDateFallback = ui.searchResults.children[1].children[0].children[2].
 assert.equal(threadDateFallback.textContent, " · conversation date");
 assert.match(threadDateFallback.title, /conversation's timestamp/);
 
-const originalFetch = globalThis.fetch;
+const literalTitle = '<img src="invalid" onerror="alert(1)">';
+const literalSnippet = "needle <script>alert(1)</script>";
+renderSearchResults(normalizeSearchResponse({
+  results: [{ threadId: "literal", title: literalTitle, snippet: literalSnippet }],
+}), "needle");
+assert.equal(ui.searchResults.querySelector(".search-result-title").textContent, literalTitle);
+assert.equal(ui.searchResults.querySelector(".search-result-snippet").textContent, literalSnippet);
+assert.equal(ui.searchResults.querySelector("img, script"), null, "result data must remain text inside the template");
 
-function descendants(node, predicate) {
-  return node.children.flatMap((child) => [
-    ...(predicate(child) ? [child] : []),
-    ...descendants(child, predicate),
-  ]);
-}
+const originalFetch = globalThis.fetch;
 
 // Minimal fixtures from the real asynchronous-question protocol. These are
 // agentMessage items, not item/tool/requestUserInput server requests.
@@ -2156,7 +1981,7 @@ function assertRenderedItemOrder(threadId, turnId, items) {
   const positions = items.map((item) => {
     const entry = state.items.get(renderedItemKey(item.id, threadId, turnId));
     assert.ok(entry, `${item.id} should be rendered`);
-    return ui.messages.children.indexOf(entry.node);
+    return [...ui.messages.children].indexOf(entry.node);
   });
   assert.ok(positions.every((position, index) => index === 0 || positions[index - 1] < position),
     `conversation items must stay chronological: ${items.map((item) => item.id).join(" → ")}`);
@@ -2653,7 +2478,7 @@ async function checkQuestionsInComposer(rpcMessages) {
   assert.equal(ui.requests.children.length, 0);
   const localReply = [...state.items.values()].find((item) => item.text === "Deploy tomorrow after the recording finishes");
   assert.ok(localReply);
-  assert.ok(ui.messages.children.indexOf(prompt.node) < ui.messages.children.indexOf(localReply.node));
+  assert.ok([...ui.messages.children].indexOf(prompt.node) < [...ui.messages.children].indexOf(localReply.node));
 
   const several = {
     ...question, id: "several-questions", params: {
@@ -2736,8 +2561,8 @@ async function checkQuestionsInComposer(rpcMessages) {
   } });
   const approval = state.requestCards.get("approval-stays");
   assert.equal(approval.parentNode, ui.requests);
-  const decline = descendants(approval, (node) => node.tagName === "button" && node.textContent === "Decline")[0];
-  decline.listeners.get("click")();
+  const decline = [...approval.querySelectorAll("button")].find((button) => button.textContent === "Decline");
+  decline.click();
   assert.deepEqual(responseTo("approval-stays").result, { decision: "decline" });
   assert.equal(ui.requests.children.length, 0);
 }
@@ -2793,6 +2618,11 @@ async function checkStreamingSearch() {
 
   const clearedSearch = performSearch();
   clearSearch();
+  assert.deepEqual(
+    [ui.searchQuery.value, ui.searchFrom.value, ui.searchTo.value, ui.searchSort.value],
+    ["", "", "", "newest"],
+    "Clear restores the actual HTML form defaults",
+  );
   await send(requests[2], progress("after-clear", true));
   await clearedSearch;
   assert.equal(state.searchResults.length, 0);
@@ -2906,4 +2736,4 @@ performSearch({ preventDefault() {} }).then(async () => {
   globalThis.fetch = originalFetch;
   console.error(error);
   process.exitCode = 1;
-});
+}).finally(() => window.close());
