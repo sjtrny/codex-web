@@ -2,6 +2,9 @@
   "name": "codex-web-frontend",
   "version": "0.9.3",
   "private": true,
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
+  },
   "scripts": {
     "build": "esbuild frontend/markdown.js --bundle --minify --format=iife --target=es2020 --outdir=static/vendor --entry-names=markdown --asset-names=fonts/[name]-[hash] --loader:.woff2=file --loader:.woff=file --loader:.ttf=file",
     "test": "npm run test:markdown && npm run test:copy && npm run test:links && npm run test:theme && npm run test:render",
@@ -21,6 +24,7 @@
     "marked-katex-extension": "5.1.10"
   },
   "devDependencies": {
-    "esbuild": "0.28.2"
+    "esbuild": "0.28.2",
+    "jsdom": "29.1.1"
   }
 }

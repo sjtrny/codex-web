@@ -204,3 +204,19 @@ web service if historical downloads and previews should remain available.
 
 The UI is unauthenticated and listens on all interfaces. Keep it behind a VPN
 or firewall.
+
+## Development
+
+Use Python 3.12 and Node 22 (22.13 or later). CI uses these release lines.
+Other supported Node versions are listed in `package.json`.
+
+```bash
+npm ci
+npm test
+npm run build
+.venv/bin/python -m unittest discover --start-directory tests --pattern "test_*.py"
+```
+
+Install Python dependencies in a virtual environment as shown above. The DOM
+tests use jsdom and the real page markup; the browser checks described above cover
+layout, focus, and interaction in Chromium.

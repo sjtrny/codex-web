@@ -14,7 +14,8 @@ import re
 import shutil
 import stat
 import uuid
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import date, datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote
@@ -24,6 +25,7 @@ from aiohttp import (
     ClientError,
     ClientSession,
     ClientTimeout,
+    ClientWebSocketResponse,
     UnixConnector,
     WSMsgType,
     web,
@@ -209,12 +211,9 @@ def workspace_file_disposition(path: Path, force_download: bool) -> str:
 
 
 def safe_upload_name(filename: str) -> str:
-    basename = unquote(filename).replace("\\", "/").rsplit("/", 1)[-1]
-    suffix = re.sub(r"[^A-Za-z0-9.]", "", Path(basename).suffix)[:16]
-    stem = (
-        basename[: -len(Path(basename).suffix)] if Path(basename).suffix else basename
-    )
-    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")[:100]
+    basename = Path(unquote(filename).replace("\\", "/").rsplit("/", 1)[-1])
+    suffix = re.sub(r"[^A-Za-z0-9.]", "", basename.suffix)[:16]
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", basename.stem).strip("._-")[:100]
     stem = re.sub(r"\.{2,}", "_", stem)
     return f"{stem or 'upload'}{suffix}"
 
@@ -322,14 +321,7 @@ class UploadRejected(Exception):
         self.status = status
 
 
-@web.middleware
-async def security_headers(request: web.Request, handler):
-    response = await handler(request)
-    set_security_headers(response)
-    return response
-
-
-def set_security_headers(response: web.StreamResponse) -> None:
+async def security_headers(_: web.Request, response: web.StreamResponse) -> None:
     response.headers.update(
         {
             "Cache-Control": "no-store",
@@ -558,30 +550,23 @@ def host_image_path(raw_path: str) -> str:
 
 async def host_image(request: web.Request) -> web.Response:
     path = host_image_path(request.query.get("path", ""))
-    session: ClientSession | None = None
-    upstream = None
     try:
-        session, upstream, _ = await connect_backend()
-        await backend_rpc(
-            upstream,
-            1,
-            "initialize",
-            {
-                "clientInfo": {
-                    "name": "codex_web_host_image",
-                    "title": "Codex Web Host Image",
-                    "version": APP_VERSION,
+        async with connect_backend() as (upstream, _):
+            await backend_rpc(
+                upstream,
+                1,
+                "initialize",
+                {
+                    "clientInfo": {
+                        "name": "codex_web_host_image",
+                        "title": "Codex Web Host Image",
+                        "version": APP_VERSION,
+                    },
+                    "capabilities": {"experimentalApi": True},
                 },
-                "capabilities": {"experimentalApi": True},
-            },
-        )
-        await upstream.send_str(
-            json.dumps(
-                {"method": "initialized", "params": {}},
-                separators=(",", ":"),
             )
-        )
-        result = await backend_rpc(upstream, 2, "fs/readFile", {"path": path})
+            await upstream.send_json({"method": "initialized", "params": {}})
+            result = await backend_rpc(upstream, 2, "fs/readFile", {"path": path})
     except BackendRPCError as exc:
         if exc.code == -32601:
             raise web.HTTPNotImplemented(
@@ -594,14 +579,6 @@ async def host_image(request: web.Request) -> web.Response:
         raise web.HTTPGatewayTimeout(text="Host image read timed out") from exc
     except (BackendProtocolError, ClientError, OSError) as exc:
         raise web.HTTPBadGateway(text="Could not read the host image") from exc
-    finally:
-        if upstream is not None and not upstream.closed:
-            try:
-                await upstream.close()
-            except (ClientError, OSError, RuntimeError):
-                pass
-        if session is not None:
-            await session.close()
 
     if not isinstance(result, dict) or not isinstance(result.get("dataBase64"), str):
         raise web.HTTPBadGateway(text="Codex returned an invalid host image")
@@ -639,7 +616,7 @@ async def host_image(request: web.Request) -> web.Response:
 
 def socket_is_ready(path: str) -> bool:
     try:
-        return stat.S_ISSOCK(os.stat(path).st_mode)
+        return Path(path).is_socket()
     except OSError:
         return False
 
@@ -657,7 +634,11 @@ async def health(_: web.Request) -> web.Response:
     )
 
 
-async def connect_backend() -> tuple[ClientSession, object, str]:
+@asynccontextmanager
+async def connect_backend(
+    *, close_timeout: float = 10,
+) -> AsyncIterator[tuple[ClientWebSocketResponse, str]]:
+    """Own the HTTP session and WebSocket for one backend connection."""
     websocket_url = env("CODEX_APP_SERVER_URL")
     token = env("CODEX_APP_SERVER_TOKEN")
     headers = {"Authorization": f"Bearer {token}"} if token else None
@@ -666,20 +647,18 @@ async def connect_backend() -> tuple[ClientSession, object, str]:
     if websocket_url:
         if not websocket_url.startswith(("ws://", "wss://")):
             raise RuntimeError("CODEX_APP_SERVER_URL must begin with ws:// or wss://")
-        session = ClientSession(timeout=timeout)
+        connector = None
         transport = "websocket"
         target = websocket_url
     else:
         socket_path = env("CODEX_APP_SERVER_SOCKET", "/run/codex/app.sock")
         if not socket_is_ready(socket_path):
             raise RuntimeError(f"Codex socket is not ready: {socket_path}")
-        session = ClientSession(
-            connector=UnixConnector(path=socket_path), timeout=timeout
-        )
+        connector = UnixConnector(path=socket_path)
         transport = "unix"
         target = "http://codex-app-server/"
 
-    try:
+    async with ClientSession(connector=connector, timeout=timeout) as session:
         upstream = await session.ws_connect(
             target,
             headers=headers,
@@ -687,26 +666,24 @@ async def connect_backend() -> tuple[ClientSession, object, str]:
             max_msg_size=MAX_MESSAGE_BYTES,
             compress=0,
         )
-    except BaseException:
-        await session.close()
-        raise
-
-    return session, upstream, transport
+        try:
+            yield upstream, transport
+        finally:
+            # Bound the whole close, including a blocked write. aiohttp's
+            # ws_close timeout only bounds waiting for the peer's reply.
+            with suppress(TimeoutError, ClientError, OSError, RuntimeError):
+                async with asyncio.timeout(close_timeout):
+                    await upstream.close()
 
 
 async def backend_rpc(
-    upstream: object,
+    upstream: ClientWebSocketResponse,
     request_id: int,
     method: str,
     params: dict[str, object],
     timeout_seconds: float = SEARCH_RPC_TIMEOUT_SECONDS,
 ) -> object:
-    await upstream.send_str(
-        json.dumps(
-            {"id": request_id, "method": method, "params": params},
-            separators=(",", ":"),
-        )
-    )
+    await upstream.send_json({"id": request_id, "method": method, "params": params})
     if timeout_seconds <= 0:
         raise TimeoutError
     async with asyncio.timeout(timeout_seconds):
@@ -714,7 +691,7 @@ async def backend_rpc(
             message = await upstream.receive()
             if message.type is WSMsgType.TEXT:
                 try:
-                    payload = json.loads(message.data)
+                    payload = message.json()
                 except json.JSONDecodeError as exc:
                     raise BackendProtocolError(
                         "Codex backend returned invalid JSON"
@@ -958,17 +935,20 @@ def thread_message_matches(
             sequence += 1
 
 
+def search_match_order(match: dict[str, object], sort_direction: str) -> tuple:
+    timestamp = match["_timestamp"]
+    return (
+        -timestamp if sort_direction == "desc" else timestamp,
+        match["_sequence"],
+    )
+
+
 def trim_search_matches(
     matches: list[dict[str, object]],
     sort_direction: str,
     limit: int,
 ) -> None:
-    matches.sort(
-        key=lambda result: (
-            -result["_timestamp"] if sort_direction == "desc" else result["_timestamp"],
-            result["_sequence"],
-        )
-    )
+    matches.sort(key=lambda match: search_match_order(match, sort_direction))
     del matches[limit:]
 
 
@@ -1023,7 +1003,7 @@ async def search_backend_history(
 ) -> tuple[list[dict[str, object]], int, int, bool]:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + SEARCH_TIMEOUT_SECONDS
-    session: ClientSession | None = None
+    connections = AsyncExitStack()
     upstream = None
     next_request_id = 0
 
@@ -1043,53 +1023,32 @@ async def search_backend_history(
             min(SEARCH_RPC_TIMEOUT_SECONDS, remaining),
         )
 
-    async def close_connection() -> None:
-        nonlocal session, upstream
-        closing_upstream = upstream
-        closing_session = session
-        upstream = None
-        session = None
-        if closing_upstream is not None and not closing_upstream.closed:
-            try:
-                async with asyncio.timeout(1):
-                    await closing_upstream.close()
-            except (TimeoutError, ClientError, OSError, RuntimeError):
-                pass
-        if closing_session is not None:
-            await closing_session.close()
-
     async def connect_search_backend() -> None:
-        nonlocal session, upstream, next_request_id
-        await close_connection()
+        nonlocal upstream, next_request_id
+        await connections.aclose()
+        upstream = None
         remaining = deadline - loop.time()
         if remaining <= 0:
             raise TimeoutError
         async with asyncio.timeout(remaining):
-            session, upstream, _ = await connect_backend()
+            upstream, _ = await connections.enter_async_context(
+                connect_backend(close_timeout=1)
+            )
         next_request_id = 0
-        try:
-            await rpc(
-                "initialize",
-                {
-                    "clientInfo": {
-                        "name": "codex_web_search",
-                        "title": "Codex Web Search",
-                        "version": APP_VERSION,
-                    },
-                    "capabilities": {"experimentalApi": True},
+        await rpc(
+            "initialize",
+            {
+                "clientInfo": {
+                    "name": "codex_web_search",
+                    "title": "Codex Web Search",
+                    "version": APP_VERSION,
                 },
-            )
-            await upstream.send_str(
-                json.dumps(
-                    {"method": "initialized", "params": {}},
-                    separators=(",", ":"),
-                )
-            )
-        except BaseException:
-            await close_connection()
-            raise
+                "capabilities": {"experimentalApi": True},
+            },
+        )
+        await upstream.send_json({"method": "initialized", "params": {}})
 
-    try:
+    async with connections:
         await connect_search_backend()
         threads = await list_search_threads(rpc)
         thread_ids = [
@@ -1177,23 +1136,17 @@ async def search_backend_history(
                     skipped_threads += remaining_threads
                     break
                 continue
-            conversation_matches: list[dict[str, object]] = []
-            for match in thread_message_matches(
-                response["thread"],
-                query,
-                from_date,
-                to_date,
-                filter_zone,
-                0,
-            ):
-                conversation_matches.append(match)
-                trim_search_matches(conversation_matches, sort_direction, 1)
-            if not conversation_matches:
-                continue
-
             # Keep the earliest or latest matching message, according to the
             # requested ordering, so each conversation appears only once.
-            match = conversation_matches[0]
+            match = min(
+                thread_message_matches(
+                    response["thread"], query, from_date, to_date, filter_zone, 0
+                ),
+                key=lambda match: search_match_order(match, sort_direction),
+                default=None,
+            )
+            if match is None:
+                continue
             match["_sequence"] = matched_count
             matched_count += 1
             matches.append(match)
@@ -1203,8 +1156,6 @@ async def search_backend_history(
             result.pop("_timestamp", None)
             result.pop("_sequence", None)
         return matches, matched_count, skipped_threads, timed_out
-    finally:
-        await close_connection()
 
 
 async def search_chat_history(request: web.Request) -> web.StreamResponse:
@@ -1268,9 +1219,6 @@ async def search_chat_history(request: web.Request) -> web.StreamResponse:
                     "X-Accel-Buffering": "no",
                 }
             )
-            # Streaming headers must be set before prepare(), not afterwards
-            # when the middleware receives the finished response.
-            set_security_headers(stream)
             await stream.prepare(request)
         await stream.write((json.dumps(payload, separators=(",", ":")) + "\n").encode())
 
@@ -1345,29 +1293,17 @@ def inject_codex_web_instructions(payload: dict[str, object]) -> dict[str, objec
     return rewritten
 
 
-async def websocket_proxy(request: web.Request) -> web.WebSocketResponse:
-    browser = web.WebSocketResponse(
-        heartbeat=30,
-        max_msg_size=MAX_MESSAGE_BYTES,
-        compress=False,
-    )
-    await browser.prepare(request)
-
-    try:
-        session, upstream, transport = await connect_backend()
-    except (ClientError, OSError, RuntimeError, asyncio.TimeoutError) as exc:
-        LOG.warning("backend connection failed: %s", exc)
-        await browser.send_str(proxy_notice("codex-web/error", message=str(exc)))
-        await browser.close(code=1011, message=b"Codex backend unavailable")
-        return browser
-
-    await browser.send_str(proxy_notice("codex-web/connected", transport=transport))
+async def relay_websockets(
+    browser: web.WebSocketResponse,
+    upstream: ClientWebSocketResponse,
+) -> None:
+    """Relay until either peer disconnects, then stop both message readers."""
 
     async def browser_to_backend() -> None:
         async for message in browser:
             if message.type is WSMsgType.TEXT:
                 try:
-                    payload = json.loads(message.data)
+                    payload = message.json()
                 except json.JSONDecodeError:
                     await browser.send_str(
                         proxy_notice(
@@ -1387,9 +1323,7 @@ async def websocket_proxy(request: web.Request) -> web.WebSocketResponse:
                 if rewritten is payload:
                     await upstream.send_str(message.data)
                 else:
-                    await upstream.send_str(
-                        json.dumps(rewritten, separators=(",", ":"))
-                    )
+                    await upstream.send_json(rewritten)
             elif message.type in {WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR}:
                 break
 
@@ -1407,13 +1341,30 @@ async def websocket_proxy(request: web.Request) -> web.WebSocketResponse:
         asyncio.create_task(backend_to_browser()),
     }
     try:
-        _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in pending:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def websocket_proxy(request: web.Request) -> web.WebSocketResponse:
+    browser = web.WebSocketResponse(
+        heartbeat=30,
+        max_msg_size=MAX_MESSAGE_BYTES,
+        compress=False,
+    )
+    await browser.prepare(request)
+
+    try:
+        async with connect_backend() as (upstream, transport):
+            await browser.send_str(proxy_notice("codex-web/connected", transport=transport))
+            await relay_websockets(browser, upstream)
+    except (ClientError, OSError, RuntimeError, TimeoutError) as exc:
+        LOG.warning("backend connection failed: %s", exc)
+        await browser.send_str(proxy_notice("codex-web/error", message=str(exc)))
+        await browser.close(code=1011, message=b"Codex backend unavailable")
     finally:
-        await upstream.close()
-        await session.close()
         await browser.close()
 
     return browser
@@ -1422,9 +1373,9 @@ async def websocket_proxy(request: web.Request) -> web.WebSocketResponse:
 def create_app() -> web.Application:
     _, max_upload_request_bytes, _ = upload_limits()
     application = web.Application(
-        middlewares=[security_headers],
         client_max_size=max(MAX_MESSAGE_BYTES, max_upload_request_bytes),
     )
+    application.on_response_prepare.append(security_headers)
     application.add_routes(
         [
             web.get("/", index),
