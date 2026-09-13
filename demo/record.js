@@ -7,39 +7,17 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
-
-const pty = require("node-pty");
-const { chromium } = require("playwright");
+const { setTimeout: delay } = require("node:timers/promises");
+const { parseArgs } = require("node:util");
 
 const VIEWPORT = { width: 780, height: 600 };
 const DEFAULT_PROMPT = "Reply with exactly: Synced in both.";
 const THEME_KEY = "codex-web-theme-v1";
 
-function parseArgs(argv) {
-  const options = {};
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index];
-    if (argument === "--prompt" || argument === "--output") {
-      if (!argv[index + 1]) throw new Error(`${argument} requires a value.`);
-      options[argument.slice(2)] = argv[index + 1];
-      index += 1;
-    } else if (argument === "--help" || argument === "-h") {
-      options.help = true;
-    } else {
-      throw new Error(`Unknown option: ${argument}`);
-    }
-  }
-  return options;
-}
-
 function usage() {
   console.log(`Usage: ./record.sh [--prompt TEXT] [--output PATH]
 
 Environment: DEMO_PROMPT, DEMO_OUTPUT, DEMO_CODEX_AUTH, CODEX_BIN`);
-}
-
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function mkdir(directory, mode = 0o700) {
@@ -177,12 +155,11 @@ async function startAssetServer() {
     }
     response.writeHead(404).end();
   });
-  const port = await freePort();
   await new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(port, "127.0.0.1", resolve);
+    server.listen(0, "127.0.0.1", resolve);
   });
-  return { server, url: `http://127.0.0.1:${port}` };
+  return { server, url: `http://127.0.0.1:${server.address().port}` };
 }
 
 async function closeServer(server) {
@@ -203,7 +180,16 @@ async function screenshot(page, session, destination) {
 }
 
 async function run() {
-  const options = parseArgs(process.argv.slice(2));
+  const { values: options } = parseArgs({
+    options: {
+      prompt: { type: "string" },
+      output: { type: "string" },
+      help: { type: "boolean", short: "h" },
+    },
+  });
+  for (const name of ["prompt", "output"]) {
+    if (options[name] === "") throw new Error(`--${name} requires a value.`);
+  }
   if (options.help) {
     usage();
     return;
@@ -214,6 +200,8 @@ async function run() {
   const output = path.resolve(options.output || process.env.DEMO_OUTPUT || path.join(repoRoot, "docs", "sync-demo.gif"));
   if (!prompt.trim() || /[\r\n]/.test(prompt)) throw new Error("The demo prompt must be one non-empty line.");
 
+  const pty = require("node-pty");
+  const { chromium } = require("playwright");
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-demo-"));
   const temporaryHome = path.join(temporaryRoot, "home");
   const codexHome = path.join(temporaryRoot, "codex-home");

@@ -96,6 +96,7 @@ const ui = {
   searchSubmit: el("search-submit"),
   searchStatus: el("search-status"),
   searchResults: el("search-results"),
+  searchResultTemplate: el("search-result-template"),
   preferencesToggle: el("preferences-toggle"),
   preferencesDialog: el("preferences-dialog"),
   preferencesClose: el("preferences-close"),
@@ -1092,9 +1093,7 @@ function defaultChatSettingOption(field) {
 function fillSelect(select, options, selectedValue) {
   select.replaceChildren();
   for (const entry of options) {
-    const option = document.createElement("option");
-    option.value = entry.value;
-    option.textContent = entry.label;
+    const option = new Option(entry.label, entry.value);
     option.disabled = Boolean(entry.disabled);
     if (entry.description) option.title = entry.description;
     select.append(option);
@@ -1206,26 +1205,18 @@ function renderChatSettings() {
 
 function saveChatSettingsFromControls() {
   const settings = currentChatSettings();
-  settings.model = ui.settingModel.value;
-  settings.effort = ui.settingEffort.value;
-  settings.serviceTier = ui.settingServiceTier.value;
-  settings.personality = ui.settingPersonality.value;
-  settings.summary = ui.settingSummary.value;
-  settings.approvalPolicy = ui.settingApproval.value;
-  settings.permissions = ui.settingPermissions.value;
+  for (const select of ui.settingsFields.querySelectorAll("select[data-setting]")) {
+    settings[select.dataset.setting] = select.value;
+  }
   renderChatSettings();
 }
 
 function turnSettingsParams(settings) {
   const params = {};
-  if (settings.cwd?.trim()) params.cwd = settings.cwd.trim();
-  if (settings.model) params.model = settings.model;
-  if (settings.effort) params.effort = settings.effort;
-  if (settings.serviceTier) params.serviceTier = settings.serviceTier;
-  if (settings.personality) params.personality = settings.personality;
-  if (settings.summary) params.summary = settings.summary;
-  if (settings.approvalPolicy) params.approvalPolicy = settings.approvalPolicy;
-  if (settings.permissions) params.permissions = settings.permissions;
+  for (const field of CHAT_SETTING_FIELDS) {
+    const value = field === "cwd" ? settings.cwd?.trim() : settings[field];
+    if (value) params[field] = value;
+  }
   return params;
 }
 
@@ -2134,26 +2125,17 @@ function renderSearchResults(response, query) {
 }
 
 function createSearchResult(result, query) {
-  const item = document.createElement("li");
-  item.className = "search-result";
-  const link = document.createElement("a");
-  link.className = "search-result-button";
+  const item = ui.searchResultTemplate.content.firstElementChild.cloneNode(true);
+  const link = item.querySelector("a");
   if (result.threadId) link.setAttribute("href", threadHref(result.threadId));
   else link.setAttribute("aria-disabled", "true");
 
-  const heading = document.createElement("span");
-  heading.className = "search-result-heading";
-  const title = document.createElement("strong");
-  title.className = "search-result-title";
-  title.textContent = result.title;
-  heading.append(title);
+  item.querySelector(".search-result-title").textContent = result.title;
 
-  const snippet = document.createElement("span");
-  snippet.className = "search-result-snippet";
+  const snippet = item.querySelector(".search-result-snippet");
   appendHighlightedText(snippet, result.snippet, result.matchedText || query);
 
-  const meta = document.createElement("span");
-  meta.className = "search-result-meta";
+  const meta = item.querySelector(".search-result-meta");
   if (result.date) {
     const time = document.createElement("time");
     time.setAttribute("datetime", result.date.toISOString());
@@ -2174,14 +2156,12 @@ function createSearchResult(result, query) {
   }
   if (!result.threadId) meta.textContent += " · conversation unavailable";
 
-  link.append(heading, snippet, meta);
   link.addEventListener("click", (event) => {
     if (!plainPrimaryClick(event)) return;
     event.preventDefault();
     if (link.getAttribute("aria-disabled") === "true") return;
     openSearchResult(result, query, link);
   });
-  item.append(link);
   return item;
 }
 
@@ -2278,8 +2258,9 @@ async function performSearch(event) {
 }
 
 async function readSearchStream(response, onUpdate) {
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const reader = response.body
+    .pipeThrough(new TextDecoderStream("utf-8", { fatal: true }))
+    .getReader();
   let buffer = "";
   function acceptLine(line) {
     const payload = JSON.parse(line);
@@ -2293,7 +2274,7 @@ async function readSearchStream(response, onUpdate) {
   try {
     while (true) {
       const { value, done } = await reader.read();
-      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      buffer += value || "";
       let newline;
       while ((newline = buffer.indexOf("\n")) !== -1) {
         const line = buffer.slice(0, newline).trim();
@@ -2317,10 +2298,7 @@ function clearSearch() {
   state.searchRequestId += 1;
   state.searchResults = [];
   state.searchResultNodes.clear();
-  ui.searchQuery.value = "";
-  ui.searchFrom.value = "";
-  ui.searchTo.value = "";
-  ui.searchSort.value = "newest";
+  ui.searchForm.reset();
   ui.searchFrom.removeAttribute("aria-invalid");
   ui.searchTo.removeAttribute("aria-invalid");
   ui.searchResults.replaceChildren();
@@ -3485,13 +3463,10 @@ function threadActivityTimestamp(thread) {
 
 function sortThreadsByActivity(threads) {
   if (!Array.isArray(threads)) return [];
-  return threads
-    .map((thread, index) => ({ thread, index }))
-    .sort((left, right) => (
-      threadActivityTimestamp(right.thread) - threadActivityTimestamp(left.thread)
-      || left.index - right.index
-    ))
-    .map(({ thread }) => thread);
+  // Native sort is stable: equally active threads keep their incoming order.
+  return [...threads].sort((left, right) => (
+    threadActivityTimestamp(right) - threadActivityTimestamp(left)
+  ));
 }
 
 function threadIdFromSearch(search = "") {
@@ -4403,15 +4378,7 @@ if (globalThis.CODEX_WEB_TEST) {
   ui.settingsDialog.addEventListener("close", () => {
     if (state.settingsOpen) setSettingsOpen(false);
   });
-  for (const select of [
-    ui.settingModel,
-    ui.settingEffort,
-    ui.settingServiceTier,
-    ui.settingPersonality,
-    ui.settingSummary,
-    ui.settingApproval,
-    ui.settingPermissions,
-  ]) {
+  for (const select of ui.settingsFields.querySelectorAll("select[data-setting]")) {
     select.addEventListener("change", saveChatSettingsFromControls);
   }
   ui.cwd.addEventListener("input", saveWorkingFolder);
