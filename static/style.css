@@ -381,6 +381,7 @@ button:disabled { cursor: default; opacity: .45; }
 }
 .message .body th, .message .body td { padding: 6px 9px; border: 1px solid var(--border); text-align: left; }
 .message .body th { background: var(--panel-bg); }
+.message .body .embedded-image-link:focus-visible { border-radius: 7px; outline: 2px solid var(--focus); outline-offset: 2px; }
 .message .body img { max-width: 100%; height: auto; border-radius: 7px; }
 .message .body input[type="checkbox"] { margin-right: .4em; }
 .message .body .katex { font-size: 1.04em; }

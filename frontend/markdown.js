@@ -5,6 +5,8 @@ import markedKatex from "marked-katex-extension";
 import { enhanceCodeBlocks } from "./code-copy.mjs";
 import standardLatex from "./standard-latex.mjs";
 import {
+  isSameOriginHttpUrl,
+  linkRenderedImages,
   localImageUrl,
   rewriteLocalImages,
   rewriteWorkspaceLinks,
@@ -66,6 +68,10 @@ function render(value) {
     const fragment = purifier.sanitize(html, sanitizeOptions);
     rewriteWorkspaceLinks(fragment);
     rewriteLocalImages(fragment);
+    linkRenderedImages(fragment, (source) => (
+      isSameOriginHttpUrl(source, window.location.href)
+      && purifier.isValidAttribute("a", "href", source)
+    ));
     for (const link of fragment.querySelectorAll("a[href]")) {
       if (!link.getAttribute("href").startsWith("#")) {
         link.target = "_blank";

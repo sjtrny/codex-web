@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { JSDOM } from "jsdom";
 
 import {
+  isSameOriginHttpUrl,
+  linkRenderedImages,
   localImageUrl,
   rewriteLocalImages,
   rewriteWorkspaceLinks,
@@ -84,6 +87,50 @@ assert.equal(
   imageAttributes.get("src"),
   "/api/host-images?path=%2Ftmp%2Ffreelens-illumination%2Ffield_0001_comparison.png",
 );
+
+const document = new JSDOM().window.document;
+const rendered = document.createRange().createContextualFragment(`
+  <img id="bare" src="/api/files?path=%2Fworkspaces%2Fchart.png" alt="Result chart">
+  <a id="explicit" href="https://example.com/details">
+    <img id="linked" src="https://example.com/thumbnail.png" alt="Linked thumbnail">
+  </a>
+  <img id="empty-alt" src="/api/host-images?path=%2Ftmp%2Fpreview.png" alt="">
+  <img id="unsafe" src="data:text/html,unsafe" alt="Unsafe image">
+`);
+const baseUrl = "https://codex.example/thread";
+const isSafeHref = (value) => isSameOriginHttpUrl(value, baseUrl);
+assert.equal(linkRenderedImages(rendered, isSafeHref), rendered);
+const bare = rendered.querySelector("#bare");
+const bareLink = bare.parentElement;
+assert.equal(bareLink.localName, "a");
+assert.equal(
+  bareLink.getAttribute("href"),
+  "/api/files?path=%2Fworkspaces%2Fchart.png",
+);
+assert.equal(bareLink.getAttribute("title"), "Open image in a new window");
+assert.equal(bareLink.className, "embedded-image-link");
+assert.equal(
+  bareLink.getAttribute("aria-label"),
+  "Result chart (opens in a new window)",
+);
+const emptyAltLink = rendered.querySelector("#empty-alt").parentElement;
+assert.equal(emptyAltLink.getAttribute("aria-label"), "Open image in a new window");
+const explicit = rendered.querySelector("#explicit");
+assert.equal(rendered.querySelector("#linked").parentElement, explicit);
+assert.equal(explicit.getAttribute("href"), "https://example.com/details");
+assert.equal(rendered.querySelector("#unsafe").closest("a"), null);
+linkRenderedImages(rendered, isSafeHref);
+assert.equal(bare.parentElement, bareLink, "linking images must be idempotent");
+
+assert.equal(isSameOriginHttpUrl("/api/files?path=image.png", baseUrl), true);
+assert.equal(isSameOriginHttpUrl("relative/image.png", baseUrl), true);
+assert.equal(isSameOriginHttpUrl("https://codex.example/image.png", baseUrl), true);
+assert.equal(isSameOriginHttpUrl("//codex.example/image.png", baseUrl), true);
+assert.equal(isSameOriginHttpUrl("https://other.example/image.png", baseUrl), false);
+assert.equal(isSameOriginHttpUrl("mailto:images@example.com", baseUrl), false);
+assert.equal(isSameOriginHttpUrl("data:image/png;base64,AAAA", baseUrl), false);
+assert.equal(isSameOriginHttpUrl("ftp://codex.example/image.png", baseUrl), false);
+assert.equal(isSameOriginHttpUrl("#image", baseUrl), false);
 
 assert.equal(setWorkspaceRoot("/srv/code/"), true);
 assert.equal(
