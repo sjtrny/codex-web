@@ -10,8 +10,8 @@ const path = require("node:path");
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || "../demo/node_modules/playwright");
 
 const root = path.resolve(__dirname, "..");
-const staticRoot = path.join(root, "static");
-const artifacts = path.resolve(root, "../artifacts/questions/stacked-controls");
+const staticRoot = path.resolve(process.env.CODEX_WEB_STATIC_ROOT || path.join(root, "static"));
+const artifacts = path.resolve(process.env.ARTIFACT_DIR || path.join(root, "../artifacts/questions/pinned"));
 const contentTypes = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml" };
 const server = http.createServer(async (request, response) => {
   try {
@@ -40,9 +40,10 @@ async function eventually(check, label) {
 async function main() {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const browser = await chromium.launch({ headless: true });
+  let page;
   try {
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, serviceWorkers: "block" });
-    const page = await context.newPage();
+    page = await context.newPage();
     page.setDefaultTimeout(7000);
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
@@ -133,6 +134,9 @@ async function main() {
       });
     });
     const card = page.locator("#requests .request:visible");
+    const questionDock = page.getByRole("region", { name: /questions? awaiting your reply/ });
+    const pinnedQuestions = page.locator("#pending-questions-list > li");
+    const questionToggle = page.locator("#pending-questions-toggle");
     const label = page.locator("#thinking-label");
     const question = (id, threadId, isBlocking, itemId = `question-${id}`) => ({
       id, method: "item/tool/requestUserInput", params: {
@@ -235,6 +239,10 @@ async function main() {
 
     send(question(1001, "a", false));
     await waitLabel("Working — question pending");
+    await questionDock.waitFor();
+    assert.equal(await pinnedQuestions.count(), 1);
+    assert.match(await questionDock.textContent(), /Finish safely — Finish the recording/);
+    assert.equal(await questionDock.locator("input, textarea, select").count(), 0, "answers still use only the normal composer");
     assert.equal(await card.count(), 0, "native questions must not render cards");
     assert.equal(await page.locator("#requests input, #requests select, #requests button").count(), 0);
     await page.locator("#messages .body").filter({ hasText: "Keep recording — Keep this recording running" }).waitFor();
@@ -249,6 +257,7 @@ async function main() {
     await page.locator("#send").click();
     await eventually(() => responseTo(1002), "blocking answer sent through the composer");
     assert.deepEqual(responseTo(1002).result, { answers: { deployment: { answers: ["Keep recording"] } } });
+    assert.equal(await questionDock.count(), 0, "answering one chat must not display another chat's pending question");
     await page.locator('#threads a[href="/?thread=a"]').click();
     await waitLabel("Working — question pending");
     assert.equal(await page.locator('#cwd').inputValue(), "/workspaces/my project", "folder edits survive switching chats");
@@ -262,6 +271,7 @@ async function main() {
     assert.equal(await page.locator("#prompt").inputValue(), "Finish safely, but wait until the export is saved.");
     send(question(1003, "a", false, "question-1001"));
     await eventually(async () => await page.locator("#send").isEnabled(), "replayed question enables the composer");
+    assert.equal(await pinnedQuestions.count(), 1, "reconnect must restore the question without duplicates");
     assert.equal(await card.count(), 0);
     await page.locator("#send").click();
     await eventually(() => responseTo(1003), "custom answer sent on new request id");
@@ -284,6 +294,7 @@ async function main() {
     notification("turn/completed", { threadId: "a", turn: finished.turns[0] });
     await eventually(async () => await page.locator("#thinking-indicator").isHidden(), "completed status hidden");
     assert.equal(await page.locator("#send").textContent(), "Send");
+    assert.equal(await questionDock.count(), 0, "completion must clear the pinned question");
     assert.equal(await page.locator("#prompt").inputValue(), "Wait for the recording to finish safely.");
 
     // Real asynchronous questions are agentMessage items, not server requests.
@@ -331,14 +342,70 @@ async function main() {
     });
     await emitAsyncItem({ id: "call_async-sky-sleep", type: "sleep" });
     await waitLabel("Waiting for your answer");
-    for (const [name, width, height] of [["desktop", 1280, 900], ["mobile", 390, 844]]) {
+    // Reproduce an unanswered question buried under continued agent progress.
+    for (let index = 0; index < 24; index += 1) {
+      await emitAsyncItem({ id: `continued-work-${index}`, type: "agentMessage", phase: "commentary",
+        text: `Progress update ${index + 1}. I’m continuing the independent work while your question remains open.` });
+    }
+    await page.locator("#messages").evaluate((node) => {
+      node.scrollTop = 0;
+      node.dispatchEvent(new Event("scroll"));
+    });
+    await questionToggle.focus();
+    await page.keyboard.press("Enter");
+    assert.equal(await questionToggle.getAttribute("aria-expanded"), "false");
+    await emitAsyncItem({ id: "progress-while-collapsed", type: "agentMessage", phase: "commentary", text: "Continuing the background work." });
+    assert.equal(await questionToggle.getAttribute("aria-expanded"), "false", "progress must not reopen the question area");
+    assert.equal(await page.locator("#messages").evaluate((node) => node.scrollTop), 0, "progress must not pull the reader down the transcript");
+    await page.locator("#prompt").fill("My reply is still a draft");
+    await emitAsyncItem({ id: "additional-questions", type: "agentMessage", phase: "final_answer",
+      text: "Which format should I use? Should I include an example?",
+      questions: [
+        { title: "Which **format** should I use?", options: ["A short note", "A longer explanation"] },
+        { title: "Should I include an [example](https://example.com)?" },
+      ],
+    });
+    assert.equal(await pinnedQuestions.count(), 3, "all questions from multiple requests must be collated");
+    assert.equal(await questionToggle.getAttribute("aria-expanded"), "true", "new questions must become visible");
+    assert.equal(await page.locator("#prompt").inputValue(), "My reply is still a draft");
+    assert.equal(await page.locator("#prompt").evaluate((node) => node === document.activeElement), true, "new questions must not steal typing focus");
+    await questionDock.getByRole("link", { name: "example", exact: true }).focus();
+    const questionScroll = await page.locator("#pending-questions-list").evaluate((node) => node.scrollTop);
+    await emitAsyncItem({ id: "progress-with-focused-link", type: "agentMessage", phase: "commentary", text: "The question stays available above your reply." });
+    assert.equal(await questionDock.getByRole("link", { name: "example", exact: true }).evaluate((node) => node === document.activeElement), true);
+    assert.equal(await page.locator("#pending-questions-list").evaluate((node) => node.scrollTop), questionScroll, "progress must preserve the question list's scroll position");
+    await page.locator("#pending-questions-list").evaluate((node) => { node.scrollTop = 0; });
+    for (const [name, width, height] of [["desktop", 1280, 900], ["mobile", 390, 844], ["small-mobile", 320, 568], ["mobile-keyboard", 390, 500]]) {
       await page.setViewportSize({ width, height });
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `${name} async overflow`);
+      const dockBounds = await questionDock.boundingBox();
+      const composerBounds = await page.locator("#composer").boundingBox();
+      const messageBounds = await page.locator("#messages").boundingBox();
+      assert.ok(dockBounds.y >= messageBounds.y + messageBounds.height - 1, `${name} questions must not cover the transcript`);
+      assert.ok(Math.abs(dockBounds.y + dockBounds.height - composerBounds.y) <= 1, `${name} questions stay directly above the composer`);
+      assert.ok(composerBounds.y + composerBounds.height <= height && messageBounds.height >= 60, `${name} keep the composer and transcript usable`);
+      assert.equal(await questionDock.evaluate((node) => node.scrollWidth <= node.clientWidth), true, `${name} question text must wrap`);
+      await page.locator("#messages").evaluate((node) => { node.scrollTop = node.scrollHeight; });
+      assert.deepEqual(await questionDock.boundingBox(), dockBounds, `${name} questions must stay fixed as the transcript scrolls`);
       await page.screenshot({ path: path.join(artifacts, `async-waiting-${name}.png`), fullPage: true, animations: "disabled" });
     }
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.emulateMedia({ colorScheme: "dark" });
+    await eventually(async () => await page.locator("html").getAttribute("data-theme") === "dark", "dark theme applies to the question area");
+    await page.locator("#pending-questions-list").focus();
+    await page.keyboard.press("End");
+    await eventually(async () => await page.locator("#pending-questions-list").evaluate((node) => (
+      node.scrollTop > 0 && node.scrollHeight - node.clientHeight - node.scrollTop <= 1
+    )), "keyboard can scroll to the last question");
+    await page.screenshot({ path: path.join(artifacts, "async-waiting-dark-mobile.png"), fullPage: true, animations: "disabled" });
+    await questionToggle.click();
+    assert.equal(await page.locator("#pending-questions-content").isHidden(), true);
+    await page.screenshot({ path: path.join(artifacts, "async-collapsed-mobile.png"), fullPage: true, animations: "disabled" });
+    await page.emulateMedia({ colorScheme: "light" });
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.reload();
     await waitLabel("Waiting for your answer");
+    assert.equal(await pinnedQuestions.count(), 3, "reload must restore all pending questions");
     await assertConversationOrder([asyncTurn.items[0].content[0].text, skyTitle, "Your choice will determine"], "unanswered reload");
 
     // A successful acknowledgement clears waiting even before its user echo.
@@ -349,6 +416,7 @@ async function main() {
     await page.locator("#send").click();
     await eventually(() => pendingEchoes.length === 1, "delayed answer accepted");
     await waitLabel("Codex is thinking");
+    assert.equal(await questionDock.count(), 0, "accepting the reply must clear the whole question batch before the echo");
     await eventually(() => received.filter((message) => message.method === "thread/resume").length > resumeCount, "accepted answer resumes history");
     await eventually(async () => await page.locator("#send").isEnabled(), "accepted answer controls ready");
     await waitLabel("Codex is thinking");
@@ -450,6 +518,10 @@ async function main() {
     assert.equal(received.find(message => message.method === 'turn/start').params.cwd, '/workspaces/new project');
     assert.deepEqual(errors, []);
     console.log(`Question browser checks passed; screenshots: ${artifacts}`);
+  } catch (error) {
+    await fs.mkdir(artifacts, { recursive: true });
+    if (page) await page.screenshot({ path: path.join(artifacts, "failure.png"), fullPage: true });
+    throw error;
   } finally {
     await browser.close();
   }

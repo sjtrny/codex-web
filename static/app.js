@@ -124,6 +124,12 @@ const ui = {
   thinkingLabel: el("thinking-label"),
   jumpPresent: el("jump-present"),
   requests: el("requests"),
+  pendingQuestions: el("pending-questions"),
+  pendingQuestionsToggle: el("pending-questions-toggle"),
+  pendingQuestionsTitle: el("pending-questions-title"),
+  pendingQuestionsContent: el("pending-questions-content"),
+  pendingQuestionsList: el("pending-questions-list"),
+  pendingQuestionsHint: el("pending-questions-hint"),
   attachments: el("attachments"),
   composer: el("composer"),
   fileInput: el("file-input"),
@@ -170,6 +176,7 @@ const state = {
   promptHistoryDraft: "",
   items: new Map(),
   requestCards: new Map(),
+  questionNodes: new Map(),
   reconnectTimer: null,
   defaultCwd: "/workspaces",
   attachments: [],
@@ -276,6 +283,7 @@ function updateControls() {
   ui.settingsToggle.disabled = !state.ready;
   ui.settingsFields.disabled = !state.ready;
   renderRequests();
+  renderPendingQuestions();
   renderThinkingIndicator(busy);
 }
 
@@ -310,28 +318,119 @@ function selectedThreadBusy() {
   return selectedThreadSubmitting() || state.activeTurns.has(state.threadId);
 }
 
-function pendingAsyncQuestion(threadId) {
-  if (!state.activeTurns.has(threadId)) return null;
+function pendingAsyncQuestions(threadId) {
+  if (!state.activeTurns.has(threadId)) return [];
   const entry = cachedThread(threadId, false);
   const turnId = state.activeTurns.get(threadId);
   const turn = turnId
     ? findCachedTurn(entry, turnId)
     : [...(entry?.thread.turns || [])].reverse().find((item) => item.status === "inProgress");
-  if (!turn || turn.status !== "inProgress") return null;
-  let question = null;
+  if (!turn || turn.status !== "inProgress") return [];
+  let questions = [];
   for (const item of turn.items || []) {
-    if (item.type === "userMessage") question = null;
+    if (item.type === "userMessage") questions = [];
     if (item.type !== "agentMessage") continue;
-    if (item.questions?.length) question = item;
-    else if (item.phase === "final_answer") question = null;
+    if (item.questions?.length) questions.push(item);
+    else if (item.phase === "final_answer") questions = [];
   }
-  if (!question) return null;
-  const answered = [...state.pendingSteers.values()].some((pending) => (
-    pending.threadId === threadId && pending.turnId === turn.id && pending.accepted
-    && pending.asyncQuestionId != null
-    && String(resolvedThreadItemId(threadId, turn.id, pending.asyncQuestionId)) === String(question.id)
+  const answered = new Set([...state.pendingSteers.values()]
+    .filter((pending) => pending.threadId === threadId && pending.turnId === turn.id && pending.accepted)
+    .flatMap((pending) => pending.asyncQuestionIds || [])
+    .map((id) => String(resolvedThreadItemId(threadId, turn.id, id))));
+  return questions.filter((question) => !answered.has(String(question.id)));
+}
+
+function inputQuestionText(question) {
+  const options = (question.options || []).map((option) => (
+    `- ${typeof option === "string" ? option : `${option.label}${option.description ? ` — ${option.description}` : ""}`}`
   ));
-  return answered ? null : question;
+  return `${question.title ?? question.question}${options.length ? `\n\n${options.join("\n")}` : ""}`;
+}
+
+function setQuestionsExpanded(expanded) {
+  const shouldFollow = shouldFollowMessages();
+  ui.pendingQuestionsContent.hidden = !expanded;
+  ui.pendingQuestionsToggle.setAttribute("aria-expanded", String(expanded));
+  presentContentChanged(shouldFollow);
+}
+
+function renderPendingQuestions() {
+  const questions = [];
+  // Native requests consume one answer at a time through the composer. Show
+  // the whole queue, with the current question first, including on reconnect.
+  for (const request of state.requestCards.values()) {
+    if (request.requestKind !== "input" || request.requestParams.threadId !== state.threadId) continue;
+    for (const [index, question] of (request.requestParams.questions || []).entries()) {
+      if (index < request.inputIndex) continue;
+      questions.push({ key: `${request.inputMessageId}:${index}`, text: inputQuestionText(question) });
+    }
+  }
+  for (const item of pendingAsyncQuestions(state.threadId)) {
+    for (const [index, question] of item.questions.entries()) {
+      questions.push({
+        key: JSON.stringify([state.threadId, selectedTurnId(), item.id, index]),
+        text: inputQuestionText(question),
+      });
+    }
+  }
+
+  const shouldFollow = shouldFollowMessages();
+  const keys = new Set(questions.map((question) => question.key));
+  const added = questions.some((question) => !state.questionNodes.has(question.key));
+  let changed = ui.pendingQuestions.hidden !== !questions.length;
+  for (const [key, entry] of state.questionNodes) {
+    if (keys.has(key)) continue;
+    if (entry.node.contains(document.activeElement)) ui.prompt.focus({ preventScroll: true });
+    entry.node.remove();
+    state.questionNodes.delete(key);
+    changed = true;
+  }
+  for (const [index, question] of questions.entries()) {
+    let entry = state.questionNodes.get(question.key);
+    if (!entry) {
+      const node = document.createElement("li");
+      node.className = "pending-question";
+      const message = document.createElement("div");
+      message.className = "message";
+      const body = document.createElement("div");
+      body.className = "body";
+      message.append(body);
+      node.append(message);
+      entry = { node, body };
+      state.questionNodes.set(question.key, entry);
+    }
+    if (entry.text !== question.text) {
+      entry.text = question.text;
+      const render = globalThis.CodexMarkdown?.render;
+      entry.body.classList.toggle("plain-text", !render);
+      if (render) entry.body.replaceChildren(render(question.text));
+      else entry.body.textContent = question.text;
+      changed = true;
+    }
+    if (ui.pendingQuestionsList.children[index] !== entry.node) {
+      ui.pendingQuestionsList.insertBefore(entry.node, ui.pendingQuestionsList.children[index] || null);
+      changed = true;
+    }
+  }
+  const title = `${questions.length} question${questions.length === 1 ? "" : "s"} awaiting your reply`;
+  if (ui.pendingQuestionsTitle.textContent !== title) ui.pendingQuestionsTitle.textContent = title;
+  const inputRequest = selectedInputRequest();
+  const hint = inputRequest?.requestDisconnected ? "Reconnecting… Your reply will stay in the message box."
+    : inputRequest ? "Reply to question 1 in the message box below."
+      : "Reply in the message box below.";
+  if (ui.pendingQuestionsHint.textContent !== hint) {
+    ui.pendingQuestionsHint.textContent = hint;
+    changed = true;
+  }
+  if (!questions.length && ui.pendingQuestions.contains(document.activeElement)) ui.prompt.focus({ preventScroll: true });
+  ui.pendingQuestions.hidden = !questions.length;
+  // New questions reopen the dock; ordinary progress must not reopen a dock
+  // the user collapsed or reset its scroll position or keyboard focus.
+  if (added) {
+    ui.pendingQuestionsContent.hidden = false;
+    ui.pendingQuestionsToggle.setAttribute("aria-expanded", "true");
+  }
+  if (changed) presentContentChanged(shouldFollow);
 }
 
 function renderThinkingIndicator(busy = selectedThreadBusy()) {
@@ -345,7 +444,7 @@ function renderThinkingIndicator(busy = selectedThreadBusy()) {
   const flags = status?.activeFlags || [];
   const waitingOnInput = inputs.some((card) => card.requestParams.isBlocking !== false)
     || flags.includes("waitingOnUserInput")
-    || Boolean(pendingAsyncQuestion(state.threadId));
+    || pendingAsyncQuestions(state.threadId).length > 0;
   const waitingOnApproval = requests.some((card) => card.requestKind === "approval")
     || flags.includes("waitingOnApproval");
   const label = waitingOnInput ? "Waiting for your answer"
@@ -3877,7 +3976,7 @@ async function submitSteer({ draftText, text, attachments, input, turnId }) {
   const turn = findCachedTurn(cachedThread(threadId, false), turnId);
   const pending = {
     id, threadId, turnId, text, attachments, input,
-    asyncQuestionId: pendingAsyncQuestion(threadId)?.id || null,
+    asyncQuestionIds: pendingAsyncQuestions(threadId).map((question) => question.id),
     knownUserIds: new Set((turn?.items || []).filter((item) => item.type === "userMessage").map((item) => String(item.id))),
   };
   state.pendingSteers.set(id, pending);
@@ -4077,10 +4176,7 @@ function renderInputQuestion(request) {
   const question = questions[request.inputIndex];
   if (!question) return;
   const progress = questions.length > 1 ? `Question ${request.inputIndex + 1} of ${questions.length}\n\n` : "";
-  const options = (question.options || []).map((option) => (
-    `- ${option.label}${option.description ? ` — ${option.description}` : ""}`
-  ));
-  renderInputMessage(request, "agent", `${progress}${question.question}${options.length ? `\n\n${options.join("\n")}` : ""}`);
+  renderInputMessage(request, "agent", `${progress}${inputQuestionText(question)}`);
 }
 
 function submitUserInput(request, text) {
@@ -4305,6 +4401,7 @@ if (globalThis.CODEX_WEB_TEST) {
     handleMessage,
     handleServerRequest,
     renderRequests,
+    setQuestionsExpanded,
     removeRequest,
     removeRequestsForTurn,
     clearRequests,
@@ -4370,6 +4467,9 @@ if (globalThis.CODEX_WEB_TEST) {
   ui.messages.addEventListener("touchend", handleMessagesTouchEnd, { passive: true });
   ui.messages.addEventListener("touchcancel", handleMessagesTouchEnd, { passive: true });
   ui.jumpPresent.addEventListener("click", jumpToPresent);
+  ui.pendingQuestionsToggle.addEventListener("click", () => {
+    setQuestionsExpanded(ui.pendingQuestionsContent.hidden);
+  });
   ui.send.addEventListener("click", () => {
     if (ui.send.type === "button") void stopTurn();
   });

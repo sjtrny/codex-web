@@ -126,11 +126,20 @@ move files or affect a task already running.
 
 Settings, Attach, and Send/Reply/Stop are stacked vertically to the right of the text box.
 
-Questions appear as ordinary conversation text. Answer using the same text box
-and **Reply** button; there are no separate question cards or answer controls.
+Unanswered questions are grouped in a persistent area just above the message
+box, so they stay visible while Codex continues working or you scroll through
+the conversation. Collapse the area to its question count when you need more
+space; new questions expand it again. Long question lists scroll separately.
+The original messages stay in chronological order in the conversation.
+
+Answer using the same text box and **Reply** button; there are no separate
+answer controls. Accepted replies clear the pending questions. Failed replies
+keep both the questions and your draft. Questions are scoped to the current
+chat, restored when reconnecting, and cleared when the task ends.
 The status distinguishes **Waiting for your answer** from **Working — question
-pending**. For a native structured request with several questions, answer each
-in order through the text box. Chat drafts survive chat switching and temporary
+pending**. For a native structured request with several questions, the area
+shows all remaining questions; answer question 1 in the text box, then continue
+with the next question. Chat drafts survive chat switching and temporary
 disconnections.
 
 If a task ends before a reply is accepted, the reply remains a draft for you to

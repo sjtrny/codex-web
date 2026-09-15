@@ -101,6 +101,7 @@ const {
   renderThreadHistory,
   renderThinkingIndicator,
   renderRequests,
+  setQuestionsExpanded,
   renderLocalPrompt,
   renderChatSettings,
   renderThemeControl,
@@ -2003,6 +2004,7 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
     assertRenderedItemOrder(completed.id, turn.id, turn.items);
   }
   assert.equal(ui.thinkingIndicator.hidden, true, "answered historical questions must not show a waiting indicator");
+  assert.equal(ui.pendingQuestions.hidden, true);
 
   const activeTurn = { ...sky, status: "inProgress", items: sky.items.slice(0, 3) };
   const reconnected = mergeThreadSnapshot({
@@ -2018,6 +2020,8 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
     "an active snapshot must restore waiting from the question even without waiting flags");
   assert.equal(ui.messages.getAttribute("aria-busy"), "false");
   assert.equal(ui.thinkingIndicator.classList.contains("waiting"), true);
+  assert.equal(ui.pendingQuestions.hidden, false, "history must restore the unanswered question above the composer");
+  assert.match(ui.pendingQuestionsList.textContent, /How should I explain why the sky is blue/);
 
   const answeredReconnect = mergeThreadSnapshot({
     ...reconnected,
@@ -2027,6 +2031,7 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
   assert.equal(ui.thinkingLabel.textContent, "Codex is thinking",
     "a user reply in an active snapshot must clear the question's waiting state");
   assert.equal(ui.messages.getAttribute("aria-busy"), "true");
+  assert.equal(ui.pendingQuestions.hidden, true, "an answered snapshot must clear the pinned question");
 
   const laterTurn = {
     id: "later-turn",
@@ -2066,10 +2071,21 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
   assert.equal(ui.messages.getAttribute("aria-busy"), "false");
   assert.equal(ui.send.disabled, false, "the composer must accept the asynchronous answer");
   assert.equal(ui.send.textContent, "Stop");
+  const firstPinnedQuestion = ui.pendingQuestionsList.firstElementChild;
+  setQuestionsExpanded(false);
   sendItem({ id: "async-wait-commentary", type: "agentMessage", phase: "commentary", text: "I'll wait for your answer.", questions: null });
   sendItem(sky.items[2]);
   assert.equal(ui.thinkingLabel.textContent, "Waiting for your answer",
     "commentary and sleep after the question must not restore the thinking label");
+  assert.equal(ui.pendingQuestionsContent.hidden, true, "progress must respect the collapsed question area");
+  assert.equal(ui.pendingQuestionsList.firstElementChild, firstPinnedQuestion, "progress must not rebuild pending question content");
+  sendItem({ ...adventure.items[1], id: "async-batched-questions", questions: [
+    ...adventure.items[1].questions, { title: "Who should be the hero?" },
+  ] });
+  assert.equal(ui.pendingQuestionsList.children.length, 3, "collate every question across requests, not just the last request");
+  assert.equal(ui.pendingQuestionsTitle.textContent, "3 questions awaiting your reply");
+  assert.equal(ui.pendingQuestionsContent.hidden, false, "a new question must reopen the area");
+  assert.equal(ui.pendingQuestionsList.firstElementChild, firstPinnedQuestion, "adding questions must preserve existing nodes");
 
   handleNotification("item/agentMessage/delta", {
     threadId: "async-question-live", turnId: sky.id, itemId: sky.items[1].id, delta: "\nChoose one.",
@@ -2096,39 +2112,56 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
     "a snapshot without question metadata must preserve known live choices");
   renderThreadHistory(withoutMetadata);
   assert.equal(ui.thinkingLabel.textContent, "Waiting for your answer");
+  assert.equal(ui.pendingQuestionsList.children.length, 3, "a sparse snapshot must not lose or duplicate questions");
 
   selectActiveThread("async-question-unrelated", "async-other-turn");
   assert.equal(ui.thinkingLabel.textContent, "Codex is thinking", "an asynchronous question must remain scoped to its conversation");
+  assert.equal(ui.pendingQuestions.hidden, true, "questions must not leak into another conversation");
   state.threadId = "async-question-live";
   state.composerKey = threadComposerKey(state.threadId, state.selectionId);
   renderThreadHistory(cachedThread(state.threadId).thread);
+  assert.equal(ui.pendingQuestionsList.children.length, 3, "switching back must restore pending questions");
   sendItem(sky.items[3]);
   assert.equal(ui.thinkingLabel.textContent, "Codex is thinking",
     "a user-message event must clear waiting even when the reply comes from another client");
   assert.equal(ui.thinkingIndicator.classList.contains("waiting"), false);
+  assert.equal(ui.pendingQuestions.hidden, true, "replies from another client must clear the question area");
   sendItem(sky.items[4]);
   assertRenderedItemOrder("async-question-live", sky.id, sky.items.slice(1));
 
   // Failed replies keep the question pending; accepted replies clear it before
   // the canonical user-message echo arrives from the server.
   sendItem({ ...adventure.items[1], id: "async-next-question" });
+  sendItem({ ...sky.items[1], id: "async-another-question" });
   ui.prompt.value = "A village";
   const failedReply = submitPrompt({ preventDefault() {} });
   settle(latestSteer(), null, "Connection lost");
   await failedReply;
   assert.equal(ui.thinkingLabel.textContent, "Waiting for your answer");
   assert.equal(ui.prompt.value, "A village", "a rejected answer must be available for retry");
+  assert.equal(ui.pendingQuestionsList.children.length, 2, "failed replies must retain all pending questions");
   const acceptedReply = submitPrompt({ preventDefault() {} });
   settle(latestSteer(), { turnId: sky.id });
   await acceptedReply;
   assert.equal(ui.thinkingLabel.textContent, "Codex is thinking",
     "an accepted answer must clear waiting without waiting for the user-message echo");
   assert.equal(ui.messages.getAttribute("aria-busy"), "true");
+  assert.equal(ui.pendingQuestions.hidden, true, "an accepted reply must clear its entire batch before the server echo");
+
+  sendItem({ ...sky.items[1], id: "async-question-before-send" });
+  ui.prompt.value = "One sentence";
+  const inFlightReply = submitPrompt({ preventDefault() {} });
+  sendItem({ ...adventure.items[1], id: "async-question-during-send" });
+  settle(latestSteer(), { turnId: sky.id });
+  await inFlightReply;
+  assert.equal(ui.pendingQuestionsList.children.length, 1, "a reply must not dismiss a question that arrived while it was being sent");
+  assert.match(ui.pendingQuestionsList.textContent, /tiny fictional adventure/);
 
   notify("turn/completed", {
     threadId: "async-question-live", turn: { id: sky.id, status: "completed", items: [] },
   });
   assert.equal(ui.thinkingIndicator.hidden, true);
+  assert.equal(ui.pendingQuestions.hidden, true, "completed turns must not leave stale questions pinned");
 }
 
 async function checkMidTurnInteractions(rpcMessages) {
@@ -2456,6 +2489,9 @@ async function checkQuestionsInComposer(rpcMessages) {
   const prompt = [...state.items.values()].find((item) => item.text?.startsWith("How should I deploy?"));
   assert.ok(prompt, "native questions must appear as ordinary conversation messages");
   assert.match(prompt.text, /Keep running — Deploy separately/);
+  assert.equal(ui.pendingQuestions.hidden, false);
+  assert.match(ui.pendingQuestionsList.textContent, /Keep running — Deploy separately/);
+  assert.match(ui.pendingQuestionsHint.textContent, /Reply to question 1/);
   assert.equal(ui.send.disabled, false);
   assert.equal(ui.send.textContent, "Stop");
   assert.equal(responseTo(question.id), undefined, "showing options must never submit an answer");
@@ -2489,7 +2525,12 @@ async function checkQuestionsInComposer(rpcMessages) {
     },
   };
   handleServerRequest(several);
+  handleServerRequest({ ...question, id: "queued-native-question" });
+  assert.equal(ui.pendingQuestionsList.children.length, 3, "show remaining questions from every native request");
+  assert.match(ui.pendingQuestionsList.children[1].textContent, /Who is the hero/);
   await answer("A village");
+  assert.equal(ui.pendingQuestionsList.children.length, 2);
+  assert.match(ui.pendingQuestionsList.firstElementChild.textContent, /Who is the hero/);
   assert.equal(responseTo(several.id), undefined, "collect all native answers before returning the tool result");
   assert.equal(state.requestCards.get(several.id).inputIndex, 1);
   assert.ok([...state.items.values()].some((item) => item.text === "Question 2 of 2\n\nWho is the hero?"));
@@ -2497,6 +2538,10 @@ async function checkQuestionsInComposer(rpcMessages) {
   assert.deepEqual(responseTo(several.id).result, {
     answers: { place: { answers: ["A village"] }, hero: { answers: ["An octopus"] } },
   });
+  assert.equal(ui.pendingQuestionsList.children.length, 1);
+  await answer("Keep running");
+  assert.deepEqual(responseTo("queued-native-question").result, { answers: { deployment: { answers: ["Keep running"] } } });
+  assert.equal(ui.pendingQuestions.hidden, true);
 
   handleServerRequest({ ...question, id: "secret-question", params: {
     ...question.params, questions: [{ id: "secret", question: "Enter the value", isSecret: true }],
@@ -2520,12 +2565,15 @@ async function checkQuestionsInComposer(rpcMessages) {
   state.ready = true;
   updateControls();
   assert.equal(ui.send.disabled, true, "a native request must not answer a stale connection ID");
+  assert.equal(ui.pendingQuestions.hidden, false);
+  assert.match(ui.pendingQuestionsHint.textContent, /Reconnecting/);
   await answer(ui.prompt.value);
   assert.equal(responseTo("old-id"), undefined);
   handleServerRequest({ ...reconnectQuestion, id: "new-id" });
   assert.equal(ui.send.disabled, false);
   assert.equal(ui.prompt.value, "Keep my answer across reconnects");
   assert.equal(state.requestCards.get("new-id"), reconnectRequest);
+  assert.equal(ui.pendingQuestionsList.children.length, 1, "replaying a request must not duplicate the pinned question");
   await answer(ui.prompt.value);
   assert.deepEqual(responseTo("new-id").result, {
     answers: { deployment: { answers: ["Keep my answer across reconnects"] } },
