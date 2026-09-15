@@ -154,6 +154,13 @@ and does not start Codex tasks or change the running service.
 Run `npm run test:browser:sidebar` with the same browser dependencies to check
 sidebar activity with delayed history responses, background tasks, and reconnects.
 
+### Embedded images
+
+Select a workspace or host image embedded in a Codex message to open the
+rendered image in a new browser tab or window. An image with an explicit
+Markdown link keeps that link.
+Run `npm run test:browser:images` for an isolated Chromium check of this behavior.
+
 ### Search chat history
 
 Open **Search chats** to find matching messages. Conversations appear as the

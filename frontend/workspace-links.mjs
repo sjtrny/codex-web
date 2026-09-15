@@ -102,3 +102,37 @@ export function rewriteLocalImages(fragment) {
   }
   return fragment;
 }
+
+export function isSameOriginHttpUrl(value, base) {
+  const candidate = String(value || "").trim();
+  if (!candidate || candidate.startsWith("#")) return false;
+  try {
+    const baseUrl = new URL(base);
+    const candidateUrl = new URL(candidate, baseUrl);
+    return ["http:", "https:"].includes(candidateUrl.protocol)
+      && candidateUrl.origin === baseUrl.origin;
+  } catch {
+    return false;
+  }
+}
+
+export function linkRenderedImages(fragment, isSafeHref) {
+  for (const image of fragment.querySelectorAll("img[src]")) {
+    if (image.closest("a")) continue;
+    const source = image.getAttribute("src");
+    if (!source || !isSafeHref?.(source)) continue;
+
+    const link = image.ownerDocument.createElement("a");
+    link.className = "embedded-image-link";
+    link.setAttribute("href", source);
+    link.setAttribute("title", "Open image in a new window");
+    const alt = image.getAttribute("alt")?.trim();
+    link.setAttribute(
+      "aria-label",
+      alt ? `${alt} (opens in a new window)` : "Open image in a new window",
+    );
+    image.replaceWith(link);
+    link.append(image);
+  }
+  return fragment;
+}
