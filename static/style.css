@@ -228,7 +228,7 @@ button:disabled { cursor: default; opacity: .45; }
 .thread strong, .thread small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thread small { margin-top: 3px; color: var(--muted); }
 
-.chat { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto auto; height: 100%; overflow: hidden; }
+.chat { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto auto auto; height: 100%; overflow: hidden; }
 .chat.search-active { grid-template-rows: minmax(0, 1fr); }
 .chat.search-active > :not(.search-view) { display: none; }
 
@@ -419,7 +419,21 @@ button:disabled { cursor: default; opacity: .45; }
 .request .request-connection { margin: 10px 0 0; }
 .request .request-connection[hidden] { display: none; }
 
-.composer { grid-row: 5; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "attachments attachments" "prompt tools"; gap: 10px; padding: 14px max(20px, calc((100% - 850px) / 2)) 18px; border-top: 1px solid var(--border-subtle); }
+.pending-questions { grid-row: 5; min-width: 0; padding: 0 max(20px, calc((100% - 850px) / 2)); border-top: 1px solid var(--border-subtle); background: var(--panel-bg); }
+.pending-questions[hidden], .pending-questions-content[hidden] { display: none; }
+.pending-questions-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 44px; padding: 10px 0; border: 0; border-radius: 0; background: transparent; text-align: left; font-size: .85rem; font-weight: 600; }
+.pending-questions-toggle:hover:not(:disabled) { background: transparent; color: var(--link); }
+.pending-questions-toggle svg { flex: 0 0 18px; width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.pending-questions-toggle[aria-expanded="false"] svg { transform: rotate(180deg); }
+.pending-questions-toggle:focus-visible, .pending-questions-list:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.pending-questions-list { max-height: min(30dvh, 300px); margin: 0; padding: 0 6px 0 24px; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.pending-question { padding-left: 3px; }
+.pending-question::marker { color: var(--muted-strong); font-size: .85rem; }
+.pending-question + .pending-question { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-subtle); }
+.pending-question .message { margin: 0; font-size: .9rem; }
+.pending-questions-hint { margin: 8px 0 10px; color: var(--muted-strong); font-size: .78rem; line-height: 1.4; }
+
+.composer { grid-row: 6; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "attachments attachments" "prompt tools"; gap: 10px; padding: 14px max(20px, calc((100% - 850px) / 2)) 18px; border-top: 1px solid var(--border-subtle); }
 .composer.drop-target { background: var(--drop-bg); box-shadow: inset 0 2px var(--success); }
 .composer-tools { grid-area: tools; align-self: end; justify-self: end; display: grid; gap: 6px; }
 .composer-tools > .composer-settings, .composer-tools > .file-picker { width: 100%; }
@@ -565,6 +579,8 @@ button:disabled { cursor: default; opacity: .45; }
   .messages { overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 14px 12px; }
   .jump-present { bottom: 10px; min-height: 44px; }
   .requests { padding: 0 10px; }
+  .pending-questions { padding: 0 12px; }
+  .pending-questions-list { max-height: min(26dvh, 240px); }
   .composer {
     gap: 8px;
     padding: 9px 10px calc(9px + env(safe-area-inset-bottom));
@@ -597,6 +613,10 @@ button:disabled { cursor: default; opacity: .45; }
 @media (max-width: 480px) {
   .search-filters { grid-template-columns: minmax(0, 1fr) auto; }
   .search-date-filter { grid-column: 1 / -1; }
+}
+
+@media (max-height: 520px) {
+  .pending-questions-list { max-height: 18dvh; }
 }
 
 @media (max-width: 360px) {

@@ -20,9 +20,10 @@ request the needed excerpt.
 ## Questions during a task
 
 Users can reply through the normal chat text box while a turn is running.
-Questions appear as conversation text, without separate answer cards or
-selection controls. Use a non-blocking question tool when available if you can
-continue independent work. Users type their answer and select Reply.
+Unanswered tool questions are grouped above the message box and also appear in
+the conversation, without separate answer forms or selection controls.
+Use a non-blocking question tool when available if you can continue independent
+work. Users type their answer and select Reply.
 
 ## Link to local files
 
