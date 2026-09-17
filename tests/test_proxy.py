@@ -161,6 +161,7 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
         self.upload_path = Path(self.tempdir.name) / "uploads"
         for name in codex_web.CHAT_SETTING_ENV_VARS.values():
             os.environ.pop(name, None)
+        os.environ.pop("CODEX_WEB_SHOW_TOOL_ACTIVITY", None)
         os.environ["CODEX_APP_SERVER_SOCKET"] = self.socket_path
         os.environ.pop("CODEX_APP_SERVER_URL", None)
         self.workspace_path = Path(self.tempdir.name) / "workspaces"
@@ -495,6 +496,29 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(config["version"], "0.9.3")
             self.assertEqual(config["chatDefaults"], codex_web.DEFAULT_CHAT_SETTINGS)
             self.assertEqual(config["chatDefaults"]["model"], "gpt-6-astra")
+            self.assertIs(config["showToolActivity"], True)
+
+    async def test_config_tool_activity_visibility_is_not_a_chat_setting(self) -> None:
+        cases = {
+            "": True, "true": True, "1": True, " YeS ": True, "on": True,
+            "false": False, "0": False, "no": False, " OFF ": False,
+        }
+        async with ClientSession() as session:
+            for value, expected in cases.items():
+                with self.subTest(value=value), patch.dict(
+                    os.environ, {"CODEX_WEB_SHOW_TOOL_ACTIVITY": value}
+                ):
+                    async with session.get(
+                        f"http://127.0.0.1:{self.port}/api/config"
+                    ) as response:
+                        self.assertEqual(response.status, 200)
+                        config = await response.json()
+                    self.assertIs(config["showToolActivity"], expected)
+                    self.assertEqual(config["chatDefaults"], codex_web.DEFAULT_CHAT_SETTINGS)
+
+        with patch.dict(os.environ, {"CODEX_WEB_SHOW_TOOL_ACTIVITY": "maybe"}):
+            with self.assertRaisesRegex(RuntimeError, "must be a boolean"):
+                await codex_web.app_config(None)
 
     async def test_config_exposes_chat_default_environment_overrides(self) -> None:
         configured = {
