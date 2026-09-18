@@ -1049,8 +1049,9 @@ function cachedItem(threadId, turnId, itemId, type) {
 
 function appendCachedText(params, type, field = "text") {
   const item = cachedItem(params.threadId, params.turnId, params.itemId, type);
-  if (!item) return;
+  if (!item) return null;
   item[field] = `${item[field] || ""}${params.delta || ""}`;
+  return item;
 }
 
 function appendCachedReasoning(params) {
@@ -2810,17 +2811,21 @@ function handleNotification(method, params) {
       }
       return;
     case "item/agentMessage/delta":
-      appendCachedText(params, "agentMessage");
-      reconcileMissingTurnPrefix(params);
-      if (params.threadId === state.threadId) {
-        upsertMessage(
-          resolvedThreadItemId(params.threadId, params.turnId, params.itemId),
-          "agent",
-          params.delta,
-          true,
-          params.threadId,
-          params.turnId,
-        );
+      {
+        const item = appendCachedText(params, "agentMessage");
+        reconcileMissingTurnPrefix(params);
+        if (params.threadId === state.threadId) {
+          upsertMessage(
+            resolvedThreadItemId(params.threadId, params.turnId, params.itemId),
+            "agent",
+            params.delta,
+            true,
+            params.threadId,
+            params.turnId,
+            null,
+            item?.phase,
+          );
+        }
       }
       return;
     case "item/plan/delta":
@@ -3131,6 +3136,43 @@ function renderMessageBody(entry, role) {
   entry.renderFrame = window.requestAnimationFrame(commit);
 }
 
+function syncResponseToolbar(entry) {
+  const shouldShow = entry.role === "agent" && entry.phase === "final_answer";
+  if (!shouldShow) {
+    entry.responseToolbar?.remove();
+    entry.responseToolbar = null;
+    entry.forkButton = null;
+    entry.forkButtonLabel = null;
+    return;
+  }
+  if (entry.responseToolbar) return;
+
+  const responseToolbar = document.createElement("div");
+  responseToolbar.className = "message-toolbar";
+  responseToolbar.setAttribute("role", "toolbar");
+  responseToolbar.setAttribute("aria-label", "Codex response actions");
+  responseToolbar.hidden = true;
+  const forkButton = document.createElement("button");
+  forkButton.className = "message-action message-fork";
+  forkButton.type = "button";
+  const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  icon.setAttribute("viewBox", "0 0 24 24");
+  icon.setAttribute("aria-hidden", "true");
+  icon.setAttribute("focusable", "false");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M12 22v-4m0 0A10 10 0 0 1 2 8V3m10 15A10 10 0 0 0 22 8V3M2 3h.01M22 3h.01M12 22h.01");
+  icon.append(path);
+  const forkButtonLabel = document.createElement("span");
+  forkButtonLabel.textContent = "Fork";
+  forkButton.append(icon, forkButtonLabel);
+  responseToolbar.append(forkButton);
+  entry.node.append(responseToolbar);
+  entry.responseToolbar = responseToolbar;
+  entry.forkButton = forkButton;
+  entry.forkButtonLabel = forkButtonLabel;
+  forkButton.addEventListener("click", () => forkFromResponse(entry));
+}
+
 function upsertMessage(
   id,
   role,
@@ -3139,6 +3181,7 @@ function upsertMessage(
   threadId = state.threadId,
   turnId = null,
   attachments = null,
+  phase = null,
 ) {
   const shouldFollow = shouldFollowMessages();
   removeEmpty();
@@ -3156,40 +3199,16 @@ function upsertMessage(
     attachmentList.className = "message-attachments";
     attachmentList.hidden = true;
     node.append(label, body, attachmentList);
-    let responseToolbar = null;
-    let forkButton = null;
-    let forkButtonLabel = null;
-    if (role === "agent") {
-      responseToolbar = document.createElement("div");
-      responseToolbar.className = "message-toolbar";
-      responseToolbar.setAttribute("role", "toolbar");
-      responseToolbar.setAttribute("aria-label", "Codex response actions");
-      responseToolbar.hidden = true;
-      forkButton = document.createElement("button");
-      forkButton.className = "message-action message-fork";
-      forkButton.type = "button";
-      const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-      icon.setAttribute("viewBox", "0 0 24 24");
-      icon.setAttribute("aria-hidden", "true");
-      icon.setAttribute("focusable", "false");
-      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-      path.setAttribute("d", "M12 22v-4m0 0A10 10 0 0 1 2 8V3m10 15A10 10 0 0 0 22 8V3M2 3h.01M22 3h.01M12 22h.01");
-      icon.append(path);
-      forkButtonLabel = document.createElement("span");
-      forkButtonLabel.textContent = "Fork";
-      forkButton.append(icon, forkButtonLabel);
-      responseToolbar.append(forkButton);
-      node.append(responseToolbar);
-    }
     appendMessageNode(node);
     entry = {
       kind: "message",
       node,
       role,
       itemKey,
-      responseToolbar,
-      forkButton,
-      forkButtonLabel,
+      phase,
+      responseToolbar: null,
+      forkButton: null,
+      forkButtonLabel: null,
       body,
       attachmentList,
       attachments: [],
@@ -3199,9 +3218,10 @@ function upsertMessage(
       threadId,
       turnId,
     };
-    forkButton?.addEventListener("click", () => forkFromResponse(entry));
     state.items.set(itemKey, entry);
   }
+  if (phase !== null && phase !== undefined) entry.phase = phase;
+  syncResponseToolbar(entry);
   entry.text = append ? entry.text + (text || "") : (text || "");
   if (attachments !== null) {
     entry.attachments = normalizeMessageAttachments(attachments);
@@ -3481,7 +3501,16 @@ function renderItem(item, completed, threadId = state.threadId, turnId = null) {
       }
       break;
     case "agentMessage":
-      upsertMessage(itemId, "agent", item.text || "", false, threadId, turnId);
+      upsertMessage(
+        itemId,
+        "agent",
+        item.text || "",
+        false,
+        threadId,
+        turnId,
+        null,
+        item.phase,
+      );
       break;
     case "plan":
       upsertActivity(itemId, "plan", item.text || "", false, threadId, turnId);
@@ -3813,7 +3842,12 @@ function cachedMessageTurn(entry) {
 function canForkResponse(entry) {
   const thread = cachedThread(entry?.threadId, false)?.thread;
   const turn = cachedMessageTurn(entry);
-  if (entry?.role !== "agent" || !entry.forkButton || !state.ready) return false;
+  if (
+    entry?.role !== "agent"
+    || entry.phase !== "final_answer"
+    || !entry.forkButton
+    || !state.ready
+  ) return false;
   if (!thread || thread.ephemeral || !turn || !entry.itemId) return false;
   if (entry.threadId !== state.threadId || state.forkingThreads.has(entry.threadId)) return false;
   if (selectedThreadSubmitting() || state.uploading) return false;

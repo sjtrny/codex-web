@@ -76,22 +76,26 @@ function fixture(t) {
   return { ...api, calls, completeFork, entry, source, threads, window, ui };
 }
 
-test("only saved Codex responses get an accessible toolbar below the response", (t) => {
+test("only final Codex responses get an accessible toolbar below the response", (t) => {
   const app = fixture(t);
   const users = [
     app.entry("user-one", "turn-one"),
     app.entry("user-two", "turn-two"),
   ];
-  const responses = [
-    app.entry("commentary-one", "turn-one"),
+  const commentary = app.entry("commentary-one", "turn-one");
+  const finalResponses = [
     app.entry("answer-one", "turn-one"),
     app.entry("answer-two", "turn-two"),
   ];
 
   assert.ok(users.every((entry) => entry && entry.forkButton === null));
+  assert.equal(commentary.phase, "commentary");
+  assert.equal(commentary.forkButton, null);
+  assert.equal(commentary.node.querySelector(".message-toolbar"), null);
   assert.equal(app.ui.messages.querySelectorAll(".message.user .message-toolbar").length, 0);
-  assert.equal(app.ui.messages.querySelectorAll(".message-toolbar").length, 3);
-  for (const entry of responses) {
+  assert.equal(app.ui.messages.querySelectorAll(".message-toolbar").length, 2);
+  for (const entry of finalResponses) {
+    assert.equal(entry.phase, "final_answer");
     assert.ok(entry?.responseToolbar && !entry.responseToolbar.hidden);
     assert.equal(entry.responseToolbar.getAttribute("role"), "toolbar");
     assert.equal(entry.responseToolbar.getAttribute("aria-label"), "Codex response actions");
@@ -101,6 +105,39 @@ test("only saved Codex responses get an accessible toolbar below the response", 
     assert.equal(entry.node.lastElementChild, entry.responseToolbar);
   }
   assert.equal(app.ui.title.parentElement.querySelector("#fork-thread"), null);
+});
+
+test("live commentary never gains a toolbar and a late final phase does", (t) => {
+  const app = fixture(t);
+  app.cacheTurnUpdate("source", { id: "live-turn", status: "inProgress", items: [] });
+
+  app.handleNotification("item/started", {
+    threadId: "source",
+    turnId: "live-turn",
+    item: { id: "live-commentary", type: "agentMessage", phase: "commentary", text: "" },
+  });
+  app.handleNotification("item/agentMessage/delta", {
+    threadId: "source", turnId: "live-turn", itemId: "live-commentary", delta: "Still working",
+  });
+  const commentary = app.entry("live-commentary", "live-turn");
+  assert.equal(commentary.text, "Still working");
+  assert.equal(commentary.forkButton, null);
+  assert.equal(commentary.node.querySelector(".message-toolbar"), null);
+
+  app.handleNotification("item/agentMessage/delta", {
+    threadId: "source", turnId: "live-turn", itemId: "late-final", delta: "Final",
+  });
+  const finalResponse = app.entry("late-final", "live-turn");
+  assert.equal(finalResponse.forkButton, null);
+  app.handleNotification("item/completed", {
+    threadId: "source",
+    turnId: "live-turn",
+    item: { id: "late-final", type: "agentMessage", phase: "final_answer", text: "Final answer" },
+  });
+  assert.equal(finalResponse.phase, "final_answer");
+  assert.ok(finalResponse.responseToolbar);
+  assert.equal(finalResponse.node.lastElementChild, finalResponse.responseToolbar);
+  assert.equal(finalResponse.forkButton.disabled, true);
 });
 
 test("a response fork opens a separate chat and preserves the original draft", async (t) => {
@@ -142,13 +179,16 @@ test("a response fork opens a separate chat and preserves the original draft", a
   assert.equal(state.attachments[0].path, "/uploads/unsent.txt");
 });
 
-test("responses in one turn share the completed turn boundary", async (t) => {
+test("a final response forks at its completed turn boundary", async (t) => {
   const app = fixture(t);
-  const pending = app.forkFromResponse(app.entry("commentary-one", "turn-one"));
+  const commentary = app.entry("commentary-one", "turn-one");
+  await app.forkFromResponse(commentary);
+  assert.equal(app.calls.length, 0);
+  const pending = app.forkFromResponse(app.entry("answer-one", "turn-one"));
   assert.deepEqual(app.calls[0].params, {
     threadId: "source", lastTurnId: "turn-one", deferGoalContinuation: true,
   });
-  const fork = app.completeFork("commentary-fork");
+  const fork = app.completeFork("answer-fork");
   await pending;
   assert.deepEqual(fork.turns.map((turn) => turn.id), ["turn-one"]);
   assert.deepEqual(
