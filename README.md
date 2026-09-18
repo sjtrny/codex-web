@@ -154,6 +154,28 @@ and does not start Codex tasks or change the running service.
 Run `npm run test:browser:sidebar` with the same browser dependencies to check
 sidebar activity with delayed history responses, background tasks, and reconnects.
 
+### Fork a chat
+
+Each saved **Codex** response has a compact action toolbar below it. Select
+**Fork** to open a separate chat that includes the response's completed turn and
+omits later turns. The new chat is labelled **Fork:** in the chat list. There is
+no fork action on user messages.
+
+App-server stores fork boundaries by turn, not by individual response item, so
+several Codex responses in one turn lead to the same history boundary. The fork
+button remains visible but disabled until that turn finishes. The original
+conversation, unsent draft, and attachments stay on the original chat. Chat
+settings are copied and can then be changed separately.
+
+A fork does not send a message, start a task, or stop work in the original chat.
+Any copied goal waits for your next message. Both chats use the same working
+folder and files; this does not create a Git branch or copy the workspace. This
+requires an app-server that supports `thread/fork`, `lastTurnId`, and
+`deferGoalContinuation`.
+
+Run `npm run test:browser:fork` with the demo's Playwright dependencies for an
+isolated desktop/mobile check.
+
 ### Embedded images
 
 Select a workspace or host image embedded in a Codex message to open the
