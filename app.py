@@ -106,6 +106,17 @@ def env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+def env_bool(name: str, default: bool) -> bool:
+    raw = env(name).lower()
+    if not raw:
+        return default
+    if raw in {"true", "1", "yes", "on"}:
+        return True
+    if raw in {"false", "0", "no", "off"}:
+        return False
+    raise RuntimeError(f"{name} must be a boolean (true or false)")
+
+
 def env_int(name: str, default: int) -> int:
     raw = env(name)
     if not raw:
@@ -365,6 +376,7 @@ async def app_config(_: web.Request) -> web.Response:
             "defaultCwd": env("CODEX_DEFAULT_CWD", "/workspaces"),
             "workspaceRoot": str(workspace_root()),
             "chatDefaults": chat_defaults(),
+            "showToolActivity": env_bool("CODEX_WEB_SHOW_TOOL_ACTIVITY", True),
             "uploads": {
                 "maxBytes": max_bytes,
                 "maxFiles": max_files,

@@ -627,6 +627,7 @@ const chatSettings = normalizeChatSettings({
   serviceTier: "priority",
   personality: "friendly",
   summary: "detailed",
+  toolActivity: "hide",
   approvalPolicy: "on-request",
   permissions: ":workspace",
   ignored: "not-a-protocol-field",
@@ -657,6 +658,7 @@ state.chatDefaults = normalizeChatSettings({
   serviceTier: "priority",
   personality: "none",
   summary: "auto",
+  toolActivity: "hide",
   approvalPolicy: "never",
   permissions: ":danger-full-access",
 });
@@ -664,6 +666,7 @@ const effectiveSettings = effectiveChatSettings(normalizeChatSettings({
   cwd: "/workspaces/selected-project",
   effort: "high",
   summary: "detailed",
+  toolActivity: "show",
 }));
 assert.deepEqual(effectiveSettings, {
   cwd: "/workspaces/selected-project",
@@ -672,10 +675,15 @@ assert.deepEqual(effectiveSettings, {
   serviceTier: "priority",
   personality: "none",
   summary: "detailed",
+  toolActivity: "show",
   approvalPolicy: "never",
   permissions: ":danger-full-access",
 });
-assert.deepEqual(turnSettingsParams(effectiveSettings), effectiveSettings);
+const { toolActivity: displayOnlySetting, ...effectiveServerSettings } = effectiveSettings;
+assert.equal(displayOnlySetting, "show");
+assert.deepEqual(turnSettingsParams(effectiveSettings), effectiveServerSettings);
+assert.equal(Object.hasOwn(threadSettingsParams(effectiveSettings), "toolActivity"), false);
+assert.equal(normalizeChatSettings({ toolActivity: "invalid" }).toolActivity, "");
 
 state.models = [{
   model: "gpt-5.6-sol",
@@ -706,12 +714,15 @@ assert.equal(ui.settingEffort.children[0].textContent, "Instance default — max
 assert.equal(ui.settingServiceTier.children[0].textContent, "Instance default — Fast");
 assert.equal(ui.settingApproval.children[0].textContent, "Instance default — Never ask");
 assert.equal(ui.settingPermissions.children[0].textContent, "Instance default — Full access");
+assert.equal(ui.settingToolActivity.children[0].textContent, "Instance default — Hide");
+assert.deepEqual([...ui.settingToolActivity.options].map((option) => option.value), ["", "show", "hide"]);
 for (const select of [
   ui.settingModel,
   ui.settingEffort,
   ui.settingServiceTier,
   ui.settingPersonality,
   ui.settingSummary,
+  ui.settingToolActivity,
   ui.settingApproval,
   ui.settingPermissions,
 ]) {

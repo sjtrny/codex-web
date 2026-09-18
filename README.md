@@ -208,6 +208,48 @@ Values are app-server protocol IDs. Restart the web service after changing them.
 The model picker is populated by the app-server's `model/list` response, so keep
 Codex CLI current to make newly available models selectable.
 
+### Tool activity visibility
+
+Set `CODEX_WEB_SHOW_TOOL_ACTIVITY=false` in `.env` for Docker Compose, or export
+it when running directly, to hide the grey tool-activity boxes:
+
+```dotenv
+CODEX_WEB_SHOW_TOOL_ACTIVITY=false
+```
+
+The default is `true` (visible). Boolean values are case-insensitive: `true`,
+`1`, `yes`, and `on` show activity; `false`, `0`, `no`, and `off` hide it.
+An unset or empty value uses the default. Other values are rejected.
+
+This instance-wide display default applies to live updates and loaded history.
+It hides commands and their output, file changes, tool calls, searches, and
+other execution details. It does not stop tool use or remove saved history.
+Chat messages (including progress updates), plans, reasoning summaries,
+questions, approvals, and the thinking indicator are unaffected. Reasoning
+summaries have their own `CODEX_DEFAULT_REASONING_SUMMARY` setting.
+
+In each conversation's **Model and chat settings** modal, **Tool activity** offers
+**Instance default**, **Show**, and **Hide**. The default option shows the
+effective instance value and follows `CODEX_WEB_SHOW_TOOL_ACTIVITY`; an explicit
+choice overrides it for that conversation. The choice is saved in this browser,
+like the other per-chat settings, and survives reloads and conversation switches.
+Existing conversations without an override use the instance default. You can
+also set the choice on **New thread** before sending its first message; that
+new-thread preference is retained, like the other new-thread settings.
+
+Visibility changes immediately, including during an active turn. Showing tools
+again restores existing tool details; it does not rerun them or send a model
+setting to the app-server. Other conversations' choices remain unchanged.
+
+Recreate the web service after changing its Compose environment, then reload
+open browser tabs to fetch the new default. Explicit per-chat choices remain.
+
+Run `npm run test:browser:tools` with the demo's Playwright installation and a
+Python environment containing `requirements.txt`. Set `PLAYWRIGHT_MODULE` or
+`PYTHON` to use installations outside this checkout. The check starts temporary
+loopback web servers and uses simulated app-server traffic; it changes no saved
+conversation or running service.
+
 ## Attachment retention
 
 Uploaded files remain in `CODEX_UPLOAD_STORAGE_DIR` (Docker Compose) or

@@ -32,6 +32,7 @@ const CHAT_SETTING_FIELDS = [
   "serviceTier",
   "personality",
   "summary",
+  "toolActivity",
   "approvalPolicy",
   "permissions",
 ];
@@ -56,12 +57,17 @@ const SUMMARY_LABELS = Object.freeze({
   detailed: "Detailed",
   none: "Off",
 });
+const TOOL_ACTIVITY_LABELS = Object.freeze({
+  show: "Show",
+  hide: "Hide",
+});
 const UNSET_CHAT_SETTING_LABELS = Object.freeze({
   model: "App-server model",
   effort: "Model default",
   serviceTier: "Standard",
   personality: "App-server setting",
   summary: "App-server setting",
+  toolActivity: "Show",
   approvalPolicy: "App-server policy",
   permissions: "App-server profile",
 });
@@ -115,6 +121,7 @@ const ui = {
   settingServiceTier: el("setting-service-tier"),
   settingPersonality: el("setting-personality"),
   settingSummary: el("setting-summary"),
+  settingToolActivity: el("setting-tool-activity"),
   settingApproval: el("setting-approval"),
   settingPermissions: el("setting-permissions"),
   settingsNote: el("settings-note"),
@@ -1092,6 +1099,7 @@ function normalizeChatSettings(value = {}) {
   for (const field of CHAT_SETTING_FIELDS) {
     if (typeof value[field] === "string") normalized[field] = value[field];
   }
+  if (!["show", "hide"].includes(normalized.toolActivity)) normalized.toolActivity = "";
   return normalized;
 }
 
@@ -1110,6 +1118,18 @@ function currentChatSettings() {
     state.settingsByThread.set(state.threadId, emptyChatSettings());
   }
   return state.settingsByThread.get(state.threadId);
+}
+
+function toolActivityIsVisible(threadId = state.threadId) {
+  const settings = threadId ? state.settingsByThread.get(threadId) : state.newThreadSettings;
+  return (settings?.toolActivity || state.chatDefaults.toolActivity) !== "hide";
+}
+
+function syncToolActivityVisibility() {
+  const shouldFollow = shouldFollowMessages();
+  const hidden = !toolActivityIsVisible();
+  for (const node of ui.messages.querySelectorAll(".tool-activity")) node.hidden = hidden;
+  presentContentChanged(shouldFollow);
 }
 
 function defaultWorkingFolder() {
@@ -1177,6 +1197,7 @@ function chatSettingValueLabel(field, value) {
   }
   if (field === "personality") return PERSONALITY_LABELS[value] || value;
   if (field === "summary") return SUMMARY_LABELS[value] || value;
+  if (field === "toolActivity") return TOOL_ACTIVITY_LABELS[value] || value;
   if (field === "approvalPolicy") return APPROVAL_POLICY_LABELS[value] || value;
   if (field === "permissions") return PERMISSION_PROFILE_LABELS[value] || value;
   return value;
@@ -1284,6 +1305,10 @@ function renderChatSettings() {
     defaultChatSettingOption("summary"),
     ...Object.entries(SUMMARY_LABELS).map(([value, label]) => ({ value, label })),
   ], settings.summary);
+  fillSelect(ui.settingToolActivity, [
+    defaultChatSettingOption("toolActivity"),
+    ...Object.entries(TOOL_ACTIVITY_LABELS).map(([value, label]) => ({ value, label })),
+  ], settings.toolActivity);
   fillSelect(ui.settingApproval, approvalOptions(), settings.approvalPolicy);
   if (
     state.permissionProfilesLoaded
@@ -1298,21 +1323,24 @@ function renderChatSettings() {
 
   const count = CHAT_SETTING_FIELDS.filter((field) => settings[field]).length;
   const unavailable = !personalitySupported ? " Personality is unavailable for this model." : "";
-  ui.settingsNote.textContent = `${count || "No"} override${count === 1 ? "" : "s"} set. Instance defaults apply wherever Default is selected. Changes apply to the next new turn, not replies sent while Codex works, and remain with this chat.${unavailable}`;
+  ui.settingsNote.textContent = `${count || "No"} override${count === 1 ? "" : "s"} set. Instance defaults apply wherever Default is selected. Tool activity visibility changes immediately. Other changes apply to the next new turn, not replies sent while Codex works. Settings remain with this chat.${unavailable}`;
   persistChatSettings();
 }
 
 function saveChatSettingsFromControls() {
   const settings = currentChatSettings();
+  const previousToolActivity = settings.toolActivity;
   for (const select of ui.settingsFields.querySelectorAll("select[data-setting]")) {
     settings[select.dataset.setting] = select.value;
   }
   renderChatSettings();
+  if (settings.toolActivity !== previousToolActivity) syncToolActivityVisibility();
 }
 
 function turnSettingsParams(settings) {
   const params = {};
   for (const field of CHAT_SETTING_FIELDS) {
+    if (field === "toolActivity") continue; // Browser display only, never an app-server parameter.
     const value = field === "cwd" ? settings.cwd?.trim() : settings[field];
     if (value) params[field] = value;
   }
@@ -2816,7 +2844,7 @@ function handleNotification(method, params) {
       appendCachedText(params, "commandExecution", "aggregatedOutput");
       reconcileMissingTurnPrefix(params);
       if (params.threadId === state.threadId) {
-        upsertActivity(
+        upsertToolActivity(
           resolvedThreadItemId(params.threadId, params.turnId, params.itemId),
           "command",
           params.delta,
@@ -3142,6 +3170,10 @@ function upsertMessage(
   return entry.node;
 }
 
+function upsertToolActivity(id, title, text, append, threadId, turnId) {
+  return upsertActivity(id, title, text, append, threadId, turnId, true);
+}
+
 function upsertActivity(
   id,
   title,
@@ -3149,6 +3181,7 @@ function upsertActivity(
   append = false,
   threadId = state.threadId,
   turnId = null,
+  toolActivity = false,
 ) {
   const shouldFollow = shouldFollowMessages();
   removeEmpty();
@@ -3156,7 +3189,8 @@ function upsertActivity(
   let entry = state.items.get(itemKey);
   if (!entry || entry.kind !== "activity") {
     const node = document.createElement("details");
-    node.className = "activity";
+    node.className = toolActivity ? "activity tool-activity" : "activity";
+    node.hidden = toolActivity && !toolActivityIsVisible(threadId);
     const summary = document.createElement("summary");
     const body = document.createElement("pre");
     node.append(summary, body);
@@ -3418,7 +3452,7 @@ function renderItem(item, completed, threadId = state.threadId, turnId = null) {
     }
     case "commandExecution": {
       const status = completed ? item.status : `${item.status || "running"}…`;
-      upsertActivity(
+      upsertToolActivity(
         itemId,
         `$ ${item.command} · ${status}`,
         item.aggregatedOutput || "",
@@ -3429,7 +3463,7 @@ function renderItem(item, completed, threadId = state.threadId, turnId = null) {
       break;
     }
     case "fileChange":
-      upsertActivity(
+      upsertToolActivity(
         itemId,
         `files · ${item.status || "pending"}`,
         fileChangeText(item),
@@ -3439,7 +3473,7 @@ function renderItem(item, completed, threadId = state.threadId, turnId = null) {
       );
       break;
     case "mcpToolCall":
-      upsertActivity(
+      upsertToolActivity(
         itemId,
         `${item.server}/${item.tool} · ${item.status}`,
         JSON.stringify(item.result || item.error || item.arguments || {}, null, 2),
@@ -3449,7 +3483,7 @@ function renderItem(item, completed, threadId = state.threadId, turnId = null) {
       );
       break;
     case "dynamicToolCall":
-      upsertActivity(
+      upsertToolActivity(
         itemId,
         `${item.tool} · ${item.status}`,
         JSON.stringify(item.contentItems || item.arguments || {}, null, 2),
@@ -3459,7 +3493,7 @@ function renderItem(item, completed, threadId = state.threadId, turnId = null) {
       );
       break;
     case "webSearch":
-      upsertActivity(
+      upsertToolActivity(
         itemId,
         `search · ${item.query}`,
         "",
@@ -3472,7 +3506,7 @@ function renderItem(item, completed, threadId = state.threadId, turnId = null) {
       break;
     default:
       if (completed) {
-        upsertActivity(
+        upsertToolActivity(
           itemId,
           item.type,
           JSON.stringify(item, null, 2),
@@ -4311,6 +4345,7 @@ async function boot() {
     });
     state.defaultCwd = config.defaultCwd || state.defaultCwd;
     state.chatDefaults = normalizeChatSettings(config.chatDefaults);
+    state.chatDefaults.toolActivity = config.showToolActivity === false ? "hide" : "show";
     state.uploadLimits = config.uploads || null;
     renderChatSettings();
   } catch (error) {
