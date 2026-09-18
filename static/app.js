@@ -153,10 +153,12 @@ const state = {
   activeTurns: new Map(),
   liveThreadStatuses: new Map(),
   submittingThreads: new Set(),
+  forkingThreads: new Set(),
+  forkingResponseKey: null,
   steeringThreads: new Set(),
   interruptingTurns: new Set(),
   pendingSteers: new Map(),
-  failedSteerAttachments: new Map(),
+  composerAttachmentDrafts: new Map(),
   submittingViews: new Set(),
   selectionId: 0,
   threads: [],
@@ -279,16 +281,22 @@ function notice(text = "") {
   ui.notice.hidden = !text;
 }
 
+function selectedThreadForking() {
+  return Boolean(state.threadId && state.forkingThreads.has(state.threadId));
+}
+
 function updateControls() {
   const busy = selectedThreadBusy();
+  const forking = selectedThreadForking();
   const turnId = selectedTurnId();
   const inputRequest = selectedInputRequest();
   const blocked = selectedThreadSubmitting() || (busy && !turnId) || inputRequest?.requestDisconnected;
   updateComposerAction();
   ui.prompt.placeholder = turnId ? "Reply or add instructions while Codex works…" : "Ask Codex…";
-  ui.fileInput.disabled = blocked || state.uploading || Boolean(inputRequest);
+  ui.fileInput.disabled = blocked || forking || state.uploading || Boolean(inputRequest);
   ui.settingsToggle.disabled = !state.ready;
   ui.settingsFields.disabled = !state.ready;
+  updateResponseForkControls();
   renderRequests();
   renderPendingQuestions();
   renderThinkingIndicator(busy);
@@ -306,7 +314,8 @@ function updateComposerAction() {
   const stop = busy && !hasInput;
   const blocked = selectedThreadSubmitting() || (busy && !turnId)
     || (!stop && selectedInputRequest()?.requestDisconnected);
-  ui.send.disabled = !state.ready || blocked || state.uploading || stopping;
+  ui.send.disabled = !state.ready || blocked || state.uploading || stopping
+    || selectedThreadForking();
   ui.send.textContent = stopping ? "Stopping…" : stop ? "Stop" : busy ? "Reply" : "Send";
   // Stop is a deliberate button action. Enter in the text box only sends input.
   ui.send.type = stop || stopping ? "button" : "submit";
@@ -914,9 +923,9 @@ function restoreComposerDraft(key = state.composerKey) {
   ui.prompt.value = state.composerDrafts.get(key) || "";
   ui.prompt.setSelectionRange?.(ui.prompt.value.length, ui.prompt.value.length);
   resetPromptHistoryNavigation();
-  if (state.failedSteerAttachments.has(key)) {
-    state.attachments = state.failedSteerAttachments.get(key);
-    state.failedSteerAttachments.delete(key);
+  if (state.composerAttachmentDrafts.has(key)) {
+    state.attachments = state.composerAttachmentDrafts.get(key);
+    state.composerAttachmentDrafts.delete(key);
     renderAttachments();
   }
   updateComposerAction();
@@ -2469,7 +2478,8 @@ function renderAttachments() {
 
 async function uploadFiles(fileList) {
   const files = [...fileList].filter((file) => file.size >= 0);
-  if (!files.length || selectedThreadSubmitting() || (selectedThreadBusy() && !selectedTurnId()) || state.uploading) return;
+  if (!files.length || selectedThreadSubmitting() || selectedThreadForking()
+    || (selectedThreadBusy() && !selectedTurnId()) || state.uploading) return;
 
   const limits = state.uploadLimits;
   if (limits && state.attachments.length + files.length > limits.maxFiles) {
@@ -2743,6 +2753,7 @@ function handleNotification(method, params) {
       state.threadCache.delete(params.threadId);
       state.threadReconciliations.delete(params.threadId);
       state.composerDrafts.delete(threadComposerKey(params.threadId));
+      state.composerAttachmentDrafts.delete(threadComposerKey(params.threadId));
       state.promptHistoryByThread.delete(params.threadId);
       state.promptHistoryIndexesByThread.delete(params.threadId);
       refreshThreads();
@@ -3145,10 +3156,40 @@ function upsertMessage(
     attachmentList.className = "message-attachments";
     attachmentList.hidden = true;
     node.append(label, body, attachmentList);
+    let responseToolbar = null;
+    let forkButton = null;
+    let forkButtonLabel = null;
+    if (role === "agent") {
+      responseToolbar = document.createElement("div");
+      responseToolbar.className = "message-toolbar";
+      responseToolbar.setAttribute("role", "toolbar");
+      responseToolbar.setAttribute("aria-label", "Codex response actions");
+      responseToolbar.hidden = true;
+      forkButton = document.createElement("button");
+      forkButton.className = "message-action message-fork";
+      forkButton.type = "button";
+      const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      icon.setAttribute("viewBox", "0 0 24 24");
+      icon.setAttribute("aria-hidden", "true");
+      icon.setAttribute("focusable", "false");
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", "M12 22v-4m0 0A10 10 0 0 1 2 8V3m10 15A10 10 0 0 0 22 8V3M2 3h.01M22 3h.01M12 22h.01");
+      icon.append(path);
+      forkButtonLabel = document.createElement("span");
+      forkButtonLabel.textContent = "Fork";
+      forkButton.append(icon, forkButtonLabel);
+      responseToolbar.append(forkButton);
+      node.append(responseToolbar);
+    }
     appendMessageNode(node);
     entry = {
       kind: "message",
       node,
+      role,
+      itemKey,
+      responseToolbar,
+      forkButton,
+      forkButtonLabel,
       body,
       attachmentList,
       attachments: [],
@@ -3158,6 +3199,7 @@ function upsertMessage(
       threadId,
       turnId,
     };
+    forkButton?.addEventListener("click", () => forkFromResponse(entry));
     state.items.set(itemKey, entry);
   }
   entry.text = append ? entry.text + (text || "") : (text || "");
@@ -3166,6 +3208,7 @@ function upsertMessage(
     renderMessageAttachments(entry);
   }
   renderMessageBody(entry, role);
+  updateResponseForkButton(entry);
   presentContentChanged(shouldFollow);
   return entry.node;
 }
@@ -3583,7 +3626,8 @@ function renderCachedThread(entry) {
 }
 
 function threadLabel(thread) {
-  return thread.name || thread.preview || "Untitled thread";
+  const label = thread.name || thread.preview || "Untitled thread";
+  return thread.forkedFromId ? `Fork: ${label}` : label;
 }
 
 function threadActivityTimestamp(thread) {
@@ -3760,6 +3804,95 @@ async function openThread(threadId, showErrors = true) {
   }
 }
 
+function cachedMessageTurn(entry) {
+  return cachedThread(entry?.threadId, false)?.thread.turns?.find(
+    (turn) => String(turn.id) === String(entry.turnId),
+  ) || null;
+}
+
+function canForkResponse(entry) {
+  const thread = cachedThread(entry?.threadId, false)?.thread;
+  const turn = cachedMessageTurn(entry);
+  if (entry?.role !== "agent" || !entry.forkButton || !state.ready) return false;
+  if (!thread || thread.ephemeral || !turn || !entry.itemId) return false;
+  if (entry.threadId !== state.threadId || state.forkingThreads.has(entry.threadId)) return false;
+  if (selectedThreadSubmitting() || state.uploading) return false;
+  // App-server only accepts an inclusive lastTurnId after a Codex turn has ended.
+  return turn.status !== "inProgress";
+}
+
+function updateResponseForkButton(entry) {
+  if (entry?.kind !== "message" || entry.role !== "agent" || !entry.forkButton) return;
+  const selected = entry.threadId === state.threadId;
+  const working = selected
+    && state.forkingResponseKey === entry.itemKey
+    && state.forkingThreads.has(entry.threadId);
+  entry.responseToolbar.hidden = !selected || !entry.turnId;
+  entry.forkButton.disabled = !canForkResponse(entry);
+  entry.forkButtonLabel.textContent = working ? "Forking…" : "Fork";
+  entry.forkButton.setAttribute("aria-busy", String(working));
+  entry.forkButton.setAttribute(
+    "aria-label",
+    `${working ? "Forking from" : "Fork from"} this Codex response`,
+  );
+  entry.forkButton.title = cachedMessageTurn(entry)?.status === "inProgress"
+    ? "Available when Codex finishes this turn"
+    : "Create a separate chat through this completed turn";
+}
+
+function updateResponseForkControls() {
+  for (const entry of state.items.values()) updateResponseForkButton(entry);
+}
+
+async function forkFromResponse(entry) {
+  if (!canForkResponse(entry)) return;
+  const turn = cachedMessageTurn(entry);
+  if (!turn) return;
+  const sourceId = entry.threadId;
+  const selectionId = state.selectionId;
+  const settings = { ...currentChatSettings() };
+  state.forkingThreads.add(sourceId);
+  state.forkingResponseKey = entry.itemKey;
+  notice("");
+  updateControls();
+  try {
+    const result = await rpc("thread/fork", {
+      threadId: sourceId,
+      lastTurnId: turn.id,
+      // A copied goal must wait for explicit input in the new chat.
+      deferGoalContinuation: true,
+    });
+    const thread = result?.thread;
+    if (!thread?.id || thread.id === sourceId) {
+      throw new Error("The server did not return a separate chat.");
+    }
+    state.settingsByThread.set(thread.id, settings);
+    persistChatSettings();
+    mergeThreadSnapshot(thread);
+    showStartedThread(thread);
+    // A late response must not pull the user away from another chat or search.
+    if (selectionId === state.selectionId && state.threadId === sourceId && !state.searchOpen) {
+      if (state.attachments.length) {
+        state.composerAttachmentDrafts.set(state.composerKey, [...state.attachments]);
+      }
+      state.attachments = [];
+      renderAttachments();
+      await openThread(thread.id);
+      if (state.threadId === thread.id && !state.searchOpen) ui.prompt.focus();
+    } else {
+      void refreshThreads();
+    }
+  } catch (error) {
+    if (selectionId === state.selectionId && state.threadId === sourceId && !state.searchOpen) {
+      notice(`Unable to fork from response: ${error.message}`);
+    }
+  } finally {
+    state.forkingThreads.delete(sourceId);
+    if (state.forkingResponseKey === entry.itemKey) state.forkingResponseKey = null;
+    updateControls();
+  }
+}
+
 function beginNewThread() {
   closeSettingsForChatChange(null);
   saveCurrentThreadView();
@@ -3817,6 +3950,7 @@ async function submitPrompt(event) {
   const attachments = [...state.attachments];
   const input = buildTurnInput(text, attachments);
   if (!input.length || !state.ready || selectedThreadSubmitting() || state.uploading
+    || selectedThreadForking()
     || state.interruptingTurns.has(selectedTurnId())) return;
   const inputRequest = selectedInputRequest();
   if (inputRequest) {
@@ -4040,7 +4174,7 @@ async function submitSteer({ draftText, text, attachments, input, turnId }) {
         state.attachments = [...attachments, ...state.attachments];
         renderAttachments();
       } else if (attachments.length) {
-        state.failedSteerAttachments.set(composerKey, attachments);
+        state.composerAttachmentDrafts.set(composerKey, attachments);
       }
       notice(`Reply not confirmed: ${error.message}. Your reply was kept as a draft; it was not sent again.`);
     } else {
@@ -4405,6 +4539,9 @@ if (globalThis.CODEX_WEB_TEST) {
     threadSettingsParams,
     turnSettingsParams,
     beginNewThread,
+    canForkResponse,
+    forkFromResponse,
+    updateResponseForkControls,
     openThread,
     cacheItemUpdate,
     cacheThreadSnapshot,

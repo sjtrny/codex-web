@@ -293,6 +293,25 @@ button:disabled { cursor: default; opacity: .45; }
 
 .message { margin: 0 0 18px; line-height: 1.48; }
 .message .role { margin-bottom: 5px; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; }
+.message-toolbar { display: flex; align-items: center; gap: 4px; min-height: 30px; margin-top: 7px; }
+.message-toolbar[hidden] { display: none; }
+.message-action {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 3px 7px 3px 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted-strong);
+  font-size: .75rem;
+  line-height: 1;
+}
+.message-action::after { content: ""; position: absolute; inset: -6px; }
+.message-action svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.message-action:hover:not(:disabled) { background: var(--button-hover); color: var(--text); }
+.message-action:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 .message .body { min-width: 0; overflow-wrap: anywhere; }
 .message .body.plain-text { white-space: pre-wrap; }
 .message .body > :first-child { margin-top: 0; }
