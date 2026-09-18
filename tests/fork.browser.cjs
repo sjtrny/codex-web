@@ -132,16 +132,20 @@ async function main() {
     await page.goto(`${base}/?thread=source`);
     await page.waitForFunction(() => {
       const buttons = [...document.querySelectorAll(".message-fork")];
-      return buttons.length === 3 && buttons.every((button) => !button.disabled);
+      return buttons.length === 2 && buttons.every((button) => !button.disabled);
     });
-    assert.equal(await page.locator(".message-toolbar").count(), 3);
+    assert.equal(await page.locator(".message-toolbar").count(), 2);
     assert.equal(await page.locator(".message.user .message-toolbar").count(), 0);
     assert.equal(await page.locator(".message.user .message-fork").count(), 0);
     assert.equal(await page.locator("#fork-thread").count(), 0);
-    assert.equal(await page.locator(".message.agent").evaluateAll(
+    const commentary = page.locator(".message.agent").filter({ hasText: "I’ll compare the tradeoffs." });
+    assert.equal(await commentary.locator(".message-toolbar").count(), 0);
+    const finalResponses = page.locator(".message.agent:has(.message-toolbar)");
+    assert.equal(await finalResponses.count(), 2);
+    assert.equal(await finalResponses.evaluateAll(
       (messages) => messages.every((message) => message.lastElementChild?.classList.contains("message-toolbar")),
     ), true);
-    const desktopOffsets = await page.locator(".message.agent").evaluateAll((messages) => (
+    const desktopOffsets = await finalResponses.evaluateAll((messages) => (
       messages.map((message) => {
         const responseLeft = message.querySelector(".body").getBoundingClientRect().left;
         const iconLeft = message.querySelector(".message-fork svg").getBoundingClientRect().left;
@@ -203,13 +207,14 @@ async function main() {
       await page.setViewportSize({ width, height: 740 });
       const forkButtons = page.locator(".message-fork");
       const count = await forkButtons.count();
-      assert.equal(count, 4);
+      assert.equal(count, 3);
       for (let index = 0; index < count; index += 1) {
         const bounds = await forkButtons.nth(index).boundingBox();
         assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width);
       }
       assert.equal(await page.locator(".message.user .message-toolbar").count(), 0);
-      const mobileOffsets = await page.locator(".message.agent").evaluateAll((messages) => (
+      assert.equal(await commentary.locator(".message-toolbar").count(), 0);
+      const mobileOffsets = await page.locator(".message.agent:has(.message-toolbar)").evaluateAll((messages) => (
         messages.map((message) => {
           const responseLeft = message.querySelector(".body").getBoundingClientRect().left;
           const iconLeft = message.querySelector(".message-fork svg").getBoundingClientRect().left;
