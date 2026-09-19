@@ -480,7 +480,11 @@ async def workspace_file(request: web.Request) -> web.FileResponse:
         ),
     }
     if mime:
-        headers["Content-Type"] = mime
+        headers["Content-Type"] = (
+            f"{mime}; charset=utf-8"
+            if disposition == "inline" and mime.startswith("text/")
+            else mime
+        )
     if encoding:
         headers["Content-Encoding"] = encoding
     return web.FileResponse(

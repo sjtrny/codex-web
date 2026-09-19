@@ -1516,6 +1516,65 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
                     response.headers["Content-Disposition"],
                 )
 
+    async def test_workspace_text_is_utf8_and_binary_bytes_are_unchanged(self) -> None:
+        unicode_text = (
+            "en–dash em—dash\n"
+            "Greek: α β γ\n"
+            "units: 5 µm, 10 Ω, 20 °C\n"
+            "accented: café; emoji: 🧪\n"
+        )
+        unicode_document = self.workspace_path / "unicode.md"
+        unicode_document.write_text(unicode_text, encoding="utf-8")
+        ascii_bytes = b"plain ASCII text\n"
+        ascii_document = self.workspace_path / "ascii.txt"
+        ascii_document.write_bytes(ascii_bytes)
+        binary_bytes = b"\x00\x7f\x80\xff\n"
+        binary_document = self.workspace_path / "payload.bin"
+        binary_document.write_bytes(binary_bytes)
+
+        async with ClientSession() as session:
+            async with session.get(
+                f"http://127.0.0.1:{self.port}/api/files",
+                params={"path": str(unicode_document)},
+            ) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(
+                    response.headers["Content-Type"],
+                    "text/markdown; charset=utf-8",
+                )
+                self.assertEqual(response.charset, "utf-8")
+                self.assertEqual(await response.text(), unicode_text)
+
+            async with session.get(
+                f"http://127.0.0.1:{self.port}/api/files",
+                params={"path": str(ascii_document), "download": "1"},
+            ) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(
+                    response.headers["Content-Type"],
+                    "text/plain",
+                )
+                self.assertIsNone(response.charset)
+                self.assertTrue(
+                    response.headers["Content-Disposition"].startswith("attachment;")
+                )
+                self.assertEqual(await response.read(), ascii_bytes)
+
+            async with session.get(
+                f"http://127.0.0.1:{self.port}/api/files",
+                params={"path": str(binary_document)},
+            ) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(
+                    response.headers["Content-Type"],
+                    "application/octet-stream",
+                )
+                self.assertIsNone(response.charset)
+                self.assertTrue(
+                    response.headers["Content-Disposition"].startswith("attachment;")
+                )
+                self.assertEqual(await response.read(), binary_bytes)
+
     async def test_reads_host_images_through_the_app_server(self) -> None:
         path = "/tmp/freelens-illumination/synthetic_comparison.png"
         png = b"\x89PNG\r\n\x1a\n" + (b"\x00" * 32)
