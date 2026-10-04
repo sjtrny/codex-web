@@ -177,6 +177,9 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
         self.search_thread_reads = {}
         self.search_thread_behaviors = {}
         self.host_image_reads = {}
+        self.interrupt_error = None
+        self.interrupt_no_response = False
+        self.interrupt_received = asyncio.Event()
 
         backend = web.Application()
 
@@ -224,6 +227,17 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
                                         "message": "No such file",
                                     },
                                 }
+                            )
+                        continue
+                    if method == "turn/interrupt":
+                        self.interrupt_received.set()
+                        if self.interrupt_no_response:
+                            continue
+                        if self.interrupt_error is None:
+                            await socket.send_json({"id": payload["id"], "result": {}})
+                        else:
+                            await socket.send_json(
+                                {"id": payload["id"], "error": self.interrupt_error}
                             )
                         continue
                     if self.search_list_pages is not None:
@@ -321,6 +335,131 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             await socket.send_json(payload)
             echoed = json.loads((await socket.receive()).data)
             self.assertEqual(echoed, payload)
+
+    async def test_audits_interrupt_source_and_request_outcomes(self) -> None:
+        with self.assertLogs(codex_web.LOG, level="INFO") as captured:
+            async with (
+                ClientSession() as session,
+                session.ws_connect(f"http://127.0.0.1:{self.port}/ws") as socket,
+            ):
+                await socket.receive()
+                await socket.send_json(
+                    {
+                        "id": 41,
+                        "method": "turn/interrupt",
+                        "params": {"threadId": "thread-1", "turnId": "turn-1"},
+                        "_codexWebAudit": {"source": "composer_stop_button"},
+                    }
+                )
+                self.assertEqual(
+                    await socket.receive_json(), {"id": 41, "result": {}}
+                )
+
+                self.interrupt_error = {
+                    "code": -32603,
+                    "message": "private backend error detail",
+                }
+                await socket.send_json(
+                    {
+                        "id": 42,
+                        "method": "turn/interrupt",
+                        "params": {"threadId": "thread-2", "turnId": "turn-2"},
+                        "_codexWebAudit": {
+                            "source": ["unrecognized"],
+                            "private": "do not log this metadata",
+                        },
+                    }
+                )
+                self.assertEqual(
+                    await socket.receive_json(),
+                    {"id": 42, "error": self.interrupt_error},
+                )
+
+        requests = [
+            message
+            for message in self.backend_messages
+            if message.get("method") == "turn/interrupt"
+        ]
+        self.assertEqual(len(requests), 2)
+        self.assertNotIn("_codexWebAudit", requests[0])
+        self.assertNotIn("_codexWebAudit", requests[1])
+
+        events = [
+            json.loads(line.split("audit_event=", 1)[1])
+            for line in captured.output
+            if "audit_event=" in line
+        ]
+        self.assertEqual(
+            [(event["requestId"], event["outcome"]) for event in events],
+            [
+                (41, "received"),
+                (41, "succeeded"),
+                (42, "received"),
+                (42, "backend_error"),
+            ],
+        )
+        first_request = events[:2]
+        second_request = events[2:]
+        self.assertTrue(
+            all(event["threadId"] == "thread-1" for event in first_request)
+        )
+        self.assertTrue(all(event["turnId"] == "turn-1" for event in first_request))
+        self.assertTrue(
+            all(event["source"] == "composer_stop_button" for event in first_request)
+        )
+        self.assertTrue(
+            all(event["source"] == "unattributed_client" for event in second_request)
+        )
+        self.assertEqual(len({event["connectionId"] for event in events}), 1)
+        self.assertEqual(first_request[0]["auditId"], first_request[1]["auditId"])
+        self.assertNotEqual(first_request[0]["auditId"], second_request[0]["auditId"])
+        self.assertTrue(all(event["timestamp"].endswith("Z") for event in events))
+        self.assertEqual(first_request[0]["phase"], "received")
+        self.assertEqual(first_request[1]["phase"], "completed")
+        self.assertIn("durationMs", first_request[1])
+        self.assertNotIn("private backend error detail", "\n".join(captured.output))
+        self.assertNotIn("do not log this metadata", "\n".join(captured.output))
+
+    async def test_audits_interrupt_when_connection_closes_before_response(
+        self,
+    ) -> None:
+        self.interrupt_no_response = True
+        with self.assertLogs(codex_web.LOG, level="INFO") as captured:
+            async with ClientSession() as session:
+                socket = await session.ws_connect(
+                    f"http://127.0.0.1:{self.port}/ws"
+                )
+                await socket.receive()
+                await socket.send_json(
+                    {
+                        "id": 43,
+                        "method": "turn/interrupt",
+                        "params": {"threadId": "thread-3", "turnId": "turn-3"},
+                        "_codexWebAudit": {"source": "composer_stop_button"},
+                    }
+                )
+                await asyncio.wait_for(self.interrupt_received.wait(), timeout=1)
+                await socket.close()
+                async with asyncio.timeout(1):
+                    while not any(
+                        '"outcome":"connection_closed"' in line
+                        for line in captured.output
+                    ):
+                        await asyncio.sleep(0.01)
+
+        events = [
+            json.loads(line.split("audit_event=", 1)[1])
+            for line in captured.output
+            if "audit_event=" in line
+        ]
+        self.assertEqual(
+            [event["outcome"] for event in events],
+            ["received", "connection_closed"],
+        )
+        self.assertEqual(events[0]["auditId"], events[1]["auditId"])
+        self.assertEqual(events[1]["threadId"], "thread-3")
+        self.assertEqual(events[1]["turnId"], "turn-3")
+        self.assertEqual(events[1]["source"], "composer_stop_button")
 
     async def test_headers_apply_to_files_errors_and_websocket_handshakes(self) -> None:
         def check_headers(headers) -> None:

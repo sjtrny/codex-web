@@ -2568,7 +2568,7 @@ function send(message) {
   state.ws.send(JSON.stringify(message));
 }
 
-function rpc(method, params = {}, timeoutMs = 60000) {
+function rpc(method, params = {}, timeoutMs = 60000, auditSource = "") {
   const id = state.nextId++;
   return new Promise((resolve, reject) => {
     const timer = window.setTimeout(() => {
@@ -2577,7 +2577,9 @@ function rpc(method, params = {}, timeoutMs = 60000) {
     }, timeoutMs);
     state.pending.set(id, { resolve, reject, timer, method });
     try {
-      send({ method, id, params });
+      const request = { method, id, params };
+      if (auditSource) request._codexWebAudit = { source: auditSource };
+      send(request);
     } catch (error) {
       window.clearTimeout(timer);
       state.pending.delete(id);
@@ -4232,7 +4234,12 @@ async function stopTurn() {
   state.interruptingTurns.add(turnId);
   updateControls();
   try {
-    await rpc("turn/interrupt", { threadId, turnId });
+    await rpc(
+      "turn/interrupt",
+      { threadId, turnId },
+      60000,
+      "composer_stop_button",
+    );
   } catch (error) {
     notice(`Could not stop the task: ${error.message}`);
   } finally {

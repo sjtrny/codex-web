@@ -470,6 +470,7 @@ async function main() {
     await eventually(() => pendingInterrupts.length === 1, "stop request sent");
     const interrupt = pendingInterrupts[0];
     assert.deepEqual(interrupt.params, { threadId: "b", turnId: "turn-b" });
+    assert.deepEqual(interrupt._codexWebAudit, { source: "composer_stop_button" });
     assert.equal(await page.locator("#send").isDisabled(), true);
     assert.equal(await page.locator("#send").textContent(), "Stopping…");
     await page.locator("#prompt").press("Enter");
