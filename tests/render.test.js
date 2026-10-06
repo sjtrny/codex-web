@@ -1206,16 +1206,16 @@ assert.equal(THREAD_QUERY_PARAM, "thread");
 assert.equal(threadHref("thread/with spaces"), "/?thread=thread%2Fwith+spaces");
 assert.equal(threadIdFromSearch("?thread=thread%2Fwith+spaces"), "thread/with spaces");
 assert.equal(threadIdFromSearch("?thread=%20%20"), null);
-assert.equal(ui.threads.children[0].classList.contains("running"), true);
-assert.equal(ui.threads.children[0].getAttribute("aria-busy"), "true");
-assert.equal(ui.threads.children[1].classList.contains("active"), true);
-assert.equal(ui.threads.children[0].localName, "a", "sidebar chats should be browser links");
-assert.equal(ui.threads.children[0].getAttribute("href"), "/?thread=thread-a");
-assert.equal(ui.threads.children[1].getAttribute("aria-current"), "page");
+assert.equal(ui.threads.querySelectorAll("a.thread")[0].classList.contains("running"), true);
+assert.equal(ui.threads.querySelectorAll("a.thread")[0].getAttribute("aria-busy"), "true");
+assert.equal(ui.threads.querySelectorAll("a.thread")[1].classList.contains("active"), true);
+assert.equal(ui.threads.querySelectorAll("a.thread")[0].localName, "a", "sidebar chats should be browser links");
+assert.equal(ui.threads.querySelectorAll("a.thread")[0].getAttribute("href"), "/?thread=thread-a");
+assert.equal(ui.threads.querySelectorAll("a.thread")[1].getAttribute("aria-current"), "page");
 const modifiedClick = Object.assign(new window.Event("click", { cancelable: true }), {
   button: 0, ctrlKey: true,
 });
-ui.threads.children[0].dispatchEvent(modifiedClick);
+ui.threads.querySelectorAll("a.thread")[0].dispatchEvent(modifiedClick);
 assert.equal(modifiedClick.defaultPrevented, false, "modified clicks must retain native new-window behavior");
 
 state.ready = false;
@@ -1250,9 +1250,9 @@ state.threadId = startedThread.id;
 state.submittingThreads.add(startedThread.id);
 assert.equal(showStartedThread(startedThread), true);
 assert.equal(state.threads[0].id, startedThread.id);
-assert.equal(ui.threads.children[0].getAttribute("href"), "/?thread=thread-new");
-assert.equal(ui.threads.children[0].classList.contains("active"), true);
-assert.equal(ui.threads.children[0].classList.contains("running"), true);
+assert.equal(ui.threads.querySelectorAll("a.thread")[0].getAttribute("href"), "/?thread=thread-new");
+assert.equal(ui.threads.querySelectorAll("a.thread")[0].classList.contains("active"), true);
+assert.equal(ui.threads.querySelectorAll("a.thread")[0].classList.contains("running"), true);
 assert.equal(state.provisionalThreads.get(startedThread.id), startedThread);
 
 const staleListMerge = mergeProvisionalThreads(unsortedThreads);
@@ -1329,14 +1329,14 @@ handleNotification("turn/started", {
 });
 assert.equal(state.activeTurns.get("thread-b"), "turn-b");
 assert.equal(ui.thinkingIndicator.hidden, false, "turn start should show thinking for the selected thread");
-assert.equal(ui.threads.children[1].classList.contains("running"), true,
+assert.equal(ui.threads.querySelectorAll("a.thread")[1].classList.contains("running"), true,
   "turn start must update the sidebar before the saved-chat request finishes");
-assert.equal(ui.threads.children[1].getAttribute("aria-busy"), "true");
-assert.match(ui.threads.children[1].children[1].textContent, / · active$/);
+assert.equal(ui.threads.querySelectorAll("a.thread")[1].getAttribute("aria-busy"), "true");
+assert.match(ui.threads.querySelectorAll("a.thread")[1].children[1].textContent, / · active$/);
 renderThreads(unsortedThreads, true);
 assert.equal(state.activeTurns.get("thread-b"), "turn-b",
   "a stale idle saved-chat snapshot must not clear a live turn");
-assert.equal(ui.threads.children[1].classList.contains("running"), true);
+assert.equal(ui.threads.querySelectorAll("a.thread")[1].classList.contains("running"), true);
 handleNotification("turn/completed", {
   threadId: "thread-b",
   turn: { id: "turn-b", status: "completed" },
@@ -1344,15 +1344,15 @@ handleNotification("turn/completed", {
 assert.equal(state.activeTurns.has("thread-b"), false);
 assert.equal(ui.thinkingIndicator.hidden, true, "turn completion should hide thinking");
 assert.equal(state.activeTurns.get("thread-a"), "turn-a", "other active turns must be preserved");
-assert.equal(ui.threads.children[1].classList.contains("running"), false,
+assert.equal(ui.threads.querySelectorAll("a.thread")[1].classList.contains("running"), false,
   "completion must update the sidebar without waiting for the saved-chat request");
-assert.match(ui.threads.children[1].children[1].textContent, / · idle$/);
+assert.match(ui.threads.querySelectorAll("a.thread")[1].children[1].textContent, / · idle$/);
 const staleActiveThreads = unsortedThreads.map((thread) => thread.id === "thread-b"
   ? { ...thread, status: { type: "active", activeFlags: [] } } : thread);
 renderThreads(staleActiveThreads, true);
 assert.equal(state.activeTurns.has("thread-b"), false,
   "a stale active saved-chat snapshot must not resurrect completed work");
-assert.equal(ui.threads.children[1].getAttribute("aria-busy"), "false");
+assert.equal(ui.threads.querySelectorAll("a.thread")[1].getAttribute("aria-busy"), "false");
 renderThreadHistory({
   id: "thread-b", status: { type: "active", activeFlags: [] },
   turns: [{ id: "turn-b", status: "inProgress", items: [] }],
@@ -1364,29 +1364,29 @@ assert.equal(ui.thinkingIndicator.hidden, true);
 handleNotification("thread/status/changed", {
   threadId: "thread-b", status: { type: "active", activeFlags: ["waitingOnUserInput"] },
 });
-assert.equal(ui.threads.children[1].classList.contains("running"), true,
+assert.equal(ui.threads.querySelectorAll("a.thread")[1].classList.contains("running"), true,
   "status-only activity must immediately update the sidebar");
 renderThreads(unsortedThreads, true);
 assert.equal(state.activeTurns.has("thread-b"), true,
   "stale idle snapshots must preserve activity even before its turn id is known");
-assert.equal(ui.threads.children[1].getAttribute("aria-busy"), "true");
+assert.equal(ui.threads.querySelectorAll("a.thread")[1].getAttribute("aria-busy"), "true");
 assert.equal(ui.thinkingLabel.textContent, "Waiting for your answer");
 handleNotification("thread/status/changed", {
   threadId: "thread-b", status: { type: "idle" },
 });
-assert.equal(ui.threads.children[1].classList.contains("running"), false);
+assert.equal(ui.threads.querySelectorAll("a.thread")[1].classList.contains("running"), false);
 assert.equal(ui.thinkingIndicator.hidden, true);
 handleNotification("thread/status/changed", {
   threadId: "thread-c", status: { type: "active", activeFlags: [] },
 });
-assert.equal(ui.threads.children[2].classList.contains("running"), true,
+assert.equal(ui.threads.querySelectorAll("a.thread")[2].classList.contains("running"), true,
   "background status changes must update their own sidebar row immediately");
 assert.equal(ui.thinkingIndicator.hidden, true, "background events must not activate the selected chat");
 handleNotification("thread/status/changed", {
   threadId: "thread-c", status: { type: "systemError" },
 });
-assert.equal(ui.threads.children[2].getAttribute("aria-busy"), "false");
-assert.match(ui.threads.children[2].children[1].textContent, / · systemError$/);
+assert.equal(ui.threads.querySelectorAll("a.thread")[2].getAttribute("aria-busy"), "false");
+assert.match(ui.threads.querySelectorAll("a.thread")[2].children[1].textContent, / · systemError$/);
 
 state.threadId = "thread-a";
 const previousSelection = state.selectionId;

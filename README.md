@@ -200,6 +200,21 @@ ordinary JSON still receive one complete response.
 Run `npm run test:browser:search` with the demo's Playwright dependencies for an
 isolated desktop/mobile streaming check.
 
+### Pin conversations
+
+Hover over a conversation in the sidebar to reveal its grey pin, then select
+the pin to keep it above recent chats. Pinned conversations keep a visible blue
+pin; select it again to unpin. Keyboard focus also reveals the control, and pins
+remain visible on touch devices. Both groups follow recent activity order, and
+pinned conversations remain available even outside the 50 most recent chats.
+
+Pins are saved in this browser and shared between tabs for the same Codex Web
+site. Archiving or deleting a conversation removes its pin. The pin controls
+support keyboard access and mobile touch input.
+
+Run `npm run test:browser:pins` with the demo's Playwright dependencies for an
+isolated desktop/mobile check.
+
 ### Chat settings defaults
 
 Unset chat settings use these instance defaults. Set them in `.env` for Docker

@@ -12,6 +12,7 @@ const THREAD_LIST_PARAMS = Object.freeze({
   sortDirection: "desc",
 });
 const CHAT_SETTINGS_STORAGE_KEY = "codex-web-chat-settings-v1";
+const PINNED_THREADS_STORAGE_KEY = "codex-web-pinned-threads-v1";
 const THREAD_QUERY_PARAM = "thread";
 const SEARCH_MATCH_HIGHLIGHT_MS = 4000;
 const ATTACHED_FILES_HEADING = "Attached files are available locally at these paths:";
@@ -162,6 +163,8 @@ const state = {
   submittingViews: new Set(),
   selectionId: 0,
   threads: [],
+  pinnedThreads: new Set(),
+  threadNodes: new Map(),
   provisionalThreads: new Map(),
   threadRefreshId: 0,
   threadCache: new Map(),
@@ -2743,10 +2746,12 @@ function handleNotification(method, params) {
       refreshThreads();
       return;
     case "thread/archived":
+      setThreadPinned(params.threadId, false);
       state.provisionalThreads.delete(params.threadId);
       refreshThreads();
       return;
     case "thread/deleted":
+      setThreadPinned(params.threadId, false);
       removeRequestsForTurn(params.threadId);
       state.liveThreadStatuses.delete(params.threadId);
       state.activeTurns.delete(params.threadId);
@@ -3667,6 +3672,38 @@ function threadActivityTimestamp(thread) {
   return 0;
 }
 
+function loadPinnedThreads() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(PINNED_THREADS_STORAGE_KEY) || "[]");
+    state.pinnedThreads = new Set(Array.isArray(stored)
+      ? stored.filter((id) => typeof id === "string" && id.trim()) : []);
+  } catch {
+    state.pinnedThreads = new Set();
+  }
+}
+
+function persistPinnedThreads() {
+  try {
+    localStorage.setItem(PINNED_THREADS_STORAGE_KEY, JSON.stringify([...state.pinnedThreads]));
+  } catch {
+    // Pinning still works for this tab when browser storage is unavailable.
+  }
+}
+
+function setThreadPinned(threadId, pinned) {
+  if (pinned) state.pinnedThreads.add(threadId);
+  else if (!state.pinnedThreads.delete(threadId)) return;
+  persistPinnedThreads();
+  renderThreads(state.threads);
+}
+
+function handlePinnedThreadsStorage(event) {
+  if (event.key !== PINNED_THREADS_STORAGE_KEY && event.key !== null) return;
+  loadPinnedThreads();
+  renderThreads(state.threads);
+  void refreshThreads();
+}
+
 function sortThreadsByActivity(threads) {
   if (!Array.isArray(threads)) return [];
   // Native sort is stable: equally active threads keep their incoming order.
@@ -3708,9 +3745,12 @@ function plainPrimaryClick(event) {
 }
 
 function renderThreads(threads, reconcileActivity = false) {
-  const sortedThreads = sortThreadsByActivity(threads);
+  const sortedThreads = sortThreadsByActivity(threads).sort((left, right) => (
+    Number(state.pinnedThreads.has(right.id)) - Number(state.pinnedThreads.has(left.id))
+  ));
   state.threads = sortedThreads;
-  ui.threads.replaceChildren();
+  const focused = ui.threads.contains(document.activeElement) ? document.activeElement : null;
+  const nextNodes = new Map();
   for (const thread of sortedThreads) {
     const status = state.liveThreadStatuses.get(thread.id) || thread.status;
     if (reconcileActivity) {
@@ -3725,29 +3765,58 @@ function renderThreads(threads, reconcileActivity = false) {
     const running = status?.type === "active"
       || state.activeTurns.has(thread.id)
       || state.submittingThreads.has(thread.id);
-    const link = document.createElement("a");
+    const item = state.threadNodes.get(thread.id) || createThreadRow(thread.id);
+    const { row, link, title, meta, pin } = item;
+    const pinned = state.pinnedThreads.has(thread.id);
+    row.classList.toggle("pinned", pinned);
     link.className = `thread${thread.id === state.threadId ? " active" : ""}${running ? " running" : ""}`;
     link.setAttribute("href", threadHref(thread.id));
     link.setAttribute("aria-busy", String(running));
     if (thread.id === state.threadId) link.setAttribute("aria-current", "page");
-    const title = document.createElement("strong");
+    else link.removeAttribute("aria-current");
     title.textContent = threadLabel(thread);
-    const meta = document.createElement("small");
     const activityTimestamp = threadActivityTimestamp(thread);
     const timestamp = activityTimestamp
       ? new Date(activityTimestamp * 1000).toLocaleString()
       : "Unknown time";
     meta.textContent = `${timestamp} · ${running ? "active" : (status?.type || "unknown")}`;
-    link.append(title, meta);
-    link.addEventListener("click", (event) => {
-      if (!plainPrimaryClick(event)) return;
-      event.preventDefault();
-      setSidebarOpen(false, false);
-      setSearchOpen(false, false);
-      openThread(thread.id);
-    });
-    ui.threads.append(link);
+    const pinLabel = `${pinned ? "Unpin" : "Pin"} conversation: ${threadLabel(thread)}`;
+    pin.setAttribute("aria-label", pinLabel);
+    pin.setAttribute("aria-pressed", String(pinned));
+    pin.title = pinLabel;
+    nextNodes.set(thread.id, item);
+    ui.threads.append(row);
   }
+  for (const [threadId, item] of state.threadNodes) {
+    if (!nextNodes.has(threadId)) item.row.remove();
+  }
+  state.threadNodes = nextNodes;
+  if (focused && document.activeElement !== focused && ui.threads.contains(focused)) {
+    focused.focus({ preventScroll: true });
+  }
+}
+
+function createThreadRow(threadId) {
+  const row = document.createElement("div");
+  row.className = "thread-row";
+  const link = document.createElement("a");
+  const title = document.createElement("strong");
+  const meta = document.createElement("small");
+  link.append(title, meta);
+  link.addEventListener("click", (event) => {
+    if (!plainPrimaryClick(event)) return;
+    event.preventDefault();
+    setSidebarOpen(false, false);
+    setSearchOpen(false, false);
+    openThread(threadId);
+  });
+  const pin = document.createElement("button");
+  pin.className = "thread-pin";
+  pin.type = "button";
+  pin.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m16 3 5 5-4 1-4 4-1 4-5-5 4-1 4-4z"></path><path d="m2 22 7-7"></path></svg>';
+  pin.addEventListener("click", () => setThreadPinned(threadId, !state.pinnedThreads.has(threadId)));
+  row.append(link, pin);
+  return { row, link, title, meta, pin };
 }
 
 function showStartedThread(thread) {
@@ -3776,13 +3845,53 @@ function mergeProvisionalThreads(threads) {
 async function refreshThreads() {
   if (!state.ready) return;
   const refreshId = ++state.threadRefreshId;
+  const requestedPins = new Set(state.pinnedThreads);
   try {
     const result = await rpc("thread/list", THREAD_LIST_PARAMS);
     if (refreshId !== state.threadRefreshId) return;
-    renderThreads(mergeProvisionalThreads(result?.data), true);
+    if (!Array.isArray(result?.data)) throw new Error("Unable to load conversations.");
+    const recent = result.data;
+    const foundIds = new Set(recent.map((thread) => thread.id));
+    const pins = new Map(state.threads
+      .filter((thread) => state.pinnedThreads.has(thread.id) && !foundIds.has(thread.id)
+        && !state.provisionalThreads.has(thread.id))
+      .map((thread) => [thread.id, thread]));
+    const render = () => renderThreads(mergeProvisionalThreads([
+      ...recent,
+      ...[...pins.values()].filter((thread) => state.pinnedThreads.has(thread.id)),
+    ]), true);
+    render();
+    updateControls();
+    let cursor = result?.nextCursor;
+    const seenCursors = new Set();
+    // Older pins must remain available beyond the recent-chat page.
+    while (cursor != null && [...state.pinnedThreads].some((id) => (
+      !foundIds.has(id) && !state.provisionalThreads.has(id)
+    ))) {
+      if (typeof cursor !== "string" || !cursor || seenCursors.has(cursor)) {
+        throw new Error("Unable to load pinned conversations: invalid history cursor.");
+      }
+      seenCursors.add(cursor);
+      const page = await rpc("thread/list", { ...THREAD_LIST_PARAMS, cursor });
+      if (refreshId !== state.threadRefreshId) return;
+      if (!Array.isArray(page?.data)) throw new Error("Unable to load pinned conversations.");
+      for (const thread of page.data) {
+        if (state.pinnedThreads.has(thread.id) && !foundIds.has(thread.id)) pins.set(thread.id, thread);
+        foundIds.add(thread.id);
+      }
+      render();
+      cursor = page.nextCursor;
+    }
+    if (cursor == null) {
+      // Only a complete, successful listing can retire pins for missing chats.
+      for (const id of requestedPins) {
+        if (!foundIds.has(id) && !state.provisionalThreads.has(id)) setThreadPinned(id, false);
+      }
+    }
+    render();
     updateControls();
   } catch (error) {
-    notice(error.message);
+    if (refreshId === state.threadRefreshId) notice(error.message);
   }
 }
 
@@ -4504,6 +4613,7 @@ async function boot() {
     restoreComposerDraft();
   }
   loadStoredChatSettings();
+  loadPinnedThreads();
   renderChatSettings();
   try {
     const response = await fetch("/api/config", { cache: "no-store" });
@@ -4538,6 +4648,7 @@ if (globalThis.CODEX_WEB_TEST) {
     PRESENT_THRESHOLD_PX,
     THREAD_CACHE_LIMIT,
     THREAD_LIST_PARAMS,
+    PINNED_THREADS_STORAGE_KEY,
     DEFAULT_SIDEBAR_WIDTH,
     MIN_SIDEBAR_WIDTH,
     MAX_SIDEBAR_WIDTH,
@@ -4597,6 +4708,10 @@ if (globalThis.CODEX_WEB_TEST) {
     renderThinkingIndicator,
     renderLocalPrompt,
     renderThreads,
+    loadPinnedThreads,
+    setThreadPinned,
+    handlePinnedThreadsStorage,
+    refreshThreads,
     renderThemeControl,
     selectedThreadBusy,
     selectedThreadSubmitting,
@@ -4650,6 +4765,7 @@ if (globalThis.CODEX_WEB_TEST) {
     upsertMessage,
   };
 } else {
+  window.addEventListener("storage", handlePinnedThreadsStorage);
   ui.composer.addEventListener("submit", submitPrompt);
   renderThemeControl();
   globalThis.CodexTheme?.subscribe(renderThemeControl);
