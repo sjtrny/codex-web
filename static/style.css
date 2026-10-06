@@ -305,7 +305,11 @@ button:disabled { cursor: default; opacity: .45; }
 }
 
 .message { margin: 0 0 18px; line-height: 1.48; }
-.message .role { margin-bottom: 5px; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; }
+.message-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 5px; }
+.message .role { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; }
+.message-timestamp { color: var(--muted); font-size: .72rem; font-weight: 400; overflow-wrap: anywhere; }
+.activity .message-timestamp { display: inline-block; margin-left: 10px; }
+.message-timestamp[hidden] { display: none; }
 .message-toolbar { display: flex; align-items: center; gap: 4px; min-height: 30px; margin-top: 7px; }
 .message-toolbar[hidden] { display: none; }
 .message-action {
