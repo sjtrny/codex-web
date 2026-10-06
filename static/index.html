@@ -141,6 +141,10 @@
         <button id="settings-close" class="preferences-close" type="button" aria-label="Close chat settings">×</button>
       </header>
       <div class="preferences-body">
+        <div class="model-catalog-controls">
+          <button id="refresh-models" type="button" disabled>Refresh models</button>
+          <p id="model-catalog-status" role="status" aria-live="polite">Loading available models…</p>
+        </div>
         <fieldset id="settings-fields" class="settings-grid" disabled>
           <legend class="sr-only">Chat settings</legend>
           <div class="setting working-folder">
@@ -150,15 +154,18 @@
           </div>
           <label class="setting">
             <span>Model</span>
-            <select id="setting-model" data-setting="model"><option value="">Loading instance default…</option></select>
+            <select id="setting-model" data-setting="model" aria-describedby="model-help"><option value="">Loading instance default…</option></select>
+            <small id="model-help"></small>
           </label>
           <label class="setting">
             <span>Reasoning</span>
-            <select id="setting-effort" data-setting="effort"><option value="">Instance default</option></select>
+            <select id="setting-effort" data-setting="effort" aria-describedby="effort-help"><option value="">Instance default</option></select>
+            <small id="effort-help"></small>
           </label>
           <label class="setting">
-            <span>Service</span>
-            <select id="setting-service-tier" data-setting="serviceTier"><option value="">Instance default</option></select>
+            <span>Speed</span>
+            <select id="setting-service-tier" data-setting="serviceTier" aria-describedby="service-tier-help"><option value="">Instance default</option></select>
+            <small id="service-tier-help"></small>
           </label>
           <label class="setting">
             <span>Personality</span>

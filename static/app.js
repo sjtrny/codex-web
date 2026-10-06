@@ -125,6 +125,11 @@ const ui = {
   settingsClose: el("settings-close"),
   settingsFields: el("settings-fields"),
   settingModel: el("setting-model"),
+  refreshModels: el("refresh-models"),
+  modelCatalogStatus: el("model-catalog-status"),
+  modelHelp: el("model-help"),
+  effortHelp: el("effort-help"),
+  serviceTierHelp: el("service-tier-help"),
   settingEffort: el("setting-effort"),
   settingServiceTier: el("setting-service-tier"),
   settingPersonality: el("setting-personality"),
@@ -307,6 +312,7 @@ function updateControls() {
   ui.fileInput.disabled = blocked || forking || state.uploading || Boolean(inputRequest);
   ui.settingsToggle.disabled = !state.ready;
   ui.settingsFields.disabled = !state.ready;
+  ui.refreshModels.disabled = !state.ready || Boolean(state.settingsCatalogRequest);
   updateResponseForkControls();
   renderRequests();
   renderPendingQuestions();
@@ -1134,6 +1140,17 @@ function effectiveChatSettings(value = {}) {
   for (const field of CHAT_SETTING_FIELDS) {
     if (overrides[field]) effective[field] = overrides[field];
   }
+  const model = modelForSettings(effective);
+  const efforts = model?.supportedReasoningEfforts || [];
+  if (effective.effort && efforts.length
+    && !efforts.some((entry) => entry.reasoningEffort === effective.effort)) {
+    effective.effort = model.defaultReasoningEffort || "";
+  }
+  if (model && effective.serviceTier
+    && !serviceTierChoices(model).some((tier) => tier.id === effective.serviceTier)) {
+    effective.serviceTier = "default";
+  }
+  if (model?.supportsPersonality === false) effective.personality = "";
   return effective;
 }
 
@@ -1203,8 +1220,8 @@ function persistChatSettings() {
 }
 
 function modelForSettings(settings) {
-  const effective = effectiveChatSettings(settings);
-  const modelId = effective.model
+  const modelId = settings.model
+    || state.chatDefaults.model
     || state.configDefaults.model
     || state.models.find((model) => model.isDefault)?.model;
   return state.models.find((model) => model.model === modelId || model.id === modelId) || null;
@@ -1217,8 +1234,8 @@ function chatSettingValueLabel(field, value) {
       || value;
   }
   if (field === "serviceTier") {
-    const model = modelForSettings(state.chatDefaults);
-    return model?.serviceTiers?.find((tier) => tier.id === value)?.name || value;
+    const model = modelForSettings(currentChatSettings());
+    return serviceTierChoices(model).find((tier) => tier.id === value)?.name || value;
   }
   if (field === "personality") return PERSONALITY_LABELS[value] || value;
   if (field === "summary") return SUMMARY_LABELS[value] || value;
@@ -1229,10 +1246,21 @@ function chatSettingValueLabel(field, value) {
 }
 
 function defaultChatSettingOption(field) {
+  const desired = state.chatDefaults[field];
+  const effective = effectiveChatSettings({ ...currentChatSettings(), [field]: "" });
+  const value = ["effort", "serviceTier"].includes(field) ? effective[field] : desired;
+  const source = value !== desired ? "Model default" : "Instance default";
   return {
     value: "",
-    label: `Instance default — ${chatSettingValueLabel(field, state.chatDefaults[field])}`,
+    label: `${source} — ${chatSettingValueLabel(field, value)}`,
   };
+}
+
+function serviceTierChoices(model) {
+  return [
+    { id: "default", name: "Standard", description: "Standard speed and usage." },
+    ...(model?.serviceTiers || []).filter((tier) => tier.id !== "default"),
+  ];
 }
 
 function fillSelect(select, options, selectedValue) {
@@ -1272,13 +1300,6 @@ function permissionOptions() {
 function renderChatSettings() {
   const settings = currentChatSettings();
   renderWorkingFolder();
-  if (
-    state.modelsLoaded
-    && settings.model
-    && !state.models.some((model) => model.model === settings.model)
-  ) {
-    settings.model = "";
-  }
   const modelOptions = [
     defaultChatSettingOption("model"),
     ...state.models.map((model) => ({
@@ -1287,6 +1308,13 @@ function renderChatSettings() {
       description: model.description,
     })),
   ];
+  if (settings.model && !state.models.some((model) => model.model === settings.model)) {
+    modelOptions.push({
+      value: settings.model,
+      label: `${settings.model} (unavailable)`,
+      disabled: true,
+    });
+  }
   fillSelect(ui.settingModel, modelOptions, settings.model);
 
   const model = modelForSettings(settings);
@@ -1308,7 +1336,7 @@ function renderChatSettings() {
   }
   fillSelect(ui.settingEffort, effortOptions, settings.effort);
 
-  const tiers = model?.serviceTiers || [];
+  const tiers = serviceTierChoices(model);
   if (model && settings.serviceTier && !tiers.some((tier) => tier.id === settings.serviceTier)) {
     settings.serviceTier = "";
   }
@@ -1316,7 +1344,17 @@ function renderChatSettings() {
     defaultChatSettingOption("serviceTier"),
     ...tiers.map((tier) => ({ value: tier.id, label: tier.name, description: tier.description })),
   ], settings.serviceTier);
-  ui.settingServiceTier.disabled = tiers.length === 0;
+  ui.settingServiceTier.disabled = false;
+
+  const effective = effectiveChatSettings(settings);
+  ui.modelHelp.textContent = model?.description || (state.modelsLoaded
+    ? "This model is unavailable. Refresh models or choose another model." : "");
+  ui.effortHelp.textContent = efforts.find(
+    (entry) => entry.reasoningEffort === (effective.effort || model?.defaultReasoningEffort),
+  )?.description || "";
+  ui.serviceTierHelp.textContent = tiers.find(
+    (tier) => tier.id === (effective.serviceTier || "default"),
+  )?.description || "";
 
   const personalitySupported = !model || model.supportsPersonality !== false;
   if (!personalitySupported) settings.personality = "";
@@ -1416,27 +1454,76 @@ async function refreshPermissionProfiles() {
 }
 
 async function loadChatSettingsCatalog() {
-  const [models, config, requirements, profiles] = await Promise.allSettled([
-    rpc("model/list", { limit: 100, includeHidden: false }),
-    rpc("config/read", { includeLayers: false }),
-    rpc("configRequirements/read", {}),
-    rpc("permissionProfile/list", { cwd: currentWorkingFolder() }),
-  ]);
-  if (models.status === "fulfilled") {
-    state.models = models.value?.data || [];
-    state.modelsLoaded = true;
+  if (state.settingsCatalogRequest?.socket === state.ws) {
+    return state.settingsCatalogRequest.promise;
   }
-  if (config.status === "fulfilled") state.configDefaults = config.value?.config || {};
-  if (requirements.status === "fulfilled") {
-    state.configRequirements = requirements.value?.requirements || null;
-  }
-  if (profiles.status === "fulfilled") {
-    state.permissionProfiles = profiles.value?.data || [];
-    state.permissionProfilesLoaded = true;
-  }
-  renderChatSettings();
-  if (!state.models.length && models.status === "rejected") {
-    notice(`Model settings unavailable: ${models.reason.message}`);
+  const request = { socket: state.ws, promise: null };
+  state.settingsCatalogRequest = request;
+  ui.refreshModels.disabled = true;
+  ui.modelCatalogStatus.textContent = "Refreshing models…";
+  request.promise = refreshChatSettingsCatalog(request);
+  return request.promise;
+}
+
+async function listAvailableModels() {
+  const models = new Map();
+  const cursors = new Set();
+  let cursor;
+  do {
+    const page = await rpc("model/list", {
+      limit: 100, includeHidden: false, ...(cursor ? { cursor } : {}),
+    });
+    if (!Array.isArray(page?.data)) throw new Error("Invalid model catalog response");
+    for (const model of page.data) {
+      if (typeof model.model !== "string" || !model.model) {
+        throw new Error("Invalid model catalog entry");
+      }
+      if (!model.hidden) models.set(model.model, model);
+    }
+    cursor = page.nextCursor;
+    if (cursor) {
+      if (typeof cursor !== "string" || cursors.has(cursor) || cursors.size >= 100) {
+        throw new Error("Invalid model catalog pagination");
+      }
+      cursors.add(cursor);
+    }
+  } while (cursor);
+  return [...models.values()];
+}
+
+async function refreshChatSettingsCatalog(request) {
+  try {
+    const [models, config, requirements, profiles] = await Promise.allSettled([
+      listAvailableModels(),
+      rpc("config/read", { includeLayers: false }),
+      rpc("configRequirements/read", {}),
+      rpc("permissionProfile/list", { cwd: currentWorkingFolder() }),
+    ]);
+    if (state.ws !== request.socket) return;
+    if (models.status === "fulfilled") {
+      state.models = models.value;
+      state.modelsLoaded = true;
+      ui.modelCatalogStatus.textContent = `${state.models.length} models available. Speed and reasoning options depend on the model.`;
+    } else {
+      ui.modelCatalogStatus.textContent = `Could not refresh models: ${models.reason.message}. Previous choices are unchanged.`;
+    }
+    if (config.status === "fulfilled") state.configDefaults = config.value?.config || {};
+    if (requirements.status === "fulfilled") {
+      state.configRequirements = requirements.value?.requirements || null;
+    }
+    if (profiles.status === "fulfilled") {
+      state.permissionProfiles = profiles.value?.data || [];
+      state.permissionProfilesLoaded = true;
+    }
+    renderChatSettings();
+    if (!state.models.length && models.status === "rejected") {
+      notice(`Model settings unavailable: ${models.reason.message}`);
+    }
+  } finally {
+    if (state.settingsCatalogRequest === request) {
+      state.settingsCatalogRequest = null;
+      ui.refreshModels.disabled = !state.ready;
+    }
   }
 }
 
@@ -4232,6 +4319,10 @@ async function submitPrompt(event) {
   const cwd = currentWorkingFolder();
   const chatSettingOverrides = { ...currentChatSettings() };
   const chatSettings = effectiveChatSettings(chatSettingOverrides);
+  if (state.modelsLoaded && chatSettings.model && !modelForSettings(chatSettings)) {
+    notice("This model is unavailable. Open chat settings to refresh models or choose another model.");
+    return;
+  }
   let targetThreadId = state.threadId;
   clearComposerDraft(submissionComposerKey);
   state.attachments = [];
@@ -4806,6 +4897,8 @@ if (globalThis.CODEX_WEB_TEST) {
     effectiveChatSettings,
     normalizeChatSettings,
     renderChatSettings,
+    loadChatSettingsCatalog,
+    saveChatSettingsFromControls,
     setSettingsOpen,
     threadSettingsParams,
     turnSettingsParams,
@@ -4922,6 +5015,7 @@ if (globalThis.CODEX_WEB_TEST) {
     if (ui.send.type === "button") void stopTurn();
   });
   ui.settingsToggle.addEventListener("click", () => setSettingsOpen(!state.settingsOpen));
+  ui.refreshModels.addEventListener("click", () => { void loadChatSettingsCatalog(); });
   ui.settingsClose.addEventListener("click", () => setSettingsOpen(false));
   ui.settingsDialog.addEventListener("close", () => {
     if (state.settingsOpen) setSettingsOpen(false);
