@@ -273,6 +273,24 @@ Values are app-server protocol IDs. Restart the web service after changing them.
 The model picker is populated by the app-server's `model/list` response, so keep
 Codex CLI current to make newly available models selectable.
 
+Open **Model and chat settings** and use **Refresh models** to reload all pages
+of the available catalog. Model descriptions and reasoning/speed descriptions
+come from that catalog. A failed refresh keeps the previous choices and saved
+settings. A saved model that is no longer available remains visible; select an
+available model before sending another task.
+
+**Speed** offers **Instance default**, **Standard**, and the selected model's
+advertised tiers, such as **Fast** or **Ultrafast**. Standard explicitly turns
+off an inherited Fast setting for this chat. Extra tiers are not offered when
+the backend does not advertise them for the selected model and account. Ultra
+reasoning is separate from Ultrafast speed; its catalog description explains
+the behavior. Model changes do not change the instance defaults.
+
+If the selected model cannot use the instance's reasoning effort or speed,
+the picker shows the effective model fallback: the catalog's default reasoning
+effort or Standard speed. The same values are used on the next new turn. Active
+turn replies keep their current model/settings.
+
 ### Tool activity visibility
 
 Set `CODEX_WEB_SHOW_TOOL_ACTIVITY=false` in `.env` for Docker Compose, or export
