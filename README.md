@@ -152,6 +152,29 @@ If a task ends before a reply is accepted, the reply remains a draft for you to
 send again. Codex Web does not automatically start a new task. Mid-task replies
 require an app-server that supports `turn/steer`.
 
+### Interruption audit log
+
+When the composer **Stop** button sends `turn/interrupt`, the proxy writes two
+structured `audit_event` records to the normal application log. The first has
+an outcome of `received`; the second records `succeeded`, `backend_error`, or
+`connection_closed` (or `invalid_request_id`/`request_id_reused` for malformed
+clients). Each record includes an ISO 8601 UTC timestamp, thread ID,
+turn ID, JSON-RPC request ID, an opaque ID for the browser WebSocket connection,
+and the source `composer_stop_button`. The pair also shares a unique audit ID,
+and the terminal record includes elapsed milliseconds.
+
+The proxy removes its private audit metadata before it forwards the request to
+app-server. Audit events do not include prompt text, response bodies, or backend
+error messages. Interrupt requests made without recognized source metadata are
+recorded as `unattributed_client`.
+
+These events use the configured process log destination; Codex Web does not
+write them to an application database. With Docker Compose, inspect them with:
+
+```bash
+docker compose logs codex-web | grep 'audit_event='
+```
+
 For an isolated desktop/mobile browser check, install the demo's Playwright
 dependencies and Chromium with `demo/setup.sh`, then run
 `npm run test:browser:questions`. This check uses simulated app-server events

@@ -90,6 +90,10 @@ ACTIVE_DOCUMENT_MIMES = {
 }
 HOST_IMAGE_SUFFIXES = {".gif", ".jpeg", ".jpg", ".png", ".webp"}
 THREAD_INSTRUCTION_METHODS = {"thread/start", "thread/resume", "thread/fork"}
+INTERRUPT_METHOD = "turn/interrupt"
+INTERRUPT_AUDIT_FIELD = "_codexWebAudit"
+INTERRUPT_AUDIT_SOURCES = frozenset({"composer_stop_button"})
+MAX_AUDIT_IDENTIFIER_CHARS = 256
 
 
 class BackendRPCError(Exception):
@@ -1309,11 +1313,94 @@ def inject_codex_web_instructions(payload: dict[str, object]) -> dict[str, objec
     return rewritten
 
 
+def audit_identifier(value: object) -> str | None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > MAX_AUDIT_IDENTIFIER_CHARS
+    ):
+        return None
+    return value
+
+
+def audit_request_id(value: object) -> str | int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return audit_identifier(value)
+
+
+def audit_request_key(value: object) -> tuple[str, str | int] | None:
+    request_id = audit_request_id(value)
+    if request_id is None:
+        return None
+    return type(request_id).__name__, request_id
+
+
+def prepare_interrupt_request(
+    payload: dict[str, object],
+) -> tuple[dict[str, object], dict[str, object] | None]:
+    if payload.get("method") != INTERRUPT_METHOD:
+        return payload, None
+
+    rewritten = dict(payload)
+    metadata = rewritten.pop(INTERRUPT_AUDIT_FIELD, None)
+    source = "unattributed_client"
+    candidate_source = metadata.get("source") if isinstance(metadata, dict) else None
+    if isinstance(candidate_source, str) and candidate_source in INTERRUPT_AUDIT_SOURCES:
+        source = candidate_source
+
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        params = {}
+    return rewritten, {
+        "requestId": audit_request_id(payload.get("id")),
+        "threadId": audit_identifier(params.get("threadId")),
+        "turnId": audit_identifier(params.get("turnId")),
+        "source": source,
+    }
+
+
+def interrupt_audit_event(
+    record: dict[str, object], outcome: str, duration_ms: int | None = None
+) -> None:
+    event = {
+        "timestamp": datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z"),
+        "event": "turn_interrupt",
+        "phase": "received" if outcome == "received" else "completed",
+        "outcome": outcome,
+        **{key: value for key, value in record.items() if not key.startswith("_")},
+    }
+    if duration_ms is not None:
+        event["durationMs"] = duration_ms
+    LOG.info(
+        "audit_event=%s",
+        json.dumps(event, separators=(",", ":"), sort_keys=True),
+    )
+
+
+def finish_interrupt_audit(record: dict[str, object], outcome: str) -> None:
+    started = record.get("_started")
+    duration_ms = None
+    if isinstance(started, float):
+        duration_ms = max(
+            0,
+            round((asyncio.get_running_loop().time() - started) * 1000),
+        )
+    interrupt_audit_event(record, outcome, duration_ms)
+
+
 async def relay_websockets(
     browser: web.WebSocketResponse,
     upstream: ClientWebSocketResponse,
+    connection_id: str,
 ) -> None:
     """Relay until either peer disconnects, then stop both message readers."""
+
+    pending_interrupts: dict[tuple[str, str | int], dict[str, object]] = {}
 
     async def browser_to_backend() -> None:
         async for message in browser:
@@ -1335,7 +1422,25 @@ async def relay_websockets(
                         )
                     )
                     continue
-                rewritten = inject_codex_web_instructions(payload)
+                rewritten, interrupt = prepare_interrupt_request(payload)
+                if interrupt is not None:
+                    interrupt.update(
+                        {
+                            "auditId": uuid.uuid4().hex,
+                            "connectionId": connection_id,
+                            "_started": asyncio.get_running_loop().time(),
+                        }
+                    )
+                    interrupt_audit_event(interrupt, "received")
+                    request_key = audit_request_key(interrupt["requestId"])
+                    if request_key is not None:
+                        previous = pending_interrupts.pop(request_key, None)
+                        if previous is not None:
+                            finish_interrupt_audit(previous, "request_id_reused")
+                        pending_interrupts[request_key] = interrupt
+                    else:
+                        finish_interrupt_audit(interrupt, "invalid_request_id")
+                rewritten = inject_codex_web_instructions(rewritten)
                 if rewritten is payload:
                     await upstream.send_str(message.data)
                 else:
@@ -1346,6 +1451,26 @@ async def relay_websockets(
     async def backend_to_browser() -> None:
         async for message in upstream:
             if message.type is WSMsgType.TEXT:
+                try:
+                    payload = message.json()
+                except json.JSONDecodeError:
+                    payload = None
+                if (
+                    isinstance(payload, dict)
+                    and "method" not in payload
+                    and ("result" in payload or "error" in payload)
+                ):
+                    request_key = audit_request_key(payload.get("id"))
+                    interrupt = (
+                        pending_interrupts.pop(request_key, None)
+                        if request_key is not None
+                        else None
+                    )
+                    if interrupt is not None:
+                        finish_interrupt_audit(
+                            interrupt,
+                            "backend_error" if "error" in payload else "succeeded",
+                        )
                 await browser.send_str(message.data)
             elif message.type is WSMsgType.BINARY:
                 await browser.send_bytes(message.data)
@@ -1362,6 +1487,8 @@ async def relay_websockets(
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        for interrupt in pending_interrupts.values():
+            finish_interrupt_audit(interrupt, "connection_closed")
 
 
 async def websocket_proxy(request: web.Request) -> web.WebSocketResponse:
@@ -1371,11 +1498,12 @@ async def websocket_proxy(request: web.Request) -> web.WebSocketResponse:
         compress=False,
     )
     await browser.prepare(request)
+    connection_id = uuid.uuid4().hex
 
     try:
         async with connect_backend() as (upstream, transport):
             await browser.send_str(proxy_notice("codex-web/connected", transport=transport))
-            await relay_websockets(browser, upstream)
+            await relay_websockets(browser, upstream, connection_id)
     except (ClientError, OSError, RuntimeError, TimeoutError) as exc:
         LOG.warning("backend connection failed: %s", exc)
         await browser.send_str(proxy_notice("codex-web/error", message=str(exc)))
