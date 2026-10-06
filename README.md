@@ -80,6 +80,19 @@ See the provided [`compose.yaml`](compose.yaml) for all configuration options;
 
 Open `http://HOST_IP:8765`.
 
+### Backend response size
+
+`CODEX_BACKEND_MAX_MESSAGE_BYTES` sets the maximum size of a single WebSocket
+message received from Codex app-server. It applies to Unix sockets and remote
+WebSocket connections, including history reads, searches, and streamed events.
+The default is `16777216` bytes (16 MiB). For larger conversation histories,
+set it to `67108864` (64 MiB) in `.env` for Docker Compose or export it for a
+direct run, then restart the web service.
+
+Values must be positive integers in bytes. Empty values use the default;
+invalid values prevent the web service from starting. This setting does not
+change the browser-input or attachment-upload limits.
+
 ### Agent instructions
 
 Codex Web bundles [`codex-web-instructions.md`](codex-web-instructions.md) in

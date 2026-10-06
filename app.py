@@ -149,6 +149,10 @@ def upload_limits() -> tuple[int, int, int]:
     )
 
 
+def backend_message_limit() -> int:
+    return env_int("CODEX_BACKEND_MAX_MESSAGE_BYTES", MAX_MESSAGE_BYTES)
+
+
 def upload_roots() -> tuple[Path, Path]:
     storage = Path(env("CODEX_UPLOAD_DIR", "/uploads"))
     visible = Path(env("CODEX_UPLOAD_HOST_DIR", "/workspaces/codex-web/uploads"))
@@ -683,7 +687,7 @@ async def connect_backend(
             target,
             headers=headers,
             heartbeat=30,
-            max_msg_size=MAX_MESSAGE_BYTES,
+            max_msg_size=backend_message_limit(),
             compress=0,
         )
         try:
@@ -1515,6 +1519,7 @@ async def websocket_proxy(request: web.Request) -> web.WebSocketResponse:
 
 
 def create_app() -> web.Application:
+    backend_message_limit()
     _, max_upload_request_bytes, _ = upload_limits()
     application = web.Application(
         client_max_size=max(MAX_MESSAGE_BYTES, max_upload_request_bytes),

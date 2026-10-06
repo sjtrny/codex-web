@@ -152,6 +152,25 @@ class SearchHelperTests(unittest.TestCase):
         )
 
 
+class BackendResponseLimitTests(unittest.TestCase):
+    def test_defaults_and_explicit_byte_limit(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(codex_web.backend_message_limit(), 16 * 1024 * 1024)
+            for raw in ("", " "):
+                os.environ["CODEX_BACKEND_MAX_MESSAGE_BYTES"] = raw
+                self.assertEqual(codex_web.backend_message_limit(), 16 * 1024 * 1024)
+            os.environ["CODEX_BACKEND_MAX_MESSAGE_BYTES"] = " 67108864 "
+            self.assertEqual(codex_web.backend_message_limit(), 64 * 1024 * 1024)
+
+    def test_invalid_limits_prevent_startup(self) -> None:
+        for raw in ("0", "-1", "1.5", "invalid"):
+            with self.subTest(value=raw), patch.dict(
+                os.environ, {"CODEX_BACKEND_MAX_MESSAGE_BYTES": raw}
+            ):
+                with self.assertRaisesRegex(RuntimeError, "CODEX_BACKEND_MAX_MESSAGE_BYTES"):
+                    codex_web.create_app()
+
+
 class ProxyTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -162,6 +181,7 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
         for name in codex_web.CHAT_SETTING_ENV_VARS.values():
             os.environ.pop(name, None)
         os.environ.pop("CODEX_WEB_SHOW_TOOL_ACTIVITY", None)
+        os.environ.pop("CODEX_BACKEND_MAX_MESSAGE_BYTES", None)
         os.environ["CODEX_APP_SERVER_SOCKET"] = self.socket_path
         os.environ.pop("CODEX_APP_SERVER_URL", None)
         self.workspace_path = Path(self.tempdir.name) / "workspaces"
@@ -335,6 +355,97 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             await socket.send_json(payload)
             echoed = json.loads((await socket.receive()).data)
             self.assertEqual(echoed, payload)
+
+    async def test_proxies_large_history_with_configured_backend_limit(self) -> None:
+        history = {
+            "thread": {
+                "id": "large-history",
+                "turns": [{
+                    "id": "turn-1",
+                    "items": [{
+                        "id": "command-1",
+                        "type": "commandExecution",
+                        "aggregatedOutput": "x" * (17 * 1024 * 1024),
+                    }],
+                }],
+            }
+        }
+        self.search_list_pages = {}
+        self.search_thread_reads["large-history"] = history
+        os.environ["CODEX_BACKEND_MAX_MESSAGE_BYTES"] = str(64 * 1024 * 1024)
+        remote_site = web.TCPSite(self.backend_runner, "127.0.0.1", 0)
+        await remote_site.start()
+        self.addAsyncCleanup(remote_site.stop)
+        remote_port = remote_site._server.sockets[0].getsockname()[1]
+
+        for transport in ("unix", "websocket"):
+            with self.subTest(transport=transport):
+                if transport == "websocket":
+                    os.environ["CODEX_APP_SERVER_URL"] = f"ws://127.0.0.1:{remote_port}/"
+                else:
+                    os.environ.pop("CODEX_APP_SERVER_URL", None)
+                async with (
+                    ClientSession() as session,
+                    session.ws_connect(
+                        f"http://127.0.0.1:{self.port}/ws",
+                        max_msg_size=64 * 1024 * 1024,
+                    ) as socket,
+                ):
+                    connected = await socket.receive_json()
+                    self.assertEqual(connected["params"]["transport"], transport)
+                    await socket.send_json({
+                        "id": 1,
+                        "method": "thread/read",
+                        "params": {"threadId": "large-history", "includeTurns": True},
+                    })
+                    async with asyncio.timeout(10):
+                        response = await socket.receive()
+                    self.assertEqual(response.type, WSMsgType.TEXT)
+                    self.assertEqual(json.loads(response.data), {"id": 1, "result": history})
+                    await socket.send_json({"id": 2, "method": "thread/list", "params": {}})
+                    async with asyncio.timeout(2):
+                        response = await socket.receive_json()
+                    self.assertEqual(
+                        response, {"id": 2, "result": {"data": [], "nextCursor": None}}
+                    )
+
+    async def test_backend_rejects_responses_above_configured_limit(self) -> None:
+        history = {"thread": {"id": "bounded", "output": "x" * 2048}}
+        self.search_list_pages = {}
+        self.search_thread_reads["bounded"] = history
+        for limit, allowed in ((1024, False), (4096, True)):
+            with self.subTest(limit=limit):
+                os.environ["CODEX_BACKEND_MAX_MESSAGE_BYTES"] = str(limit)
+                async with codex_web.connect_backend() as (upstream, _):
+                    await upstream.send_json({
+                        "id": 1, "method": "thread/read", "params": {"threadId": "bounded"},
+                    })
+                    async with asyncio.timeout(2):
+                        response = await upstream.receive()
+                    if allowed:
+                        self.assertEqual(response.type, WSMsgType.TEXT)
+                        self.assertEqual(response.json(), {"id": 1, "result": history})
+                    else:
+                        self.assertEqual(response.type, WSMsgType.ERROR)
+                        self.assertEqual(response.data.code, 1009)
+
+    async def test_larger_backend_limit_does_not_raise_browser_input_limit(self) -> None:
+        os.environ["CODEX_BACKEND_MAX_MESSAGE_BYTES"] = str(64 * 1024 * 1024)
+        with patch.object(codex_web, "MAX_MESSAGE_BYTES", 1024):
+            async with (
+                ClientSession() as session,
+                session.ws_connect(f"http://127.0.0.1:{self.port}/ws") as socket,
+            ):
+                await socket.receive()
+                valid = {"id": 1, "method": "echo", "params": {"text": "small"}}
+                await socket.send_json(valid)
+                self.assertEqual(await socket.receive_json(), valid)
+                await socket.send_json({"id": 2, "method": "echo", "params": {"text": "x" * 2048}})
+                async with asyncio.timeout(2):
+                    response = await socket.receive()
+                self.assertEqual(response.type, WSMsgType.CLOSE)
+                self.assertEqual(response.data, 1009)
+                self.assertEqual(self.backend_messages, [valid])
 
     async def test_audits_interrupt_source_and_request_outcomes(self) -> None:
         with self.assertLogs(codex_web.LOG, level="INFO") as captured:
