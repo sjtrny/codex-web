@@ -207,10 +207,13 @@ button:disabled { cursor: default; opacity: .45; }
 .preferences-note { min-height: 1.4em; margin: 12px 0 0; color: var(--muted); font-size: .78rem; }
 
 #threads { display: grid; gap: 4px; }
+.thread-row { display: grid; grid-template-columns: minmax(0, 1fr) 32px; align-items: center; border-radius: 7px; }
+.thread-row:hover, .thread-row:has(.thread.active) { background: var(--thread-active); }
 .thread {
   display: block;
   width: 100%;
   min-height: 0;
+  min-width: 0;
   overflow: hidden;
   padding: .48rem .72rem;
   border: 1px solid transparent;
@@ -227,6 +230,16 @@ button:disabled { cursor: default; opacity: .45; }
 .thread.running small { color: var(--success-text); }
 .thread strong, .thread small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thread small { margin-top: 3px; color: var(--muted); }
+.thread-pin { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; background: transparent; color: var(--muted); }
+.thread-pin svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.thread-pin[aria-pressed="true"] { color: var(--focus); }
+.thread-pin[aria-pressed="true"] svg path:first-child { fill: currentColor; }
+.thread-pin:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+
+@media (hover: hover) and (pointer: fine) {
+  .thread-pin[aria-pressed="false"] { opacity: 0; pointer-events: none; }
+  .thread-row:hover .thread-pin, .thread-row:has(:focus-visible) .thread-pin { opacity: 1; pointer-events: auto; }
+}
 
 .chat { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto auto auto; height: 100%; overflow: hidden; }
 .chat.search-active { grid-template-rows: minmax(0, 1fr); }
@@ -597,6 +610,8 @@ button:disabled { cursor: default; opacity: .45; }
   .close-sidebar { width: 44px; height: 44px; margin-left: 0; padding: 0; font-size: 1.35rem; }
   .brand { justify-content: flex-start; margin-bottom: 12px; }
   .wide, .settings-cog, .thread { min-height: 44px; }
+  .thread-row { grid-template-columns: minmax(0, 1fr) 44px; }
+  .thread-pin { width: 44px; height: 44px; }
   #threads { display: grid; }
   .topbar { min-height: calc(54px + env(safe-area-inset-top)); padding: calc(6px + env(safe-area-inset-top)) 10px 6px; }
   .setting select, .setting input { min-height: 44px; font-size: 16px; }
