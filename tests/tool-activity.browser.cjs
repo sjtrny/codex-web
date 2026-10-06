@@ -140,7 +140,7 @@ async function checkMode(browser, value) {
     assert.equal(await activities.count(), activityCount(tools.length));
     assert.match(await page.locator("#messages").textContent(), /I’ll check the example/);
     assert.match(await page.locator("#messages").textContent(), /The example is ready/);
-    if (!shown) assert.deepEqual(await activities.locator("summary").allTextContents(), ["plan", "reasoning summary"]);
+    if (!shown) assert.deepEqual(await activities.locator(".activity-title").allTextContents(), ["plan", "reasoning summary"]);
 
     const turn = { id: "live", status: "inProgress", items: [
       { id: "live-user", type: "userMessage", content: [{ type: "text", text: "Run the next check." }] },

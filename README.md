@@ -109,6 +109,12 @@ HOST=0.0.0.0 PORT=8765 .venv/bin/python app.py
 
 ### Reply while Codex works
 
+Messages and activity entries show a date and time in your browser's local time
+zone only when an exact per-message timestamp can be recovered. Hover over it
+for the full date and time zone. This browser keeps up to 2,000 recovered message
+timestamps across reloads. Messages without an exact timestamp show no time
+information; task times, conversation times, and browser receipt times are omitted.
+
 During an active task, the composer button shows **Stop** when the text box is
 empty. Type a message or attach a file to switch it to **Reply**. Send an answer,
 correction, or additional instruction without stopping the task. Pressing Enter

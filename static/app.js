@@ -12,6 +12,13 @@ const THREAD_LIST_PARAMS = Object.freeze({
   sortDirection: "desc",
 });
 const CHAT_SETTINGS_STORAGE_KEY = "codex-web-chat-settings-v1";
+const MESSAGE_TIMES_STORAGE_KEY = "codex-web-message-times-v1";
+const MESSAGE_TIMES_LIMIT = 2000;
+const MESSAGE_TIME_FORMAT = new Intl.DateTimeFormat(undefined, {
+  year: "numeric", month: "short", day: "numeric",
+  hour: "2-digit", minute: "2-digit", second: "2-digit",
+});
+const MESSAGE_TIME_DETAIL_FORMAT = new Intl.DateTimeFormat(undefined, { dateStyle: "full", timeStyle: "long" });
 const THREAD_QUERY_PARAM = "thread";
 const SEARCH_MATCH_HIGHLIGHT_MS = 4000;
 const ATTACHED_FILES_HEADING = "Attached files are available locally at these paths:";
@@ -184,6 +191,7 @@ const state = {
   promptHistoryIndex: null,
   promptHistoryDraft: "",
   items: new Map(),
+  messageTimes: loadMessageTimes(),
   requestCards: new Map(),
   questionNodes: new Map(),
   reconnectTimer: null,
@@ -844,7 +852,7 @@ function mergeThreadSnapshot(thread) {
   const entry = {
     ...previous,
     thread: mergeThreadData(thread, previous.thread, (turnId, canonical, streamed) => {
-      rememberCachedItemAlias({ itemAliases }, turnId, canonical, streamed);
+      rememberCachedItemAlias({ itemAliases, thread }, turnId, canonical, streamed);
     }),
     itemAliases,
     generation: state.connectionGeneration,
@@ -877,6 +885,8 @@ function rememberCachedItemAlias(entry, turnId, canonical, streamed) {
     cachedItemAliasKey(turnId, streamed.id),
     String(canonical.id),
   );
+  const recovered = state.messageTimes.get(renderedItemKey(streamed.id, entry.thread.id, turnId));
+  if (recovered) rememberMessageTime(canonical.id, entry.thread.id, turnId, recovered);
 }
 
 function resolvedCachedItemId(entry, turnId, itemId) {
@@ -996,7 +1006,10 @@ function cacheItemUpdate(params) {
   reconcilePendingSteer(params.threadId, params.turnId, params.item);
   const entry = cachedThread(params.threadId, false);
   const item = params.item;
-  if (!entry || !item?.id) return;
+  if (!item?.id) return;
+  const itemId = resolvedCachedItemId(entry, params.turnId, item.id);
+  rememberMessageTime(itemId, params.threadId, params.turnId, nativeMessageTime(item));
+  if (!entry) return;
   let turn = findCachedTurn(entry, params.turnId);
   if (!turn && params.turnId) {
     turn = cacheTurnUpdate(params.threadId, {
@@ -1007,7 +1020,6 @@ function cacheItemUpdate(params) {
   }
   if (!turn) return;
   if (!Array.isArray(turn.items)) turn.items = [];
-  const itemId = resolvedCachedItemId(entry, params.turnId, item.id);
   const index = turn.items.findIndex((candidate) => String(candidate.id) === itemId);
   if (index >= 0) {
     const previousQuestions = turn.items[index].questions;
@@ -3103,6 +3115,86 @@ function renderedItemKey(itemId, threadId = state.threadId, turnId = null) {
   return JSON.stringify([String(threadId), String(turnId), String(itemId)]);
 }
 
+function loadMessageTimes() {
+  const times = new Map();
+  try {
+    const stored = JSON.parse(localStorage.getItem(MESSAGE_TIMES_STORAGE_KEY) || "[]");
+    if (!Array.isArray(stored)) return times;
+    for (const record of stored.slice(-MESSAGE_TIMES_LIMIT)) {
+      if (!Array.isArray(record)) continue;
+      const [key, at, source] = record;
+      if (typeof key !== "string" || key.length > 1024
+        || typeof at !== "number" || !Number.isFinite(at)
+        || Number.isNaN(new Date(at).getTime())
+        || source !== "message") continue;
+      times.set(key, { at, source });
+    }
+  } catch {
+    // Timestamps still work when browser storage is unavailable.
+  }
+  return times;
+}
+
+function rememberMessageTime(itemId, threadId, turnId, time) {
+  if (itemId == null || threadId == null || turnId == null || !time || time.source !== "message") return null;
+  const key = renderedItemKey(itemId, threadId, turnId);
+  const previous = state.messageTimes.get(key);
+  if (previous?.at === time.at) return previous;
+  state.messageTimes.set(key, time);
+  while (state.messageTimes.size > MESSAGE_TIMES_LIMIT) {
+    state.messageTimes.delete(state.messageTimes.keys().next().value);
+  }
+  try {
+    localStorage.setItem(MESSAGE_TIMES_STORAGE_KEY, JSON.stringify(
+      [...state.messageTimes].map(([itemKey, value]) => [itemKey, value.at, value.source]),
+    ));
+  } catch {
+    // Keep session timestamps even if the browser cannot persist them.
+  }
+  return time;
+}
+
+function nativeMessageTime(item) {
+  if (item?.timestampSource && item.timestampSource !== "message") return null;
+  for (const value of [item?.createdAt, item?.timestamp, item?.startedAt]) {
+    // Date-only or timezone-less strings cannot establish an exact instant.
+    if (typeof value === "string" && !/^\d+(\.\d+)?$/.test(value.trim())
+      && !/T.+(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) continue;
+    const date = parseSearchDate(value);
+    if (date) return { at: date.getTime(), source: "message" };
+  }
+  return null;
+}
+
+function itemMessageTime(itemId, threadId, turnId, item = null) {
+  item ||= findCachedTurn(cachedThread(threadId, false), turnId)?.items?.find((candidate) => String(candidate.id) === String(itemId));
+  const native = nativeMessageTime(item);
+  if (native) return native;
+  return state.messageTimes.get(renderedItemKey(itemId, threadId, turnId)) || null;
+}
+
+function renderMessageTimestamp(entry, time) {
+  const key = time ? `${time.at}:${time.source}` : "unavailable";
+  if (entry.timestampKey === key) return;
+  entry.timestampKey = key;
+  const label = entry.timestamp;
+  const date = time && new Date(time.at);
+  if (!date || Number.isNaN(date.getTime()) || time.source !== "message") {
+    label.hidden = true;
+    label.textContent = "";
+    for (const attribute of ["datetime", "data-timestamp-source", "title", "aria-label"]) {
+      label.removeAttribute(attribute);
+    }
+  } else {
+    label.hidden = false;
+    label.dateTime = date.toISOString();
+    label.dataset.timestampSource = time.source;
+    label.textContent = MESSAGE_TIME_FORMAT.format(date);
+    label.title = `Message time: ${MESSAGE_TIME_DETAIL_FORMAT.format(date)}`;
+    label.setAttribute("aria-label", label.title);
+  }
+}
+
 function renderMessageBody(entry, role) {
   if (role !== "agent") {
     if (entry.renderFrame && globalThis.window?.cancelAnimationFrame) {
@@ -3182,6 +3274,7 @@ function upsertMessage(
   turnId = null,
   attachments = null,
   phase = null,
+  messageTime = undefined,
 ) {
   const shouldFollow = shouldFollowMessages();
   removeEmpty();
@@ -3190,15 +3283,20 @@ function upsertMessage(
   if (!entry || entry.kind !== "message") {
     const node = document.createElement("article");
     node.className = `message ${role}`;
-    const label = document.createElement("div");
+    const header = document.createElement("div");
+    header.className = "message-header";
+    const label = document.createElement("span");
     label.className = "role";
     label.textContent = role === "user" ? "You" : "Codex";
+    const timestamp = document.createElement("time");
+    timestamp.className = "message-timestamp";
+    header.append(label, timestamp);
     const body = document.createElement("div");
     body.className = "body";
     const attachmentList = document.createElement("div");
     attachmentList.className = "message-attachments";
     attachmentList.hidden = true;
-    node.append(label, body, attachmentList);
+    node.append(header, body, attachmentList);
     appendMessageNode(node);
     entry = {
       kind: "message",
@@ -3206,6 +3304,7 @@ function upsertMessage(
       role,
       itemKey,
       phase,
+      timestamp,
       responseToolbar: null,
       forkButton: null,
       forkButtonLabel: null,
@@ -3221,6 +3320,7 @@ function upsertMessage(
     state.items.set(itemKey, entry);
   }
   if (phase !== null && phase !== undefined) entry.phase = phase;
+  renderMessageTimestamp(entry, messageTime === undefined ? itemMessageTime(id, threadId, turnId) : messageTime);
   syncResponseToolbar(entry);
   entry.text = append ? entry.text + (text || "") : (text || "");
   if (attachments !== null) {
@@ -3233,8 +3333,8 @@ function upsertMessage(
   return entry.node;
 }
 
-function upsertToolActivity(id, title, text, append, threadId, turnId) {
-  return upsertActivity(id, title, text, append, threadId, turnId, true);
+function upsertToolActivity(id, title, text, append, threadId, turnId, messageTime = undefined) {
+  return upsertActivity(id, title, text, append, threadId, turnId, true, messageTime);
 }
 
 function upsertActivity(
@@ -3245,6 +3345,7 @@ function upsertActivity(
   threadId = state.threadId,
   turnId = null,
   toolActivity = false,
+  messageTime = undefined,
 ) {
   const shouldFollow = shouldFollowMessages();
   removeEmpty();
@@ -3255,6 +3356,11 @@ function upsertActivity(
     node.className = toolActivity ? "activity tool-activity" : "activity";
     node.hidden = toolActivity && !toolActivityIsVisible(threadId);
     const summary = document.createElement("summary");
+    const summaryTitle = document.createElement("span");
+    summaryTitle.className = "activity-title";
+    const timestamp = document.createElement("time");
+    timestamp.className = "message-timestamp";
+    summary.append(summaryTitle, document.createTextNode(" "), timestamp);
     const body = document.createElement("pre");
     node.append(summary, body);
     appendMessageNode(node);
@@ -3262,6 +3368,8 @@ function upsertActivity(
       kind: "activity",
       node,
       summary,
+      summaryTitle,
+      timestamp,
       body,
       text: "",
       totalChars: 0,
@@ -3271,7 +3379,8 @@ function upsertActivity(
     };
     state.items.set(itemKey, entry);
   }
-  entry.summary.textContent = title;
+  entry.summaryTitle.textContent = title;
+  renderMessageTimestamp(entry, messageTime === undefined ? itemMessageTime(id, threadId, turnId) : messageTime);
   const incoming = typeof text === "string" ? text : (text == null ? "" : String(text));
   if (append) {
     entry.totalChars += incoming.length;
@@ -3480,6 +3589,7 @@ function fileChangeText(item) {
 function renderItem(item, completed, threadId = state.threadId, turnId = null) {
   if (!item?.id || !item.type) return;
   const itemId = resolvedThreadItemId(threadId, turnId, item.id);
+  const messageTime = itemMessageTime(itemId, threadId, turnId, item);
   switch (item.type) {
     case "userMessage":
       if (pendingUserMatches(state.pendingUser, item, threadId, turnId)) {
@@ -3497,6 +3607,8 @@ function renderItem(item, completed, threadId = state.threadId, turnId = null) {
           threadId,
           turnId,
           presentation.attachments,
+          null,
+          messageTime,
         );
       }
       break;
@@ -3510,15 +3622,16 @@ function renderItem(item, completed, threadId = state.threadId, turnId = null) {
         turnId,
         null,
         item.phase,
+        messageTime,
       );
       break;
     case "plan":
-      upsertActivity(itemId, "plan", item.text || "", false, threadId, turnId);
+      upsertActivity(itemId, "plan", item.text || "", false, threadId, turnId, false, messageTime);
       break;
     case "reasoning": {
       const summary = reasoningText(item.summary);
       if (summary) {
-        upsertActivity(itemId, "reasoning summary", summary, false, threadId, turnId);
+        upsertActivity(itemId, "reasoning summary", summary, false, threadId, turnId, false, messageTime);
       }
       break;
     }
@@ -3531,6 +3644,7 @@ function renderItem(item, completed, threadId = state.threadId, turnId = null) {
         false,
         threadId,
         turnId,
+        messageTime,
       );
       break;
     }
@@ -3542,6 +3656,7 @@ function renderItem(item, completed, threadId = state.threadId, turnId = null) {
         false,
         threadId,
         turnId,
+        messageTime,
       );
       break;
     case "mcpToolCall":
@@ -3552,6 +3667,7 @@ function renderItem(item, completed, threadId = state.threadId, turnId = null) {
         false,
         threadId,
         turnId,
+        messageTime,
       );
       break;
     case "dynamicToolCall":
@@ -3562,6 +3678,7 @@ function renderItem(item, completed, threadId = state.threadId, turnId = null) {
         false,
         threadId,
         turnId,
+        messageTime,
       );
       break;
     case "webSearch":
@@ -3572,6 +3689,7 @@ function renderItem(item, completed, threadId = state.threadId, turnId = null) {
         false,
         threadId,
         turnId,
+        messageTime,
       );
       break;
     case "contextCompaction":
@@ -3585,6 +3703,7 @@ function renderItem(item, completed, threadId = state.threadId, turnId = null) {
           false,
           threadId,
           turnId,
+          messageTime,
         );
       }
   }
