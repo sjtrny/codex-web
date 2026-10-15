@@ -135,6 +135,7 @@ class HistoryHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self.upstream.close)
         self.enterContext(patch.dict(os.environ, {
             "CODEX_APP_SERVER_URL": str(self.upstream.make_url("/")).replace("http:", "ws:"),
+            "CODEX_WORKSPACE_ROOT": str(Path(__file__).resolve().parents[1]),
             "CODEX_WEB_HISTORY_CHUNK_BYTES": "1024",
         }))
         self.server = TestServer(app.create_app())
