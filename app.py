@@ -32,6 +32,8 @@ from aiohttp import (
 )
 from aiohttp.helpers import content_disposition_header
 
+from history import decode_cursor, read_history_chunk
+
 APP_VERSION = "0.9.3"
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -47,6 +49,7 @@ except OSError as exc:
 if not CODEX_WEB_DEVELOPER_INSTRUCTIONS:
     raise RuntimeError("Codex Web instructions must not be empty")
 MAX_MESSAGE_BYTES = 16 * 1024 * 1024
+DEFAULT_HISTORY_CHUNK_BYTES = 1_000_000
 MAX_HOST_IMAGE_BYTES = 10 * 1024 * 1024
 DEFAULT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 DEFAULT_MAX_UPLOAD_TOTAL_BYTES = 200 * 1024 * 1024
@@ -151,6 +154,10 @@ def upload_limits() -> tuple[int, int, int]:
 
 def backend_message_limit() -> int:
     return env_int("CODEX_BACKEND_MAX_MESSAGE_BYTES", MAX_MESSAGE_BYTES)
+
+
+def history_chunk_limit() -> int:
+    return env_int("CODEX_WEB_HISTORY_CHUNK_BYTES", DEFAULT_HISTORY_CHUNK_BYTES)
 
 
 def upload_roots() -> tuple[Path, Path]:
@@ -385,6 +392,7 @@ async def app_config(_: web.Request) -> web.Response:
             "workspaceRoot": str(workspace_root()),
             "chatDefaults": chat_defaults(),
             "showToolActivity": env_bool("CODEX_WEB_SHOW_TOOL_ACTIVITY", True),
+            "historyChunkBytes": history_chunk_limit(),
             "uploads": {
                 "maxBytes": max_bytes,
                 "maxFiles": max_files,
@@ -1288,6 +1296,50 @@ async def search_chat_history(request: web.Request) -> web.StreamResponse:
     )
 
 
+async def conversation_history(request: web.Request) -> web.Response:
+    try:
+        params = await request.json()
+        if not isinstance(params, dict):
+            raise ValueError
+        thread_id = params.get("threadId")
+        cursor = params.get("cursor", "")
+        if not isinstance(thread_id, str) or not thread_id or not isinstance(cursor, str):
+            raise ValueError
+        position = decode_cursor(cursor, thread_id)
+    except (ValueError, TypeError):
+        return web.json_response({"error": "Invalid history request"}, status=400)
+
+    try:
+        async with asyncio.timeout(60), connect_backend(close_timeout=1) as (upstream, _):
+            request_id = 0
+
+            async def rpc(method, arguments):
+                nonlocal request_id
+                request_id += 1
+                return await backend_rpc(upstream, request_id, method, arguments)
+
+            await rpc("initialize", {
+                "clientInfo": {"name": "codex_web_history", "version": APP_VERSION},
+                "capabilities": {"experimentalApi": True},
+            })
+            await upstream.send_json({"method": "initialized", "params": {}})
+            body, continuation, reset = await read_history_chunk(
+                rpc, position, history_chunk_limit(),
+            )
+    except TimeoutError:
+        return web.json_response({"error": "History download timed out. Try again."}, status=504)
+    except (BackendRPCError, BackendProtocolError, ClientError, OSError, RuntimeError, ValueError) as exc:
+        LOG.warning("conversation history download failed: %s", exc)
+        return web.json_response({
+            "error": "Could not load history. The Codex backend must support thread/turns/list and thread/items/list.",
+        }, status=502)
+    return web.Response(body=body, content_type="application/x-ndjson", headers={
+        "Cache-Control": "no-store",
+        "X-Codex-History-Cursor": continuation,
+        "X-Codex-History-Reset": "1" if reset else "0",
+    })
+
+
 def proxy_notice(method: str, **params: object) -> str:
     return json.dumps({"method": method, "params": params}, separators=(",", ":"))
 
@@ -1520,6 +1572,7 @@ async def websocket_proxy(request: web.Request) -> web.WebSocketResponse:
 
 def create_app() -> web.Application:
     backend_message_limit()
+    history_chunk_limit()
     _, max_upload_request_bytes, _ = upload_limits()
     application = web.Application(
         client_max_size=max(MAX_MESSAGE_BYTES, max_upload_request_bytes),
@@ -1535,6 +1588,7 @@ def create_app() -> web.Application:
             web.get("/api/attachments", attachment_file),
             web.get("/api/host-images", host_image),
             web.post("/api/search", search_chat_history),
+            web.post("/api/history", conversation_history),
             web.post("/api/uploads", upload_files),
             web.get("/healthz", health),
             web.get("/ws", websocket_proxy),
