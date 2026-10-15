@@ -257,6 +257,43 @@ support keyboard access and mobile touch input.
 Run `npm run test:browser:pins` with the demo's Playwright dependencies for an
 isolated desktop/mobile check.
 
+### Conversation history downloads
+
+Set `CODEX_WEB_HISTORY_CHUNK_BYTES` to the maximum history data size per download:
+
+```dotenv
+CODEX_WEB_HISTORY_CHUNK_BYTES=1000000
+```
+
+The default is **1 MB** (1,000,000 bytes, or 8,000,000 bits). Use a positive integer byte count;
+an unset or empty value uses the default. Invalid values stop startup.
+Set it in `.env` for Docker Compose, or export it when running directly.
+Recreate the web service after a Compose change, then reload open browser tabs.
+
+Selecting or switching to a conversation downloads its newest history chunk.
+Scroll upwards near the start of the loaded messages to download another older
+chunk with the same limit. **Load older messages** also works with a keyboard
+or when the loaded content is shorter than the screen. Older messages are
+inserted in order, keeping your reading position. Previously loaded messages
+stay cached while switching chats; reconnecting starts a fresh recent window.
+
+The limit counts the serialized, uncompressed history response body, including
+JSON escaping. It is enforced by the server before transfer to the browser.
+A single message larger than the limit is assembled across chunks and shown
+once complete; its content is not truncated. HTTP headers, thread metadata,
+live updates, and separately loaded images/files are outside this history budget.
+Opening a search result can load several bounded chunks to reach its message.
+
+This requires an app-server with `thread/resume`'s `excludeTurns` option and
+`thread/turns/list` and `thread/items/list` pagination. History failures offer
+a retry. There is no full-history fallback for an unsupported backend.
+`CODEX_BACKEND_MAX_MESSAGE_BYTES` remains the separate app-server transport
+limit; it must still accommodate an individual backend item response.
+
+Run `npm run test:history` and `npm run test:browser:history` for the history
+checks. The browser check uses a temporary local Python server and synthetic
+history; set `PYTHON` and `PLAYWRIGHT_MODULE` for existing installations.
+
 ### Chat settings defaults
 
 Unset chat settings use these instance defaults. Set them in `.env` for Docker

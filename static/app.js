@@ -5,6 +5,7 @@ const MAX_ACTIVITY_CHARS = 32 * 1024;
 const PRESENT_THRESHOLD_PX = 72;
 const SCROLL_DIRECTION_EPSILON_PX = 1;
 const THREAD_CACHE_LIMIT = 8;
+const HISTORY_SCROLL_THRESHOLD_PX = 120;
 const THREAD_LIST_PARAMS = Object.freeze({
   limit: 50,
   sourceKinds: ["cli", "vscode", "appServer"],
@@ -204,6 +205,8 @@ const state = {
   questionNodes: new Map(),
   reconnectTimer: null,
   defaultCwd: "/workspaces",
+  historyChunkBytes: 0,
+  historyRefreshes: new Map(),
   attachments: [],
   pendingUser: null,
   renderTarget: null,
@@ -847,6 +850,7 @@ function cacheThreadSnapshot(thread) {
     followPresent: previous?.followPresent ?? true,
     pendingUser: previous?.pendingUser || null,
     itemAliases: previous?.itemAliases || new Map(),
+    history: previous?.history || null,
   };
   state.threadCache.set(thread.id, entry);
   pruneThreadCache();
@@ -1114,6 +1118,9 @@ function setPendingUserTurn(threadId, turnId) {
 function reconcileMissingTurnPrefix(params) {
   if (!params?.threadId || !params.turnId) return;
   const entry = cachedThread(params.threadId, false);
+  // A paginated turn can intentionally omit its earlier user message. Repeated
+  // tool events must not each download the same recent history chunk again.
+  if (entry?.history) return;
   const turn = findCachedTurn(entry, params.turnId);
   if (!turn || (turn.items || []).some((item) => item.type === "userMessage")) return;
   const pending = entry?.pendingUser;
@@ -2302,7 +2309,12 @@ async function openSearchResult(result, query, link) {
       if (!ui.notice.textContent) notice("Unable to load this conversation.");
       return;
     }
-    const match = locateSearchItem(result, query);
+    let match = locateSearchItem(result, query);
+    while (!match?.exact && cachedThread(result.threadId, false)?.history?.cursor) {
+      if (!await loadOlderHistory(result.threadId)) break;
+      if (!isSearchSelectionCurrent(result.threadId, selectionId)) return;
+      match = locateSearchItem(result, query);
+    }
     if (match && focusSearchItem(match.itemKey)) {
       notice(match.exact ? "" : "Opened the matching turn; the exact message position was unavailable.");
     } else {
@@ -2805,6 +2817,10 @@ function reconcileThreadHistory(threadId) {
     do {
       reconciliation.queued = false;
       const generation = state.connectionGeneration;
+      if (state.historyChunkBytes) {
+        entry = await refreshPagedHistory(threadId) || entry;
+        continue;
+      }
       const result = await rpc("thread/resume", { threadId });
       if (
         generation !== state.connectionGeneration
@@ -3054,6 +3070,7 @@ function handleMessagesScroll() {
     state.followPresent = true;
     ui.jumpPresent.hidden = true;
   }
+  if (movedUp && scrollTop <= HISTORY_SCROLL_THRESHOLD_PX) void loadOlderHistory();
 }
 
 function handleMessagesWheel(event) {
@@ -3062,6 +3079,7 @@ function handleMessagesWheel(event) {
     // scrollTop, so detach synchronously rather than racing the next delta.
     rememberMessagesScrollTop();
     stopFollowingPresent();
+    if (currentMessagesScrollTop() <= HISTORY_SCROLL_THRESHOLD_PX) void loadOlderHistory();
   }
 }
 
@@ -3079,6 +3097,7 @@ function handleMessagesTouchMove(event) {
   ) {
     rememberMessagesScrollTop();
     stopFollowingPresent();
+    if (currentMessagesScrollTop() <= HISTORY_SCROLL_THRESHOLD_PX) void loadOlderHistory();
   }
   state.messagesTouchY = touchY;
 }
@@ -3250,7 +3269,7 @@ function rememberMessageTime(itemId, threadId, turnId, time) {
 
 function nativeMessageTime(item) {
   if (item?.timestampSource && item.timestampSource !== "message") return null;
-  for (const value of [item?.createdAt, item?.timestamp, item?.startedAt]) {
+  for (const value of [item?.createdAt, item?.timestamp, item?.startedAt, item?.startedAtMs, item?.completedAtMs]) {
     // Date-only or timezone-less strings cannot establish an exact instant.
     if (typeof value === "string" && !/^\d+(\.\d+)?$/.test(value.trim())
       && !/T.+(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) continue;
@@ -3803,6 +3822,240 @@ function renderItem(item, completed, threadId = state.threadId, turnId = null) {
   }
 }
 
+function newHistoryState() {
+  return {
+    cursor: "", fragment: "", initialized: false, loading: null,
+    error: "", retryLatest: false, persistedItems: new Set(),
+  };
+}
+
+async function fetchHistoryChunk(threadId, cursor = "") {
+  const response = await fetch("/api/history", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ threadId, cursor }), cache: "no-store",
+  });
+  if (!response.ok) {
+    const result = await response.json().catch(() => ({}));
+    throw new Error(result.error || `History download failed (${response.status})`);
+  }
+  return {
+    text: await response.text(),
+    cursor: response.headers.get("X-Codex-History-Cursor") || "",
+    reset: response.headers.get("X-Codex-History-Reset") === "1",
+  };
+}
+
+function historySnapshotIds(entry) {
+  return {
+    turns: new Set((entry.thread.turns || []).map((turn) => turn.id)),
+    items: new Set((entry.thread.turns || []).flatMap((turn) => (
+      (turn.items || []).map((item) => renderedItemKey(item.id, entry.thread.id, turn.id))
+    ))),
+  };
+}
+
+function applyHistoryChunk(entry, page, older = false, fragment = "", beforeRequest = null) {
+  const lines = ((page.reset ? "" : fragment) + page.text).split("\n");
+  const remainder = lines.pop();
+  if (!page.cursor && remainder) throw new Error("Incomplete history response. Try again.");
+  const turns = [];
+  for (const line of lines) {
+    if (!line) continue;
+    const record = JSON.parse(line);
+    if (record.turn) {
+      turns.unshift({ ...record.turn, items: [] });
+    } else if (record.item && record.turnId) {
+      let turn = turns.find((candidate) => candidate.id === record.turnId);
+      if (!turn) {
+        const known = entry.thread.turns?.find((candidate) => candidate.id === record.turnId);
+        if (!known) throw new Error("History turn metadata is missing. Reopen this conversation.");
+        turn = { ...known, items: [] };
+        turns.unshift(turn);
+      }
+      turn.items.unshift(record.item);
+    } else {
+      throw new Error("Invalid history response. Try again.");
+    }
+  }
+  const history = entry.history;
+  const merge = (source, cached) => {
+    if (!cached) return source;
+    let items = cached.items || [];
+    const preceding = new Set(items.filter((item) => (
+      (beforeRequest?.items || history.persistedItems).has(renderedItemKey(item.id, entry.thread.id, source.id))
+    )).map((item) => item.id));
+    if (!older) {
+      // Only live-only IDs can be aliases. Equal text in two saved messages
+      // must remain two messages when adjacent pages meet.
+      canonicalizeStreamedItems(source.items, items.filter((item) => (
+        !history.persistedItems.has(renderedItemKey(item.id, entry.thread.id, source.id))
+        && source.items.some((saved) => threadItemMatchScore(saved, item) > 0)
+      )), (canonical, streamed) => rememberCachedItemAlias(entry, source.id, canonical, streamed));
+      for (const id of [...preceding]) preceding.add(resolvedCachedItemId(entry, source.id, id));
+      items = items.map((item) => ({ ...item, id: resolvedCachedItemId(entry, source.id, item.id) }));
+    }
+    const merged = mergeTurnSnapshot(source, { ...cached, items }, null, false);
+    if (!older) {
+      const recent = mergeOrderedById(source.items, items.filter((item) => !preceding.has(item.id)), mergeThreadItem);
+      merged.items = orderTurnItems(mergeOrderedById(items.filter((item) => preceding.has(item.id)), recent,
+        (live, saved) => saved ? mergeThreadItem(saved, live) : live));
+    }
+    return merged;
+  };
+  if (older) {
+    entry.thread.turns = mergeOrderedById(turns, entry.thread.turns, merge);
+  } else {
+    const known = beforeRequest?.turns || new Set((entry.thread.turns || []).map((turn) => turn.id));
+    const recent = mergeOrderedById(turns, (entry.thread.turns || []).filter((turn) => !known.has(turn.id)), merge);
+    entry.thread.turns = mergeOrderedById((entry.thread.turns || []).filter((turn) => known.has(turn.id)), recent,
+      (cached, source) => source ? merge(source, cached) : cached);
+  }
+  for (const turn of turns) {
+    for (const item of turn.items) {
+      history.persistedItems.add(renderedItemKey(item.id, entry.thread.id, turn.id));
+    }
+  }
+  reconcileSteersFromThread(entry.thread);
+  reconcileRequestsFromThread(entry.thread);
+  return remainder;
+}
+
+function historyViewportAnchor() {
+  const top = ui.messages.getBoundingClientRect().top;
+  for (const [key, item] of state.items) {
+    const rect = item.node.getBoundingClientRect();
+    if (rect.height && rect.bottom > top) return { key, top: rect.top };
+  }
+  return null;
+}
+
+function renderHistoryUpdate(entry, preservePosition = true) {
+  const anchor = preservePosition && !state.followPresent ? historyViewportAnchor() : null;
+  const oldHeight = ui.messages.scrollHeight;
+  saveCurrentThreadView();
+  renderCachedThread(entry);
+  if (!entry.followPresent && preservePosition) {
+    const node = anchor && state.items.get(anchor.key)?.node;
+    ui.messages.scrollTop += node
+      ? node.getBoundingClientRect().top - anchor.top
+      : ui.messages.scrollHeight - oldHeight;
+    rememberMessagesScrollTop();
+    saveCurrentThreadView();
+  }
+}
+
+function renderHistoryControl() {
+  ui.messages.querySelector(".history-control")?.remove();
+  const history = cachedThread(state.threadId, false)?.history;
+  if (!history || (!history.cursor && history.initialized && !history.error)) return;
+  const button = document.createElement("button");
+  button.className = "history-control";
+  button.type = "button";
+  button.disabled = Boolean(history.loading) || (!history.initialized && !history.error) || !state.ready;
+  button.textContent = history.loading ? "Loading history…"
+    : history.error ? "Retry loading history"
+      : !history.initialized ? "Loading history…" : "Load older messages";
+  button.title = history.error || "Load the previous part of this conversation";
+  button.setAttribute("aria-controls", "messages");
+  button.addEventListener("click", () => {
+    stopFollowingPresent();
+    if (history.initialized && !history.retryLatest) void loadOlderHistory();
+    else void refreshPagedHistory(state.threadId).catch(() => {});
+  });
+  ui.messages.prepend(button);
+}
+
+async function loadOlderHistory(threadId = state.threadId) {
+  const entry = cachedThread(threadId, false);
+  const history = entry?.history;
+  if (!state.ready || !history || history.loading || !history.initialized || !history.cursor) return false;
+  const generation = state.connectionGeneration;
+  if (ui.notice.textContent === history.error) notice("");
+  history.error = "";
+  history.loading = (async () => {
+    const page = await fetchHistoryChunk(threadId, history.cursor);
+    if (generation !== state.connectionGeneration || cachedThread(threadId, false)?.history !== history) return false;
+    const current = cachedThread(threadId, false);
+    history.fragment = applyHistoryChunk(current, page, true, history.fragment);
+    history.cursor = page.cursor;
+    if (state.threadId === threadId) renderHistoryUpdate(current);
+    return true;
+  })().catch((error) => {
+    history.error = error.message;
+    if (state.threadId === threadId) notice(error.message);
+    return false;
+  }).finally(() => {
+    history.loading = null;
+    if (state.threadId === threadId) renderHistoryControl();
+  });
+  if (state.threadId === threadId) renderHistoryControl();
+  return history.loading;
+}
+
+function refreshPagedHistory(threadId) {
+  const running = state.historyRefreshes.get(threadId);
+  if (running?.generation === state.connectionGeneration) return running.promise;
+  const refresh = { generation: state.connectionGeneration, promise: null };
+  refresh.promise = refreshPagedHistoryOnce(threadId).catch((error) => {
+    const entry = cachedThread(threadId, false);
+    if (entry?.history && refresh.generation === state.connectionGeneration) {
+      entry.history.error = error.message;
+      entry.history.retryLatest = true;
+      if (state.threadId === threadId) {
+        if (!entry.history.initialized) renderCachedThread(entry);
+        else renderHistoryControl();
+        notice(error.message);
+      }
+    }
+    throw error;
+  }).finally(() => {
+    if (state.historyRefreshes.get(threadId) === refresh) state.historyRefreshes.delete(threadId);
+  });
+  state.historyRefreshes.set(threadId, refresh);
+  return refresh.promise;
+}
+
+async function refreshPagedHistoryOnce(threadId) {
+  const generation = state.connectionGeneration;
+  const previous = cachedThread(threadId, false);
+  const fresh = !previous?.history || previous.generation !== generation;
+  if (fresh) {
+    // Reconnect starts a contiguous recent window. Retaining a stale older
+    // window could leave an unreachable gap across missed notifications.
+    const entry = cacheThreadSnapshot({ ...previous?.thread, id: threadId, turns: [] });
+    entry.history = newHistoryState();
+    entry.followPresent = true;
+    entry.scrollTop = 0;
+  }
+  const expectedHistory = cachedThread(threadId, false)?.history;
+  if (!expectedHistory) return null;
+  const result = await rpc("thread/resume", { threadId, excludeTurns: true });
+  if (generation !== state.connectionGeneration || !state.ready
+    || cachedThread(threadId, false)?.history !== expectedHistory) return null;
+  let entry = mergeThreadSnapshot({ ...result.thread, turns: [] });
+  const history = entry.history;
+  if (ui.notice.textContent === history.error) notice("");
+  if (history.loading) await history.loading;
+  if (generation !== state.connectionGeneration || cachedThread(threadId, false)?.history !== history) return null;
+  const beforeRequest = historySnapshotIds(cachedThread(threadId, false));
+  const page = await fetchHistoryChunk(threadId);
+  if (generation !== state.connectionGeneration || cachedThread(threadId, false)?.history !== history) return null;
+  entry = cachedThread(threadId, false);
+  const fragment = applyHistoryChunk(entry, page, false, "", beforeRequest);
+  if (!history.initialized) {
+    history.cursor = page.cursor;
+    history.fragment = fragment;
+    history.initialized = true;
+  }
+  history.error = "";
+  history.retryLatest = false;
+  if (state.threadId === threadId) {
+    if (fresh) renderCachedThread(entry);
+    else renderHistoryUpdate(entry);
+  }
+  return entry;
+}
+
 function renderThreadHistory(thread) {
   setThreadPromptHistory(thread);
   clearMessages();
@@ -3820,7 +4073,9 @@ function renderThreadHistory(thread) {
   if (!state.items.size) {
     const empty = document.createElement("p");
     empty.className = "empty";
-    empty.textContent = "No turns yet.";
+    const history = cachedThread(thread.id, false)?.history;
+    empty.textContent = history && (!history.initialized || history.fragment)
+      ? "Load more history to read this conversation." : "No turns yet.";
     appendMessageNode(empty);
   }
   const activeTurn = [...turns].reverse().find((turn) => turn.status === "inProgress");
@@ -3835,6 +4090,7 @@ function renderThreadHistory(thread) {
   }
   renderThreads(state.threads);
   updateControls();
+  renderHistoryControl();
   jumpToPresent();
 }
 
@@ -4136,6 +4392,13 @@ async function openThread(threadId, showErrors = true) {
     return;
   }
   try {
+    if (state.historyChunkBytes) {
+      await refreshPagedHistory(threadId);
+      if (selectionId !== state.selectionId || state.threadId !== threadId) return;
+      await refreshPermissionProfiles();
+      await refreshThreads();
+      return;
+    }
     const result = await rpc("thread/resume", { threadId });
     const thread = result.thread;
     const refreshed = mergeThreadSnapshot(thread);
@@ -4212,6 +4475,7 @@ async function forkFromResponse(entry) {
       lastTurnId: turn.id,
       // A copied goal must wait for explicit input in the new chat.
       deferGoalContinuation: true,
+      ...(state.historyChunkBytes ? { excludeTurns: true } : {}),
     });
     const thread = result?.thread;
     if (!thread?.id || thread.id === sourceId) {
@@ -4834,6 +5098,7 @@ async function boot() {
   renderChatSettings();
   try {
     const response = await fetch("/api/config", { cache: "no-store" });
+    if (!response.ok) throw new Error(`Unable to load configuration (${response.status})`);
     const config = await response.json();
     globalThis.CodexMarkdown?.configure?.({
       workspaceRoot: config.workspaceRoot,
@@ -4842,9 +5107,12 @@ async function boot() {
     state.chatDefaults = normalizeChatSettings(config.chatDefaults);
     state.chatDefaults.toolActivity = config.showToolActivity === false ? "hide" : "show";
     state.uploadLimits = config.uploads || null;
+    state.historyChunkBytes = config.historyChunkBytes || 0;
     renderChatSettings();
   } catch (error) {
     notice(`Configuration error: ${error.message}`);
+    // Do not download unbounded history when its configuration is unavailable.
+    return;
   }
   connect();
 }
@@ -4907,6 +5175,10 @@ if (globalThis.CODEX_WEB_TEST) {
     forkFromResponse,
     updateResponseForkControls,
     openThread,
+    loadOlderHistory,
+    refreshPagedHistory,
+    applyHistoryChunk,
+    newHistoryState,
     cacheItemUpdate,
     cacheThreadSnapshot,
     cacheTurnUpdate,

@@ -279,6 +279,14 @@ button:disabled { cursor: default; opacity: .45; }
 .jump-present:hover { background: var(--jump-hover); }
 .jump-present:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .jump-present[hidden] { display: none; }
+.history-control {
+  display: block;
+  margin: 0 auto 16px;
+  min-height: 44px;
+  padding: 8px 16px;
+  cursor: pointer;
+}
+
 .empty { color: var(--empty); text-align: center; margin-top: 20vh; }
 .thinking-indicator {
   display: flex;
