@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import gzip
 import json
 import os
 import sys
@@ -174,6 +175,24 @@ class HistoryHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(chunks), 2)
         self.assertTrue(all(method in {"initialize", "thread/turns/list", "thread/items/list"}
                             for method, _ in self.backend.calls))
+
+    async def test_compression_preserves_history_bytes_cursor_and_privacy(self):
+        results = {}
+        for encoding in ("identity", "gzip"):
+            async with self.client.post(self.server.make_url("/api/history"),
+                                        json={"threadId": "chat"},
+                                        headers={"Accept-Encoding": encoding},
+                                        auto_decompress=False) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.headers["Cache-Control"], "no-store")
+                self.assertEqual(response.headers["Vary"], "Accept-Encoding")
+                results[encoding] = (await response.read(), response.headers["X-Codex-History-Cursor"])
+                if encoding == "gzip":
+                    self.assertEqual(response.headers["Content-Encoding"], "gzip")
+        self.assertEqual(gzip.decompress(results["gzip"][0]), results["identity"][0])
+        self.assertLess(len(results["gzip"][0]), len(results["identity"][0]))
+        self.assertEqual(results["gzip"][1], results["identity"][1])
+        self.assertLessEqual(len(results["identity"][0]), 1024)
 
     async def test_bad_request_and_cross_thread_cursor_are_rejected(self):
         _, cursor, _ = await read_history_chunk(self.backend.rpc, decode_cursor("", "chat"), 1)

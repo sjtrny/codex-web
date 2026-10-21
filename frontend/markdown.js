@@ -1,9 +1,6 @@
 import createDOMPurify from "dompurify";
-import "katex/dist/katex.min.css";
 import { Marked } from "marked";
-import markedKatex from "marked-katex-extension";
 import { enhanceCodeBlocks } from "./code-copy.mjs";
-import standardLatex from "./standard-latex.mjs";
 import {
   isSameOriginHttpUrl,
   linkRenderedImages,
@@ -33,13 +30,43 @@ markdown.use({
     },
   },
 });
-const katexOptions = Object.freeze({
-  throwOnError: false,
-  trust: false,
-  strict: "warn",
-});
-markdown.use(markedKatex(katexOptions));
-markdown.use(standardLatex(katexOptions));
+// Capture these while the script is executing. The production page supplies
+// fingerprinted URLs; the source page also works with the development assets.
+const script = document.currentScript;
+const mathScript = script?.dataset.mathScript || "/static/vendor/math.js";
+const mathStyle = script?.dataset.mathStyle || "/static/vendor/math.css";
+let mathReady = false;
+let mathRequest;
+
+function loadMathAsset(tag, url) {
+  return new Promise((resolve, reject) => {
+    const element = document.createElement(tag);
+    if (tag === "link") { element.rel = "stylesheet"; element.href = url; }
+    else { element.src = url; element.async = true; }
+    element.onload = () => resolve();
+    element.onerror = () => {
+      element.remove();
+      reject(new Error(`Unable to load ${url}`));
+    };
+    document.head.append(element);
+  });
+}
+
+function loadMath() {
+  if (!mathRequest) {
+    mathRequest = Promise.all([
+      globalThis.CodexMath ? Promise.resolve() : loadMathAsset("script", mathScript),
+      loadMathAsset("link", mathStyle),
+    ]).then(() => {
+      globalThis.CodexMath.install(markdown);
+      mathReady = true;
+    }).catch((error) => {
+      mathRequest = undefined; // A later render can retry after a network failure.
+      throw error;
+    });
+  }
+  return mathRequest;
+}
 
 const purifier = createDOMPurify(window);
 purifier.addHook("uponSanitizeAttribute", (_node, data) => {
@@ -61,13 +88,17 @@ function plainTextFragment(value) {
   return fragment;
 }
 
-function render(value) {
+function renderNow(value) {
   const source = String(value || "");
   try {
     const html = markdown.parse(source);
     const fragment = purifier.sanitize(html, sanitizeOptions);
     rewriteWorkspaceLinks(fragment);
     rewriteLocalImages(fragment);
+    for (const image of fragment.querySelectorAll("img")) {
+      image.loading = "lazy";
+      image.decoding = "async";
+    }
     linkRenderedImages(fragment, (source) => (
       isSameOriginHttpUrl(source, window.location.href)
       && purifier.isValidAttribute("a", "href", source)
@@ -84,6 +115,27 @@ function render(value) {
     console.warn("Markdown rendering failed; showing plain text", error);
     return plainTextFragment(source);
   }
+}
+
+function render(value) {
+  const source = String(value || "");
+  // Be conservative: incomplete streamed maths should also trigger loading.
+  // Plain text, ordinary Markdown and dollar amounts need no KaTeX download.
+  if (mathReady || !/\\\(|\\\[|\$\$|\$[^\n$]+\$|\$\r?\n/.test(source)) return renderNow(source);
+  const fragment = document.createDocumentFragment();
+  const pending = document.createElement("div");
+  pending.className = "math-pending";
+  pending.textContent = source;
+  fragment.append(pending);
+  void loadMath().then(() => {
+    const visible = pending.isConnected;
+    if (visible) document.dispatchEvent(new Event("codex:before-math-render"));
+    pending.replaceWith(renderNow(source));
+    if (visible) document.dispatchEvent(new Event("codex:after-math-render"));
+  }).catch((error) => {
+    console.warn("Math rendering unavailable; keeping readable source", error);
+  });
+  return fragment;
 }
 
 function configure(options = {}) {

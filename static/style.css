@@ -355,7 +355,7 @@ button:disabled { cursor: default; opacity: .45; }
 .message-action:hover:not(:disabled) { background: var(--button-hover); color: var(--text); }
 .message-action:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 .message .body { min-width: 0; overflow-wrap: anywhere; }
-.message .body.plain-text { white-space: pre-wrap; }
+.message .body.plain-text, .math-pending { white-space: pre-wrap; }
 .message .body > :first-child { margin-top: 0; }
 .message .body > :last-child { margin-bottom: 0; }
 .message .body p { margin: .65em 0; }

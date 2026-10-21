@@ -3007,9 +3007,13 @@ async function connect() {
       notice("");
       updateControls();
       void refreshUsageLimits();
-      await loadChatSettingsCatalog();
-      await refreshThreads();
-      if (state.threadId) await openThread(state.threadId, false);
+      // A slow model catalog or a long pinned-chat listing must not delay the
+      // selected conversation. All three requests only require initialization.
+      await Promise.all([
+        loadChatSettingsCatalog(),
+        refreshThreads(),
+        state.threadId ? openThread(state.threadId, false) : Promise.resolve(),
+      ]);
     } catch (error) {
       notice(error.message);
       socket.close();
@@ -5775,5 +5779,19 @@ if (globalThis.CODEX_WEB_TEST) {
     uploadFiles(event.dataTransfer?.files || []);
   });
 
+  let followAfterMath = false;
+  let mathAnchor = null;
+  document.addEventListener("codex:before-math-render", () => {
+    followAfterMath = shouldFollowMessages();
+    mathAnchor = followAfterMath ? null : historyViewportAnchor();
+  });
+  document.addEventListener("codex:after-math-render", () => {
+    const node = mathAnchor && state.items.get(mathAnchor.key)?.node;
+    if (node) {
+      ui.messages.scrollTop += node.getBoundingClientRect().top - mathAnchor.top;
+      rememberMessagesScrollTop();
+    }
+    presentContentChanged(followAfterMath);
+  });
   boot();
 }

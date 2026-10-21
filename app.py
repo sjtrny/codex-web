@@ -347,10 +347,21 @@ class UploadRejected(Exception):
         self.status = status
 
 
-async def security_headers(_: web.Request, response: web.StreamResponse) -> None:
+async def security_headers(request: web.Request, response: web.StreamResponse) -> None:
+    cache_control = "no-store"
+    if request.path.startswith("/static/") and response.status in {200, 206, 304}:
+        # Only content-addressed public UI files may be reused across releases.
+        fingerprinted = re.fullmatch(
+            r"/static/vendor/(?:[\w-]+-[0-9a-f]{16}\.(?:js|css)|fonts/[\w-]+-[A-Z0-9]{8}\.(?:woff2?|ttf))",
+            request.path,
+        )
+        cache_control = "public, max-age=31536000, immutable" if fingerprinted else "no-cache"
+    if request.path == "/" or request.path.startswith("/static/"):
+        # Include this on identity and 304 responses as well as compressed ones.
+        response.headers["Vary"] = "Accept-Encoding"
     response.headers.update(
         {
-            "Cache-Control": "no-store",
+            "Cache-Control": cache_control,
             "Content-Security-Policy": (
                 "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; "
                 "style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; "
@@ -364,7 +375,8 @@ async def security_headers(_: web.Request, response: web.StreamResponse) -> None
 
 
 async def index(_: web.Request) -> web.FileResponse:
-    return web.FileResponse(STATIC / "index.html")
+    built = STATIC / "vendor" / "index.html"
+    return web.FileResponse(built if built.is_file() else STATIC / "index.html")
 
 
 async def pwa_manifest(_: web.Request) -> web.FileResponse:
@@ -1333,11 +1345,16 @@ async def conversation_history(request: web.Request) -> web.Response:
         return web.json_response({
             "error": "Could not load history. The Codex backend must support thread/turns/list and thread/items/list.",
         }, status=502)
-    return web.Response(body=body, content_type="application/x-ndjson", headers={
+    response = web.Response(body=body, content_type="application/x-ndjson", zlib_executor_size=4096, headers={
         "Cache-Control": "no-store",
+        "Vary": "Accept-Encoding",
         "X-Codex-History-Cursor": continuation,
         "X-Codex-History-Reset": "1" if reset else "0",
     })
+    # The byte budget still bounds decoded history. Compress only on the wire,
+    # with larger chunks offloaded so other websocket clients remain responsive.
+    response.enable_compression()
+    return response
 
 
 def proxy_notice(method: str, **params: object) -> str:
