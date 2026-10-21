@@ -52,8 +52,12 @@
         <div class="messages-region">
           <div id="messages" class="messages" aria-live="polite" aria-busy="false">
             <p class="empty">Send a request to start a thread.</p>
-            <div id="thinking-indicator" class="thinking-indicator" role="status" aria-label="Codex is thinking" aria-live="polite" aria-atomic="true" hidden>
-              <span id="thinking-label">Codex is thinking</span>
+            <div id="thinking-indicator" class="thinking-indicator" role="status" aria-labelledby="thinking-label active-model active-reasoning-label active-reasoning" aria-live="polite" aria-atomic="true" hidden>
+              <span id="thinking-label">Thinking.</span>
+              <span class="active-model-details">
+                <span id="active-model">No active turn</span>
+                <span id="active-reasoning-detail" class="active-reasoning-detail" hidden><span id="active-reasoning-label" class="sr-only">Reasoning</span><span id="active-reasoning"></span></span>
+              </span>
               <span class="thinking-dots" aria-hidden="true"><span></span><span></span><span></span></span>
             </div>
           </div>
@@ -73,6 +77,9 @@
         </section>
 
         <form id="composer" class="composer">
+          <div id="selected-model-status" class="model-status" aria-label="Selected model and reasoning for the next turn" aria-live="polite" aria-atomic="true">
+            <span id="selected-model">Loading…</span><span aria-hidden="true">·</span><span class="sr-only">Reasoning</span><span id="selected-reasoning">default</span>
+          </div>
           <div id="attachments" class="attachments" aria-label="Attachments" hidden></div>
           <textarea id="prompt" rows="3" placeholder="Ask Codex…"></textarea>
           <div class="composer-tools">
@@ -141,6 +148,7 @@
         <button id="settings-close" class="preferences-close" type="button" aria-label="Close chat settings">×</button>
       </header>
       <div class="preferences-body">
+        <p class="active-model-summary" aria-live="polite" aria-atomic="true"><span>Active model</span><strong id="settings-active-model">No active turn</strong></p>
         <div class="model-catalog-controls">
           <button id="refresh-models" type="button" disabled>Refresh models</button>
           <p id="model-catalog-status" role="status" aria-live="polite">Loading available models…</p>
@@ -153,8 +161,9 @@
             <small id="cwd-help">Folder where Codex starts commands and looks for project files. Changes apply to your next task, not one already running.</small>
           </div>
           <label class="setting">
-            <span>Model</span>
-            <select id="setting-model" data-setting="model" aria-describedby="model-help"><option value="">Loading instance default…</option></select>
+            <span>Selected model</span>
+            <select id="setting-model" data-setting="model" aria-describedby="selected-model-help model-help"><option value="">Loading instance default…</option></select>
+            <small id="selected-model-help">Used for the next new turn. Replies keep the active model.</small>
             <small id="model-help"></small>
           </label>
           <label class="setting">

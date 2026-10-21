@@ -126,6 +126,13 @@ const ui = {
   settingsClose: el("settings-close"),
   settingsFields: el("settings-fields"),
   settingModel: el("setting-model"),
+  activeModel: el("active-model"),
+  activeReasoning: el("active-reasoning"),
+  activeReasoningDetail: el("active-reasoning-detail"),
+  selectedModel: el("selected-model"),
+  selectedReasoning: el("selected-reasoning"),
+  selectedModelStatus: el("selected-model-status"),
+  settingsActiveModel: el("settings-active-model"),
   refreshModels: el("refresh-models"),
   modelCatalogStatus: el("model-catalog-status"),
   modelHelp: el("model-help"),
@@ -165,6 +172,7 @@ const state = {
   pending: new Map(),
   threadId: null,
   activeTurns: new Map(),
+  activeModels: new Map(),
   liveThreadStatuses: new Map(),
   submittingThreads: new Set(),
   forkingThreads: new Set(),
@@ -320,6 +328,7 @@ function updateControls() {
   renderRequests();
   renderPendingQuestions();
   renderThinkingIndicator(busy);
+  renderModelStatus();
 }
 
 function selectedTurnId() {
@@ -486,9 +495,9 @@ function renderThinkingIndicator(busy = selectedThreadBusy()) {
   const label = waitingOnInput ? "Waiting for your answer"
     : waitingOnApproval ? "Waiting for approval"
       : inputs.length ? "Working — question pending"
-        : "Codex is thinking";
+        : "Thinking.";
   ui.thinkingLabel.textContent = label;
-  ui.thinkingIndicator.setAttribute("aria-label", label);
+  ui.thinkingLabel.title = label;
   ui.thinkingIndicator.classList.toggle("waiting", waitingOnInput || waitingOnApproval);
   ui.messages.setAttribute("aria-busy", String(visible && !waitingOnInput && !waitingOnApproval));
   if (ui.thinkingIndicator.hidden === !visible) return;
@@ -519,6 +528,7 @@ function clearThreadActivity(threadId) {
   if (!threadId) return;
   state.submittingThreads.delete(threadId);
   state.activeTurns.delete(threadId);
+  state.activeModels.delete(threadId);
   rememberThreadStatus(threadId, { type: "idle" });
   renderThreads(state.threads);
   updateControls();
@@ -538,6 +548,7 @@ function pruneThreadCache() {
       || oldest[0];
     if (!candidate) return;
     state.threadCache.delete(candidate[0]);
+    state.activeModels.delete(candidate[0]);
   }
 }
 
@@ -1169,6 +1180,68 @@ function currentChatSettings() {
   return state.settingsByThread.get(state.threadId);
 }
 
+function refreshActiveModel(threadId, force = false) {
+  if (!state.ready || !state.activeTurns.has(threadId)) return;
+  const turnId = state.activeTurns.get(threadId);
+  const generation = state.connectionGeneration;
+  const previous = state.activeModels.get(threadId);
+  if (!force && previous?.turnId === turnId && previous.generation === generation) {
+    return previous.promise;
+  }
+  // A browser selection and a cached thread model can both predate this turn.
+  // Read metadata only, once per observed turn; never infer the active model.
+  const record = { turnId, generation, pending: true, model: "", effort: "", promise: null };
+  state.activeModels.set(threadId, record);
+  record.promise = rpc("thread/read", { threadId, includeTurns: false }).then(({ thread }) => {
+    if (thread?.id === threadId && thread.status?.type === "active") {
+      if (typeof thread.model === "string") record.model = thread.model;
+      if (typeof thread.reasoningEffort === "string") record.effort = thread.reasoningEffort;
+    }
+  }).catch(() => {
+    // Missing metadata is shown explicitly. Opening settings retries the read.
+  }).finally(() => {
+    record.pending = false;
+    if (state.activeModels.get(threadId) === record && state.ready
+      && generation === state.connectionGeneration
+      && state.activeTurns.has(threadId) && state.activeTurns.get(threadId) === turnId
+      && state.threadId === threadId) renderModelStatus();
+  });
+  return record.promise;
+}
+
+function renderModelStatus() {
+  const settings = effectiveChatSettings(currentChatSettings());
+  const selected = settings.model;
+  const selectedLabel = chatSettingValueLabel("model", selected);
+  const unavailable = selected && state.modelsLoaded
+    && !state.models.some((model) => model.model === selected || model.id === selected);
+  const selectedText = `${selectedLabel}${unavailable ? " (unavailable)" : ""}`;
+  const selectedEffort = settings.effort || "default";
+  let activeText = "No active turn";
+  let activeEffort = "";
+  if (state.threadId && !state.ready) {
+    activeText = "Not connected";
+  } else if (state.activeTurns.has(state.threadId)) {
+    refreshActiveModel(state.threadId);
+    const record = state.activeModels.get(state.threadId);
+    activeText = record.pending ? "Loading…"
+      : record.model ? chatSettingValueLabel("model", record.model) : "Unavailable";
+    if (!record.pending && record.model) activeEffort = record.effort || "unknown";
+  } else if (selectedThreadSubmitting()) {
+    activeText = "Starting…";
+  }
+  // Avoid repeated screen-reader announcements on streamed item updates.
+  for (const [node, text] of [[ui.activeModel, activeText], [ui.activeReasoning, activeEffort],
+    [ui.settingsActiveModel, `${activeText}${activeEffort ? ` · ${activeEffort} reasoning` : ""}`],
+    [ui.selectedModel, selectedText], [ui.selectedReasoning, selectedEffort]]) {
+    if (node.textContent !== text) node.textContent = text;
+  }
+  ui.activeReasoningDetail.hidden = !activeEffort;
+  ui.activeModel.title = activeText;
+  ui.activeReasoning.title = `Reasoning: ${activeEffort || "unavailable"}`;
+  ui.selectedModelStatus.title = `Next new turn: ${selectedText} · ${selectedEffort} reasoning`;
+}
+
 function toolActivityIsVisible(threadId = state.threadId) {
   const settings = threadId ? state.settingsByThread.get(threadId) : state.newThreadSettings;
   return (settings?.toolActivity || state.chatDefaults.toolActivity) !== "hide";
@@ -1394,6 +1467,7 @@ function renderChatSettings() {
   const count = CHAT_SETTING_FIELDS.filter((field) => settings[field]).length;
   const unavailable = !personalitySupported ? " Personality is unavailable for this model." : "";
   ui.settingsNote.textContent = `${count || "No"} override${count === 1 ? "" : "s"} set. Instance defaults apply wherever Default is selected. Tool activity visibility changes immediately. Other changes apply to the next new turn, not replies sent while Codex works. Settings remain with this chat.${unavailable}`;
+  renderModelStatus();
   persistChatSettings();
 }
 
@@ -1428,6 +1502,8 @@ function setSettingsOpen(open, moveFocus = true) {
   state.settingsOpen = Boolean(open);
   ui.settingsToggle.setAttribute("aria-expanded", String(state.settingsOpen));
   if (state.settingsOpen) {
+    refreshActiveModel(state.threadId, true);
+    renderModelStatus();
     if (!ui.settingsDialog.open) {
       if (typeof ui.settingsDialog.showModal === "function") ui.settingsDialog.showModal();
       else ui.settingsDialog.setAttribute("open", "");
@@ -2765,6 +2841,7 @@ async function connect() {
     if (state.ws !== socket) return;
     state.ready = false;
     state.activeTurns.clear();
+    state.activeModels.clear();
     state.liveThreadStatuses.clear();
     state.threadRefreshId += 1;
     state.submittingThreads.clear();
@@ -2872,6 +2949,7 @@ function handleNotification(method, params) {
       removeRequestsForTurn(params.threadId);
       state.liveThreadStatuses.delete(params.threadId);
       state.activeTurns.delete(params.threadId);
+      state.activeModels.delete(params.threadId);
       state.provisionalThreads.delete(params.threadId);
       state.threadCache.delete(params.threadId);
       state.threadReconciliations.delete(params.threadId);
@@ -2889,6 +2967,7 @@ function handleNotification(method, params) {
         }
       } else {
         state.activeTurns.delete(params.threadId);
+        state.activeModels.delete(params.threadId);
         removeRequestsForTurn(params.threadId);
       }
       renderThreads(state.threads);

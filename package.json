@@ -12,6 +12,7 @@
     "test:browser:history": "node tests/history.browser.cjs",
     "test:models": "node --test tests/model-settings.test.js",
     "test:browser:models": "node tests/model-settings.browser.cjs",
+    "test:browser:active-model": "node tests/active-model.browser.cjs",
     "test:markdown": "node tests/markdown.test.mjs",
     "test:copy": "node tests/code-copy.test.mjs",
     "test:links": "node tests/workspace-links.test.mjs",

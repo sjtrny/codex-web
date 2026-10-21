@@ -45,7 +45,7 @@ function fixture(t) {
       const message = JSON.parse(raw);
       calls.push(message);
       if (message.method === "thread/fork") return;
-      const result = message.method === "thread/resume"
+      const result = ["thread/resume", "thread/read"].includes(message.method)
         ? { thread: structuredClone(threads.get(message.params.threadId)) }
         : { data: message.method === "thread/list" ? [...threads.values()] : [] };
       queueMicrotask(() => api.handleMessage({ id: message.id, result }));
@@ -246,7 +246,8 @@ test("an active turn shows only a disabled Codex response fork", async (t) => {
   assert.match(response.forkButton.title, /finishes this turn/);
   await app.forkFromResponse(user);
   await app.forkFromResponse(response);
-  assert.equal(app.calls.length, 0);
+  assert.deepEqual(app.calls.map((call) => call.method), ["thread/read"]);
+  assert.deepEqual(app.calls[0].params, { threadId: "source", includeTurns: false });
 });
 
 test("response forking is unavailable for ephemeral, unloaded, offline, uploading, or submitting chats", async (t) => {

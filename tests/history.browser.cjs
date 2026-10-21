@@ -78,7 +78,9 @@ async function main() {
       // the budget. Finish the history and check exact order and duplicates.
       for (let i = 0; i < 50 && await page.locator(".history-control").count(); i += 1) {
         const before = downloads.length;
-        await page.locator(".history-control").click();
+        // Playwright auto-scroll can itself load a page before clicking.
+        // Activate only the button here; real scrolling is checked above.
+        await page.locator(".history-control").evaluate((button) => button.click());
         await page.waitForFunction(() => !document.querySelector(".history-control")?.disabled);
         assert.equal(downloads.length, before + 1, "One action must fetch one chunk");
       }

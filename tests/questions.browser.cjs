@@ -55,7 +55,7 @@ async function main() {
     }));
     const questionText = "A recording is running. May I finish it safely before updating?";
     const thread = (id, name, items = []) => ({
-      id, name, cwd: "/workspaces", createdAt: 1788652800, updatedAt: 1788652800,
+      id, name, model: "model-a", cwd: "/workspaces", createdAt: 1788652800, updatedAt: 1788652800,
       status: { type: "active", activeFlags: [] },
       turns: [{ id: `turn-${id}`, status: "inProgress", items }],
     });
@@ -95,6 +95,10 @@ async function main() {
           case "config/read": result = { config: {} }; break;
           case "configRequirements/read": result = { requirements: null }; break;
           case "thread/list": result = { data: [...threads.values()], nextCursor: null }; break;
+          case "thread/read":
+            assert.equal(message.params.includeTurns, false);
+            result = { thread: { ...threads.get(message.params.threadId), turns: [] } };
+            break;
           case "thread/resume": result = { thread: threads.get(message.params.threadId) }; break;
           case "thread/start": {
             const started = { ...thread("new-folder", "Working folder check"), cwd: message.params.cwd, turns: [], status: { type: "idle" } };
@@ -415,11 +419,11 @@ async function main() {
     const resumeCount = received.filter((message) => message.method === "thread/resume").length;
     await page.locator("#send").click();
     await eventually(() => pendingEchoes.length === 1, "delayed answer accepted");
-    await waitLabel("Codex is thinking");
+    await waitLabel("Thinking.");
     assert.equal(await questionDock.count(), 0, "accepting the reply must clear the whole question batch before the echo");
     await eventually(() => received.filter((message) => message.method === "thread/resume").length > resumeCount, "accepted answer resumes history");
     await eventually(async () => await page.locator("#send").isEnabled(), "accepted answer controls ready");
-    await waitLabel("Codex is thinking");
+    await waitLabel("Thinking.");
     assert.equal(await page.locator("#messages").getAttribute("aria-busy"), "true");
     assert.equal(asyncTurn.items.some((item) => item.type === "userMessage" && item.content[0].text === skyReply), false);
     pendingEchoes.shift()();
