@@ -140,8 +140,13 @@ correction, or additional instruction without stopping the task. Pressing Enter
 in an empty text box does not stop the task.
 
 Open **Model and chat settings** beside the paperclip (**Attach**) to change the model,
-reasoning, and other chat options in a modal. Changes are saved for the chat and
-apply to the next new turn. Replies use the current task's settings.
+reasoning, and other chat options in a modal. Existing chats use **Chat model**:
+the most recently used model saved by the server, shared across devices. Old
+browser choices and instance defaults do not override it. Select another model
+to change the next new turn; once the server accepts that turn, it remembers the
+choice for subsequent turns. An unsent model choice lasts only in the current
+tab. New chats still use the instance default or your explicit selection.
+Other settings are saved in the browser. Replies use the current task's settings.
 
 The thinking indicator shows **Thinking. model reasoning …** on one line,
 using values reported by the server, with animated dots at the end. Above the message box, a single

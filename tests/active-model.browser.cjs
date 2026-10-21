@@ -123,6 +123,11 @@ async function main() {
     };
     await page.goto(`${base}/?thread=${first.id}`, { waitUntil: "networkidle" });
     await expectLabel("active-model", names["gpt-5.6-sol"]);
+    await expectLabel("selected-model", names["gpt-5.6-sol"]);
+    await page.locator("#settings-toggle").click();
+    assert.equal(await page.locator("#setting-model").inputValue(), "");
+    await page.locator("#setting-model").selectOption("gpt-6-astra");
+    await page.locator("#settings-close").click();
     await expectLabel("selected-model", names["gpt-6-astra"]);
     await expectLabel("active-reasoning", "max");
     await expectLabel("selected-reasoning", "ultra");
@@ -167,10 +172,10 @@ async function main() {
     first.turns.push({ id: "external-turn", status: "inProgress", items: [] });
     emit("turn/started", { threadId: first.id, turn: first.turns.at(-1) });
     await expectLabel("active-model", names["gpt-5.6-sol"]);
-    await expectLabel("selected-model", names["gpt-6-sol"]);
+    await expectLabel("selected-model", names["gpt-5.6-sol"]);
     await page.locator(`#threads a[href="/?thread=${second.id}"]`).click();
     await expectLabel("active-model", names["gpt-6-sol"]);
-    await expectLabel("selected-model", names["gpt-5.6-sol"]);
+    await expectLabel("selected-model", names["gpt-6-sol"]);
     await page.locator(`#threads a[href="/?thread=${first.id}"]`).click();
     await expectLabel("active-model", names["gpt-5.6-sol"]);
     await page.locator("#settings-toggle").click();
@@ -178,6 +183,10 @@ async function main() {
     await page.locator("#settings-close").click();
     await page.reload({ waitUntil: "networkidle" });
     await expectLabel("active-model", names["gpt-5.6-sol"]);
+    await expectLabel("selected-model", names["gpt-5.6-sol"]);
+    await page.locator("#settings-toggle").click();
+    await page.locator("#setting-model").selectOption("gpt-6-astra");
+    await page.locator("#settings-close").click();
     await expectLabel("selected-model", names["gpt-6-astra"]);
     await expectLabel("active-reasoning", "max");
     await expectLabel("selected-reasoning", "ultra");

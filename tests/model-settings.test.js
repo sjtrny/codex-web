@@ -183,7 +183,7 @@ test("idle, disconnected and missing metadata never present the selected model a
   app.setThreadActivity(id, "turn-one");
   await app.state.activeModels.get(id).promise;
   assert.equal(app.ui.activeModel.textContent, "Unavailable");
-  assert.equal(app.ui.selectedModel.textContent, "gpt-5.6-sol");
+  assert.equal(app.ui.selectedModel.textContent, "Chat model");
   app.state.ready = false;
   app.updateControls();
   assert.equal(app.ui.activeModel.textContent, "Not connected");
@@ -271,6 +271,89 @@ test("completed or mismatched metadata does not label an active turn", async (t)
 const completion = (id = "answer") => ({ id, type: "agentMessage", phase: "final_answer", text: "Done",
   completedAtMs: Date.parse("2026-10-20T03:00:00Z") });
 const modelLabels = (app) => Array.from(app.ui.messages.querySelectorAll(".message-model"), (node) => node.textContent);
+
+async function savedChat(t, { model: savedModel = "gpt-6-sol", legacy = false } = {}) {
+  const app = fixture(t);
+  const thread = { id: "saved-chat", name: "Saved chat", model: savedModel, cwd: "/workspaces",
+    status: { type: "idle" }, turns: [] };
+  const executedModels = [];
+  let rejectTurn = false;
+  app.replyWith(({ method, params }) => {
+    if (method === "thread/resume") return legacy
+      ? { model: thread.model, thread: { ...structuredClone(thread), model: null } }
+      : { thread: structuredClone(thread) };
+    if (method === "thread/list") return { data: [structuredClone(thread)] };
+    if (method === "turn/start") {
+      if (rejectTurn) throw new Error("Turn rejected");
+      if (params.model) thread.model = params.model;
+      executedModels.push(thread.model);
+      return { turn: { id: `turn-${executedModels.length}`, status: "completed", items: [] } };
+    }
+    return { data: [] };
+  });
+  await app.openThread(thread.id);
+  return { ...app, thread, executedModels, rejectTurn(value) { rejectTurn = value; } };
+}
+
+test("saved chats inherit their server model and do not send device defaults", async (t) => {
+  const app = await savedChat(t);
+  app.state.models.find((model) => model.model === "gpt-6-sol").description = "";
+  app.renderChatSettings();
+  assert.equal(app.ui.modelHelp.textContent, "");
+  assert.equal(app.ui.selectedModel.textContent, "gpt-6-sol");
+  assert.equal(app.ui.settingModel.value, "");
+  assert.equal(app.ui.settingModel.selectedOptions[0].textContent, "Chat model — gpt-6-sol");
+  app.thread.model = "gpt-6-astra"; // Another device changed it after this page opened.
+  app.ui.prompt.value = "Continue on this device";
+  await app.submitPrompt({ preventDefault() {} });
+  assert.equal(app.calls.find((call) => call.method === "turn/start").params.model, undefined);
+  assert.deepEqual(app.executedModels, ["gpt-6-astra"]);
+});
+
+test("explicit changes become the saved model only after a successful turn", async (t) => {
+  const app = await savedChat(t);
+  app.ui.settingModel.value = "gpt-6-astra";
+  app.saveChatSettingsFromControls();
+  app.rejectTurn(true);
+  app.ui.prompt.value = "Use this model";
+  await app.submitPrompt({ preventDefault() {} });
+  assert.equal(app.thread.model, "gpt-6-sol");
+  assert.equal(app.state.settingsByThread.get(app.thread.id).model, "gpt-6-astra");
+  app.rejectTurn(false);
+  await app.submitPrompt({ preventDefault() {} });
+  assert.equal(app.thread.model, "gpt-6-astra");
+  assert.equal(app.state.settingsByThread.get(app.thread.id).model, "");
+  app.ui.prompt.value = "Continue again";
+  await app.submitPrompt({ preventDefault() {} });
+  const starts = app.calls.filter((call) => call.method === "turn/start");
+  assert.deepEqual(starts.map((call) => call.params.model), ["gpt-6-astra", "gpt-6-astra", undefined]);
+  assert.deepEqual(app.executedModels, ["gpt-6-astra", "gpt-6-astra"]);
+});
+
+test("legacy resume metadata and missing model metadata both preserve server choice", async (t) => {
+  const legacy = await savedChat(t, { legacy: true });
+  assert.equal(legacy.ui.selectedModel.textContent, "gpt-6-sol");
+  const missing = await savedChat(t, { model: null });
+  assert.equal(missing.ui.settingModel.selectedOptions[0].textContent, "Chat model — saved on server");
+  missing.ui.prompt.value = "Continue without a device override";
+  await missing.submitPrompt({ preventDefault() {} });
+  assert.equal(missing.calls.find((call) => call.method === "turn/start").params.model, undefined);
+});
+
+test("metadata refreshes update inherited models while preserving deliberate pending choices", async (t) => {
+  const app = await savedChat(t);
+  app.thread.model = "gpt-6-astra";
+  await app.refreshThreads();
+  assert.equal(app.ui.selectedModel.textContent, "gpt-6-astra");
+  app.ui.settingModel.value = "gpt-5.6-sol";
+  app.saveChatSettingsFromControls();
+  app.thread.model = "gpt-6-sol";
+  await app.refreshThreads();
+  assert.equal(app.ui.selectedModel.textContent, "gpt-5.6-sol");
+  app.ui.settingModel.value = "";
+  app.saveChatSettingsFromControls();
+  assert.equal(app.ui.selectedModel.textContent, "gpt-6-sol");
+});
 
 test("completion models remain tied to their turn after settings change, completion and reload", async (t) => {
   const app = fixture(t);
