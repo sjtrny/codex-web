@@ -81,6 +81,7 @@ async function main() {
             return;
           }
           const results = {
+            "account/rateLimits/read": {},
             initialize: { userAgent: "timestamp-browser-check" },
             "model/list": { data: [] }, "permissionProfile/list": { data: [] },
             "config/read": { config: {} }, "configRequirements/read": { requirements: null },

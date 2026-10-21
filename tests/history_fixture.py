@@ -44,6 +44,8 @@ async def main():
                 result = {"config": {}}
             elif method == "configRequirements/read":
                 result = {"requirements": None}
+            elif method == "account/rateLimits/read":
+                result = {}
             elif method in {"model/list", "permissionProfile/list"}:
                 result = {"data": []}
             else:

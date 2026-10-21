@@ -48,7 +48,13 @@
           <strong id="thread-title">New thread</strong>
         </header>
 
-        <div id="notice" class="notice" hidden></div>
+        <div class="chat-notices">
+          <div id="usage-limit-warning" class="notice usage-limit-warning" role="alert" aria-atomic="true" hidden>
+            <strong>Usage limit reached</strong>
+            <span id="usage-limit-detail"></span>
+          </div>
+          <div id="notice" class="notice" hidden></div>
+        </div>
         <div class="messages-region">
           <div id="messages" class="messages" aria-live="polite" aria-busy="false">
             <p class="empty">Send a request to start a thread.</p>

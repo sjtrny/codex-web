@@ -304,6 +304,15 @@ history; set `PYTHON` and `PLAYWRIGHT_MODULE` for existing installations.
 
 ### Chat settings defaults
 
+When the account reaches a usage limit, a warning stays below the chat title
+in every conversation, including new chats. It remains visible while scrolling,
+switching chats, reconnecting and reloading, and synchronizes between browser tabs.
+The warning shows an expected reset time when the backend supplies one. Usage is
+checked on connection, while the page is visible, and when the page regains focus.
+Only confirmed backend availability clears the warning; a failed check or an
+elapsed reset time does not dismiss it. Temporary request throttling and chat
+context or session-budget limits do not trigger the account warning.
+
 Unset chat settings use these instance defaults. Set them in `.env` for Docker
 Compose, or export them when running directly.
 
