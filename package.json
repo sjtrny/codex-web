@@ -9,7 +9,7 @@
     "build": "node frontend/build.mjs",
     "test:browser:performance": "node tests/performance.browser.cjs",
     "test:browser:loading": "node tests/loading.browser.cjs",
-    "test": "npm run test:markdown && npm run test:copy && npm run test:links && npm run test:theme && npm run test:render && npm run test:fork && npm run test:pins && npm run test:timestamps && npm run test:models && npm run test:history && npm run test:usage-limit",
+    "test": "npm run test:markdown && npm run test:copy && npm run test:links && npm run test:theme && npm run test:render && npm run test:fork && npm run test:pins && npm run test:timestamps && npm run test:models && npm run test:history && npm run test:usage-limit && npm run test:sidebar-questions",
     "test:usage-limit": "node --test tests/usage-limit.test.js",
     "test:browser:usage-limit": "node tests/usage-limit.browser.cjs",
     "test:history": "node --test tests/history.test.js",
@@ -34,7 +34,9 @@
     "test:browser:tools": "node tests/tool-activity.browser.cjs",
     "test:browser:questions": "node tests/questions.browser.cjs",
     "test:browser:sidebar": "node tests/sidebar-activity.browser.cjs",
-    "test:browser:search": "node tests/search.browser.cjs"
+    "test:browser:search": "node tests/search.browser.cjs",
+    "test:sidebar-questions": "node --test tests/sidebar-questions.test.js",
+    "test:browser:sidebar-questions": "node tests/sidebar-questions.browser.cjs"
   },
   "dependencies": {
     "dompurify": "3.4.13",

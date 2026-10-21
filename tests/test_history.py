@@ -15,6 +15,7 @@ from aiohttp.test_utils import TestServer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import app
 from history import decode_cursor, read_history_chunk
+from questions import read_pending_questions
 
 
 class HistoryBackend:
@@ -122,6 +123,52 @@ class HistoryChunkTests(unittest.IsolatedAsyncioTestCase):
             await read_history_chunk(bad_rpc, decode_cursor("", "chat"), 1024)
 
 
+class QuestionStatusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_latest_relevant_item_determines_status_without_reading_older_turns(self):
+        question = {"id": "question", "type": "agentMessage", "phase": "final_answer",
+                    "questions": [{"title": "Private question"}]}
+        reply = {"id": "reply", "type": "userMessage"}
+        final = {"id": "final", "type": "agentMessage", "phase": "final_answer"}
+        progress = {"id": "progress", "type": "commandExecution", "output": "x" * 1000000}
+        for items, pending in [([question, progress], True), ([question, reply, progress], False),
+                               ([question, final], False), ([reply, question], True), ([], False)]:
+            with self.subTest(pending=pending, ids=[item["id"] for item in items]):
+                backend = HistoryBackend()
+                backend.turns[-1]["items"] = items
+                result = await read_pending_questions(backend.rpc, "chat")
+                self.assertEqual(result, {"threadId": "chat", "turnId": "recent", "pending": pending})
+                self.assertLess(len(json.dumps(result)), 100)
+                self.assertTrue(all(params["turnId"] == "recent" for method, params in backend.calls
+                                    if method == "thread/items/list"))
+
+    async def test_completed_or_empty_chats_do_not_read_items(self):
+        for empty in (False, True):
+            backend = HistoryBackend()
+            backend.turns[-1]["status"] = "completed"
+            if empty:
+                backend.turns = []
+            self.assertFalse((await read_pending_questions(backend.rpc, "chat"))["pending"])
+            self.assertEqual(len(backend.calls), 1)
+
+    async def test_invalid_rows_and_cyclic_cursors_are_rejected(self):
+        for mode in ("wrong-turn", "invalid-item", "cycle"):
+            backend = HistoryBackend()
+            calls = 0
+
+            async def rpc(method, params):
+                nonlocal calls
+                if method == "thread/turns/list":
+                    return await backend.rpc(method, params)
+                calls += 1
+                row = {"turnId": "wrong" if mode == "wrong-turn" else "recent",
+                       "item": None if mode == "invalid-item" else {"type": "commandExecution"}}
+                return {"data": [row], "nextCursor": "a" if calls % 2 else "b"}
+
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                await read_pending_questions(rpc, "chat")
+            self.assertLessEqual(calls, 3)
+
+
 class HistoryHTTPTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.backend = HistoryBackend()
@@ -200,6 +247,28 @@ class HistoryHTTPTests(unittest.IsolatedAsyncioTestCase):
                         {"threadId": "another-chat", "cursor": cursor}):
             async with self.client.post(self.server.make_url("/api/history"), json=payload) as response:
                 self.assertEqual(response.status, 400)
+
+    async def test_question_summary_is_small_private_and_uses_only_paginated_reads(self):
+        self.backend.turns[-1]["items"] = [
+            {"id": "question", "type": "agentMessage", "questions": [{"title": "Private question"}]},
+            {"id": "tool", "type": "commandExecution", "output": "x" * 1000000},
+        ]
+        async with self.client.post(self.server.make_url("/api/thread-questions"), json={"threadId": "chat"}) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+            self.assertLess(len(await response.read()), 100)
+            self.assertEqual(await response.json(), {"threadId": "chat", "turnId": "recent", "pending": True})
+        self.assertEqual([method for method, _ in self.backend.calls],
+                         ["initialize", "thread/turns/list", "thread/items/list", "thread/items/list"])
+
+    async def test_question_summary_rejects_bad_requests_and_reports_failures(self):
+        for payload in ([], {}, {"threadId": 42}, {"threadId": ""}):
+            async with self.client.post(self.server.make_url("/api/thread-questions"), json=payload) as response:
+                self.assertEqual(response.status, 400)
+        for error, status in [(ValueError("Invalid page"), 502), (TimeoutError(), 504)]:
+            with patch("app.read_pending_questions", side_effect=error):
+                async with self.client.post(self.server.make_url("/api/thread-questions"), json={"threadId": "chat"}) as response:
+                    self.assertEqual(response.status, status)
 
 
 class HistorySettingTests(unittest.TestCase):

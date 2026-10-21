@@ -108,11 +108,12 @@ async function checkMode(browser, value) {
         switch (message.method) {
           case "account/rateLimits/read": result = {}; break;
           case "initialize": result = { userAgent: "tool-activity-browser-check" }; break;
-          case "model/list": result = { data: [] }; break;
+          case "model/list": result = { data: [{ id: config.chatDefaults.model, model: config.chatDefaults.model }] }; break;
           case "permissionProfile/list": result = { data: [] }; break;
           case "config/read": result = { config: {} }; break;
           case "configRequirements/read": result = { requirements: null }; break;
           case "thread/list": result = { data: [...threads.values()], nextCursor: null }; break;
+          case "thread/read":
           case "thread/resume": result = { thread: threads.get(message.params.threadId) }; break;
           case "thread/start": {
             const created = { ...structuredClone(otherThread), id: "new-visibility", name: "New conversation", turns: [] };

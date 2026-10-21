@@ -197,6 +197,8 @@ const state = {
   provisionalThreads: new Map(),
   threadRefreshId: 0,
   threadCache: new Map(),
+  threadQuestionTurns: new Map(),
+  threadQuestionReads: new Map(),
   threadReconciliations: new Map(),
   connectionGeneration: 0,
   models: [],
@@ -520,9 +522,12 @@ function pendingAsyncQuestions(threadId) {
   if (!state.activeTurns.has(threadId)) return [];
   const entry = cachedThread(threadId, false);
   const turnId = state.activeTurns.get(threadId);
-  const turn = turnId
+  const cachedTurn = turnId
     ? findCachedTurn(entry, turnId)
     : [...(entry?.thread.turns || [])].reverse().find((item) => item.status === "inProgress");
+  const summary = state.threadQuestionTurns.get(threadId);
+  const turn = summary ? summary.turn : cachedTurn;
+  if (turnId && turn?.id !== turnId) return [];
   if (!turn || turn.status !== "inProgress") return [];
   let questions = [];
   for (const item of turn.items || []) {
@@ -536,6 +541,101 @@ function pendingAsyncQuestions(threadId) {
     .flatMap((pending) => pending.asyncQuestionIds || [])
     .map((id) => String(resolvedThreadItemId(threadId, turn.id, id))));
   return questions.filter((question) => !answered.has(String(question.id)));
+}
+
+function rememberThreadQuestions(thread, partial = false) {
+  const turn = [...(thread.turns || [])].reverse().find((item) => item.status === "inProgress");
+  const items = (turn?.items || []).filter((item) => item.type === "userMessage"
+    || (item.type === "agentMessage" && (item.questions?.length || item.phase === "final_answer")))
+    .map(({ id, type, phase, questions }) => ({ id, type, phase, questions }));
+  // Metadata and partial history may not yet contain the question or its answer.
+  if (partial && !items.length) return;
+  // Keep only question-related messages, independently of the bounded history
+  // cache, so unopened chats and evicted histories can still show their badge.
+  state.threadQuestionTurns.set(thread.id, {
+    generation: state.connectionGeneration,
+    turn: turn ? {
+      id: turn.id, status: turn.status,
+      items,
+    } : null,
+  });
+}
+
+function rememberQuestionItem({ threadId, turnId, item }) {
+  if (!threadId || !turnId || !item?.id) return;
+  item = {
+    id: resolvedThreadItemId(threadId, turnId, item.id),
+    type: item.type,
+    ...(item.phase === undefined ? {} : { phase: item.phase }),
+    ...(item.questions === undefined ? {} : { questions: item.questions }),
+  };
+  const previous = state.threadQuestionTurns.get(threadId);
+  const turn = previous?.turn?.id === turnId ? previous.turn : { id: turnId, status: "inProgress", items: [] };
+  const index = turn.items.findIndex((entry) => String(entry.id) === String(item.id));
+  if (index < 0 && item.type !== "userMessage"
+    && !(item.type === "agentMessage" && (item.questions?.length || item.phase === "final_answer"))) return;
+  const items = [...turn.items];
+  if (index < 0) items.push(item);
+  else items[index] = mergeThreadItem(item, items[index]);
+  state.threadQuestionTurns.set(threadId, { generation: previous?.generation, turn: { ...turn, items } });
+  renderThreads(state.threads);
+}
+
+function threadHasPendingQuestions(thread) {
+  if ([...state.requestCards.values()].some((request) => request.requestKind === "input"
+    && request.requestParams.threadId === thread.id
+    && request.inputIndex < (request.requestParams.questions || []).length)) return true;
+  if (pendingAsyncQuestions(thread.id).length) return true;
+  const summary = state.threadQuestionTurns.get(thread.id);
+  const turnId = state.activeTurns.get(thread.id);
+  if (state.activeTurns.has(thread.id) && summary?.pending
+    && (!turnId || summary.turnId === turnId)) return true;
+  const status = state.liveThreadStatuses.get(thread.id) || thread.status;
+  return status?.type === "active" && status.activeFlags?.includes("waitingOnUserInput");
+}
+
+async function refreshThreadQuestions(threads) {
+  for (const thread of threads) {
+    if (!state.activeTurns.has(thread.id)) {
+      reconcileRequestsFromThread({ id: thread.id, status: state.liveThreadStatuses.get(thread.id) || thread.status });
+    }
+  }
+  // Only a compact status crosses the mobile connection. The proxy inspects the
+  // latest turn without resuming tasks; newer live events take priority.
+  for (const thread of threads) {
+    if (!state.ready) return;
+    if (!state.activeTurns.has(thread.id)) continue;
+    if (thread.id === state.threadId && !state.historyChunkBytes) continue;
+    const previous = state.threadQuestionTurns.get(thread.id);
+    if (previous?.generation === state.connectionGeneration) continue;
+    const existing = state.threadQuestionReads.get(thread.id);
+    if (existing) { await existing; continue; }
+    const generation = state.connectionGeneration;
+    const read = Promise.resolve().then(async () => {
+      try {
+        const response = await fetch("/api/thread-questions", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ threadId: thread.id }), cache: "no-store",
+        });
+        if (!response.ok) throw new Error("Question status unavailable");
+        const result = await response.json();
+        if (generation !== state.connectionGeneration || !state.ready
+          || !state.activeTurns.has(thread.id)
+          || state.threadQuestionTurns.get(thread.id) !== previous
+          || result?.threadId !== thread.id || typeof result.pending !== "boolean"
+          || (state.activeTurns.get(thread.id) && result.turnId !== state.activeTurns.get(thread.id))) return;
+        state.threadQuestionTurns.set(thread.id, { generation, turnId: result.turnId, pending: result.pending });
+        renderThreads(state.threads);
+        updateControls();
+      } catch {
+        // Existing live questions and status flags remain usable if history is unavailable.
+      } finally {
+        if (state.threadQuestionReads.get(thread.id) === read) state.threadQuestionReads.delete(thread.id);
+      }
+    });
+    state.threadQuestionReads.set(thread.id, read);
+    await read;
+  }
 }
 
 function inputQuestionText(question) {
@@ -682,6 +782,7 @@ function clearThreadActivity(threadId) {
   state.submittingThreads.delete(threadId);
   state.activeTurns.delete(threadId);
   state.activeModels.delete(threadId);
+  state.threadQuestionTurns.delete(threadId);
   rememberThreadStatus(threadId, { type: "idle" });
   renderThreads(state.threads);
   updateControls();
@@ -1018,6 +1119,7 @@ function cacheThreadSnapshot(thread) {
     history: previous?.history || null,
   };
   state.threadCache.set(thread.id, entry);
+  rememberThreadQuestions(thread, state.historyChunkBytes > 0);
   pruneThreadCache();
   return entry;
 }
@@ -1041,6 +1143,7 @@ function mergeThreadSnapshot(thread) {
     entry.pendingUser = null;
   }
   state.threadCache.set(thread.id, entry);
+  rememberThreadQuestions(entry.thread, state.historyChunkBytes > 0);
   reconcileSteersFromThread(entry.thread);
   reconcileRequestsFromThread(entry.thread);
   pruneThreadCache();
@@ -1183,6 +1286,7 @@ function cacheTurnUpdate(
 }
 
 function cacheItemUpdate(params) {
+  rememberQuestionItem(params);
   reconcilePendingSteer(params.threadId, params.turnId, params.item);
   const entry = cachedThread(params.threadId, false);
   const item = params.item;
@@ -3035,6 +3139,7 @@ async function connect() {
     state.activeTurns.clear();
     state.activeModels.clear();
     state.liveThreadStatuses.clear();
+    state.threadQuestionReads.clear();
     state.threadRefreshId += 1;
     state.submittingThreads.clear();
     state.submittingViews.clear();
@@ -3164,6 +3269,7 @@ function handleNotification(method, params) {
       state.chatModels.delete(params.threadId);
       state.provisionalThreads.delete(params.threadId);
       state.threadCache.delete(params.threadId);
+      state.threadQuestionTurns.delete(params.threadId);
       state.threadReconciliations.delete(params.threadId);
       state.composerDrafts.delete(threadComposerKey(params.threadId));
       state.composerAttachmentDrafts.delete(threadComposerKey(params.threadId));
@@ -3180,6 +3286,7 @@ function handleNotification(method, params) {
       } else {
         state.activeTurns.delete(params.threadId);
         state.activeModels.delete(params.threadId);
+        state.threadQuestionTurns.delete(params.threadId);
         removeRequestsForTurn(params.threadId);
       }
       renderThreads(state.threads);
@@ -3187,8 +3294,14 @@ function handleNotification(method, params) {
       refreshThreads();
       return;
     case "turn/started":
-      cacheTurnUpdate(params.threadId, params.turn || {});
       {
+        const summary = state.threadQuestionTurns.get(params.threadId);
+        const previous = summary?.turn;
+        const turn = cacheTurnUpdate(params.threadId, params.turn || {})
+          || (previous?.id === params.turn?.id ? mergeTurnSnapshot(params.turn, previous, null, false) : params.turn);
+        if (turn?.id) rememberThreadQuestions(
+          { id: params.threadId, turns: [{ ...turn, status: "inProgress" }] }, summary?.turnId === turn.id,
+        );
         const hasLocalPrompt = setPendingUserTurn(params.threadId, params.turn?.id);
         if (!hasLocalPrompt) void reconcileThreadHistory(params.threadId);
       }
@@ -4272,6 +4385,8 @@ function applyHistoryChunk(entry, page, older = false, fragment = "", beforeRequ
   }
   reconcileSteersFromThread(entry.thread);
   reconcileRequestsFromThread(entry.thread);
+  rememberThreadQuestions(entry.thread, Boolean(page.cursor));
+  renderThreads(state.threads);
   return remainder;
 }
 
@@ -4565,12 +4680,7 @@ function plainPrimaryClick(event) {
 }
 
 function renderThreads(threads, reconcileActivity = false) {
-  const sortedThreads = sortThreadsByActivity(threads).sort((left, right) => (
-    Number(state.pinnedThreads.has(right.id)) - Number(state.pinnedThreads.has(left.id))
-  ));
-  state.threads = sortedThreads;
-  const focused = ui.threads.contains(document.activeElement) ? document.activeElement : null;
-  const nextNodes = new Map();
+  const sortedThreads = sortThreadsByActivity(threads);
   for (const thread of sortedThreads) {
     const status = state.liveThreadStatuses.get(thread.id) || thread.status;
     if (reconcileActivity) {
@@ -4580,13 +4690,26 @@ function renderThreads(threads, reconcileActivity = false) {
         && !state.activeTurns.get(thread.id)) {
         // A known in-progress turn from thread/resume also outranks thread/list.
         state.activeTurns.delete(thread.id);
+        state.threadQuestionTurns.delete(thread.id);
       }
     }
+  }
+  const pendingQuestions = new Set(sortedThreads.filter(threadHasPendingQuestions).map((thread) => thread.id));
+  sortedThreads.sort((left, right) => (
+    Number(pendingQuestions.has(right.id)) - Number(pendingQuestions.has(left.id))
+    || Number(state.pinnedThreads.has(right.id)) - Number(state.pinnedThreads.has(left.id))
+  ));
+  state.threads = sortedThreads;
+  const focused = ui.threads.contains(document.activeElement) ? document.activeElement : null;
+  const nextNodes = new Map();
+  for (const thread of sortedThreads) {
+    const status = state.liveThreadStatuses.get(thread.id) || thread.status;
     const running = status?.type === "active"
       || state.activeTurns.has(thread.id)
       || state.submittingThreads.has(thread.id);
     const item = state.threadNodes.get(thread.id) || createThreadRow(thread.id);
-    const { row, link, title, meta, pin } = item;
+    const { row, link, title, meta, pin, question } = item;
+    question.hidden = !pendingQuestions.has(thread.id);
     const pinned = state.pinnedThreads.has(thread.id);
     row.classList.toggle("pinned", pinned);
     link.className = `thread${thread.id === state.threadId ? " active" : ""}${running ? " running" : ""}`;
@@ -4622,7 +4745,17 @@ function createThreadRow(threadId) {
   const link = document.createElement("a");
   const title = document.createElement("strong");
   const meta = document.createElement("small");
-  link.append(title, meta);
+  const heading = document.createElement("span");
+  heading.className = "thread-heading";
+  const question = document.createElement("span");
+  question.className = "thread-question";
+  question.textContent = "?";
+  question.setAttribute("role", "img");
+  question.setAttribute("aria-label", "Question awaiting your reply");
+  question.title = "Question awaiting your reply";
+  question.hidden = true;
+  heading.append(title, question);
+  link.append(heading, meta);
   link.addEventListener("click", (event) => {
     if (!plainPrimaryClick(event)) return;
     event.preventDefault();
@@ -4636,7 +4769,7 @@ function createThreadRow(threadId) {
   pin.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m16 3 5 5-4 1-4 4-1 4-5-5 4-1 4-4z"></path><path d="m2 22 7-7"></path></svg>';
   pin.addEventListener("click", () => setThreadPinned(threadId, !state.pinnedThreads.has(threadId)));
   row.append(link, pin);
-  return { row, link, title, meta, pin };
+  return { row, link, title, meta, pin, question };
 }
 
 function showStartedThread(thread) {
@@ -4683,6 +4816,7 @@ async function refreshThreads() {
     ]), true);
     render();
     updateControls();
+    void refreshThreadQuestions(state.threads);
     let cursor = result?.nextCursor;
     const seenCursors = new Set();
     // Older pins must remain available beyond the recent-chat page.
@@ -4712,6 +4846,7 @@ async function refreshThreads() {
     }
     render();
     updateControls();
+    void refreshThreadQuestions(state.threads);
   } catch (error) {
     if (refreshId === state.threadRefreshId) notice(error.message);
   }
@@ -5173,6 +5308,7 @@ async function submitSteer({ draftText, text, attachments, input, turnId }) {
     if (state.ready) void reconcileThreadHistory(threadId);
   } finally {
     state.steeringThreads.delete(threadId);
+    renderThreads(state.threads);
     updateControls();
   }
 }
@@ -5204,6 +5340,7 @@ function removeRequest(id) {
   const card = state.requestCards.get(String(id));
   if (card) card.remove();
   state.requestCards.delete(String(id));
+  renderThreads(state.threads);
   updateControls();
 }
 
@@ -5406,6 +5543,7 @@ function addRequest(id, card, params, kind, method) {
   card.append(connectionNotice);
   state.requestCards.set(String(id), card);
   if (kind !== "input") ui.requests.append(card);
+  renderThreads(state.threads);
   updateControls();
 }
 
