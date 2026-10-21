@@ -18,12 +18,14 @@ function model(id, tiers = [fast], efforts = ["low", "medium", "high", "max", "u
   };
 }
 
-function fixture(t) {
+function fixture(t, { storedModels = null, blockedStorage = false } = {}) {
   const dom = new JSDOM(fs.readFileSync(path.join(__dirname, "../static/index.html"), "utf8"), {
     url: "http://localhost/", runScripts: "outside-only",
   });
   t.after(() => dom.window.close());
   const { window } = dom;
+  if (storedModels !== null) window.localStorage.setItem("codex-web-turn-models-v1", storedModels);
+  if (blockedStorage) Object.defineProperty(window, "localStorage", { get() { throw new Error("Storage disabled"); } });
   window.CODEX_WEB_TEST = true;
   window.matchMedia = () => ({ matches: false });
   window.eval(fs.readFileSync(path.join(__dirname, "../static/app.js"), "utf8"));
@@ -264,4 +266,88 @@ test("completed or mismatched metadata does not label an active turn", async (t)
     await app.state.activeModels.get("active-thread").promise;
     assert.equal(app.ui.activeModel.textContent, "Unavailable");
   }
+});
+
+const completion = (id = "answer") => ({ id, type: "agentMessage", phase: "final_answer", text: "Done",
+  completedAtMs: Date.parse("2026-10-20T03:00:00Z") });
+const modelLabels = (app) => Array.from(app.ui.messages.querySelectorAll(".message-model"), (node) => node.textContent);
+
+test("completion models remain tied to their turn after settings change, completion and reload", async (t) => {
+  const app = fixture(t);
+  const thread = { id: "chat", model: "stale-model", turns: [{ id: "turn", status: "inProgress", items: [completion()] }] };
+  app.state.threadId = thread.id;
+  app.cacheThreadSnapshot(thread);
+  app.replyWith(() => ({ thread: { id: thread.id, model: "gpt-6-astra", status: { type: "active" } } }));
+  app.renderThreadHistory(thread);
+  await app.state.activeModels.get(thread.id).promise;
+  assert.deepEqual(modelLabels(app), ["gpt-6-astra"]);
+  app.state.settingsByThread.set(thread.id, app.normalizeChatSettings({ model: "gpt-6-sol" }));
+  thread.turns[0].status = "completed";
+  app.handleNotification("thread/status/changed", { threadId: thread.id, status: { type: "idle" } });
+  app.renderThreadHistory(thread);
+  assert.deepEqual(modelLabels(app), ["gpt-6-astra"]);
+  const reloaded = fixture(t, { storedModels: app.window.localStorage.getItem("codex-web-turn-models-v1") });
+  reloaded.state.threadId = thread.id;
+  reloaded.cacheThreadSnapshot(thread);
+  reloaded.renderThreadHistory(thread);
+  assert.deepEqual(modelLabels(reloaded), ["gpt-6-astra"]);
+  assert.equal(reloaded.ui.messages.querySelector("time").dateTime, "2026-10-20T03:00:00.000Z");
+});
+
+test("saved per-turn models are independent across reused message, turn and chat IDs", (t) => {
+  const app = fixture(t);
+  const history = (id, models) => ({ id, model: "current-model", turns: models.map((model, index) => ({
+    id: `turn-${index}`, model, status: "completed", items: [completion()],
+  })) });
+  const first = history("first", ["gpt-6-astra", "gpt-6-sol"]);
+  app.renderThreadHistory(first);
+  assert.deepEqual(modelLabels(app), ["gpt-6-astra", "gpt-6-sol"]);
+  app.renderThreadHistory(history("second", ["gpt-5.6-sol"]));
+  assert.deepEqual(modelLabels(app), ["gpt-5.6-sol"]);
+  app.renderThreadHistory({ ...first, turns: first.turns.map(({ model, ...turn }) => turn) });
+  assert.deepEqual(modelLabels(app), ["gpt-6-astra", "gpt-6-sol"]);
+});
+
+test("unknown historical models never use current settings and user timestamps have no model label", (t) => {
+  const app = fixture(t);
+  const thread = { id: "old", model: "gpt-6-astra", turns: [{ id: "turn", status: "completed", items: [
+    { id: "user", type: "userMessage", createdAt: "2026-10-20T02:59:00Z", content: [{ type: "text", text: "Question" }] },
+    completion(),
+  ] }] };
+  app.state.threadId = thread.id;
+  app.cacheThreadSnapshot(thread);
+  app.renderThreadHistory(thread);
+  assert.deepEqual(modelLabels(app), ["Model unavailable"]);
+  assert.equal(app.ui.messages.querySelectorAll(".message.user .message-model").length, 0);
+  assert.equal(app.ui.messages.querySelectorAll("time:not([hidden])").length, 2);
+});
+
+test("late metadata from a completed turn cannot persist the model of a newer turn", async (t) => {
+  const app = fixture(t);
+  app.state.threadId = "chat";
+  let resolve;
+  app.replyWith(() => new Promise((done) => { resolve = done; }));
+  app.setThreadActivity("chat", "old-turn");
+  const read = app.state.activeModels.get("chat").promise;
+  await Promise.resolve();
+  app.handleNotification("thread/status/changed", { threadId: "chat", status: { type: "idle" } });
+  resolve({ thread: { id: "chat", model: "newer-model", status: { type: "active" } } });
+  await read;
+  assert.equal(app.state.turnModels.size, 0);
+  assert.equal(app.window.localStorage.getItem("codex-web-turn-models-v1"), null);
+});
+
+test("model history tolerates blocked or damaged storage and bounds retained records", (t) => {
+  for (const options of [{ storedModels: "broken" }, { storedModels: "null" }, { blockedStorage: true }]) {
+    const app = fixture(t, options);
+    app.renderThreadHistory({ id: "chat", turns: [{ id: "turn", model: "gpt-6-astra", status: "completed", items: [completion()] }] });
+    assert.deepEqual(modelLabels(app), ["gpt-6-astra"]);
+  }
+  const records = Array.from({ length: 2001 }, (_, index) => [JSON.stringify(["chat", `turn-${index}`]), "gpt-6-sol"]);
+  const app = fixture(t, { storedModels: JSON.stringify(records) });
+  assert.equal(app.state.turnModels.size, 2000);
+  app.renderThreadHistory({ id: "chat", turns: [{ id: "new", model: "gpt-6-astra", status: "completed", items: [completion()] }] });
+  assert.equal(app.state.turnModels.size, 2000);
+  assert.equal(app.state.turnModels.has(JSON.stringify(["chat", "turn-1"])), false);
+  assert.equal(JSON.parse(app.window.localStorage.getItem("codex-web-turn-models-v1")).length, 2000);
 });

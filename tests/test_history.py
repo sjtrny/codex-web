@@ -53,6 +53,14 @@ class HistoryBackend:
 
 
 class HistoryChunkTests(unittest.IsolatedAsyncioTestCase):
+    async def test_per_turn_model_metadata_is_preserved_when_the_backend_supplies_it(self):
+        backend = HistoryBackend()
+        backend.turns[0]["model"] = "older-model"
+        backend.turns[-1]["model"] = "newer-model"
+        body, _, _ = await read_history_chunk(backend.rpc, decode_cursor("", "chat"), 20000)
+        turns = [row["turn"] for row in map(json.loads, body.splitlines()) if "turn" in row]
+        self.assertEqual([turn.get("model") for turn in turns], ["newer-model", None, "older-model"])
+
     async def test_every_byte_is_bounded_and_all_items_survive_unicode_splits(self):
         for limit in (1, 127, 1024, 20000):
             with self.subTest(limit=limit):

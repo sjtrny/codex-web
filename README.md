@@ -128,6 +128,12 @@ for the full date and time zone. This browser keeps up to 2,000 recovered messag
 timestamps across reloads. Messages without an exact timestamp show no time
 information; task times, conversation times, and browser receipt times are omitted.
 
+Codex response headers also show the model used for their turn beside the time.
+The browser remembers up to 2,000 server-confirmed turn models across reloads.
+Changing the selected model does not relabel previous responses. When an older
+turn has no recorded model, its header shows **Model unavailable**; the current
+conversation model and next-turn preference are never used as a substitute.
+
 During an active task, the composer button shows **Stop** when the text box is
 empty. Type a message or attach a file to switch it to **Reply**. Send an answer,
 correction, or additional instruction without stopping the task. Pressing Enter

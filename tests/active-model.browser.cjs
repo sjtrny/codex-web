@@ -25,7 +25,8 @@ const models = Object.entries(names).map(([model, displayName]) => ({
 }));
 const first = { id: "synthetic-active-model", name: "Active and selected models", model: "gpt-5.6-sol", reasoningEffort: "max",
   cwd: "/workspaces", status: { type: "active", activeFlags: [] },
-  turns: [{ id: "first-turn", status: "inProgress", items: [] }] };
+  turns: [{ id: "legacy-turn", status: "completed", items: [] },
+    { id: "first-turn", status: "inProgress", items: [] }] };
 const second = { id: "synthetic-other-model", name: "Other conversation", model: "gpt-6-sol", reasoningEffort: "max",
   cwd: "/workspaces", status: { type: "active", activeFlags: [] },
   turns: [{ id: "other-turn", status: "inProgress", items: [] }] };
@@ -45,23 +46,24 @@ async function main() {
     const page = await context.newPage();
     page.setDefaultTimeout(10000);
     page.on("pageerror", (error) => errors.push(error.message));
-    if (!process.env.CODEX_WEB_BASE_URL) {
-      await page.route("**/api/config", (route) => route.fulfill({ json: {
+    await page.route("**/api/config", (route) => route.fulfill({ json: {
         defaultCwd: "/workspaces", workspaceRoot: "/workspaces", historyChunkBytes: 1_000_000,
         showToolActivity: false, chatDefaults: { model: "gpt-5.6-sol", effort: "max", serviceTier: "priority" },
-      } }));
-    }
+    } }));
     await page.route("**/api/history", (route) => {
       const { threadId } = route.request().postDataJSON();
       assert.ok(threads.has(threadId), "only synthetic threads may be read");
-      const turn = threads.get(threadId).turns.at(-1);
+      const turns = threads.get(threadId).turns;
       return route.fulfill({ contentType: "application/x-ndjson", headers: {
         "X-Codex-History-Cursor": "", "X-Codex-History-Reset": "0",
-      }, body: [
+      }, body: [...turns].reverse().flatMap((turn) => [
         { turn: { id: turn.id, status: turn.status } },
-        { turnId: turn.id, item: { id: `${turn.id}-message`, type: "agentMessage", phase: "commentary",
-          text: "I’m working on your request. You can select a different model for the next turn." } },
-      ].map(JSON.stringify).join("\n") + "\n" });
+        { turnId: turn.id, item: { id: `${turn.id}-message`, type: "agentMessage",
+          phase: turn.status === "completed" ? "final_answer" : "commentary",
+          completedAtMs: Date.parse("2026-10-20T03:00:00Z"),
+          text: turn.status === "completed" ? `Completed ${turn.id}.`
+            : "I’m working on your request. You can select a different model for the next turn." } },
+      ]).map(JSON.stringify).join("\n") + "\n" });
     });
     let socket;
     await page.routeWebSocket("**/ws", (ws) => {
@@ -102,11 +104,22 @@ async function main() {
     const expectLabel = (id, text) => page.waitForFunction(
       ({ id, text }) => document.getElementById(id)?.textContent === text, { id, text },
     );
+    const expectCompletionModel = (turn, model) => page.waitForFunction(({ turn, model }) => {
+      const message = [...document.querySelectorAll(".message.agent")]
+        .find((node) => node.querySelector(".body")?.textContent.trim() === `Completed ${turn}.`);
+      return message?.querySelector(".message-model")?.textContent === model
+        && message.querySelector("time")?.dateTime === "2026-10-20T03:00:00.000Z";
+    }, { turn, model });
     const emit = (method, params) => socket.send(JSON.stringify({ method, params }));
     const finish = () => {
-      first.turns.at(-1).status = "completed";
+      const turn = first.turns.at(-1);
+      const item = { id: `${turn.id}-message`, type: "agentMessage", phase: "final_answer",
+        completedAtMs: Date.parse("2026-10-20T03:00:00Z"), text: `Completed ${turn.id}.` };
+      turn.items = [item];
+      turn.status = "completed";
       first.status = { type: "idle" };
-      emit("turn/completed", { threadId: first.id, turn: first.turns.at(-1) });
+      emit("item/completed", { threadId: first.id, turnId: turn.id, item });
+      emit("turn/completed", { threadId: first.id, turn });
     };
     await page.goto(`${base}/?thread=${first.id}`, { waitUntil: "networkidle" });
     await expectLabel("active-model", names["gpt-5.6-sol"]);
@@ -138,6 +151,7 @@ async function main() {
     await expectLabel("active-model", names["gpt-5.6-sol"]);
     finish();
     await expectLabel("active-model", "No active turn");
+    await expectCompletionModel("first-turn", names["gpt-5.6-sol"]);
     assert.equal(await page.locator("#thinking-indicator").isVisible(), false);
     await page.locator("#prompt").fill("Start the next task");
     await page.locator("#prompt").press("Enter");
@@ -146,6 +160,7 @@ async function main() {
     assert.equal(calls.find((call) => call.method === "turn/start").params.model, "gpt-6-sol");
     assert.equal(calls.find((call) => call.method === "turn/start").params.effort, "ultra");
     finish();
+    await expectCompletionModel("next-turn", names["gpt-6-sol"]);
     first.model = "gpt-5.6-sol";
     first.reasoningEffort = "max";
     first.status = { type: "active", activeFlags: [] };
@@ -166,6 +181,9 @@ async function main() {
     await expectLabel("selected-model", names["gpt-6-astra"]);
     await expectLabel("active-reasoning", "max");
     await expectLabel("selected-reasoning", "ultra");
+    await expectCompletionModel("first-turn", names["gpt-5.6-sol"]);
+    await expectCompletionModel("next-turn", names["gpt-6-sol"]);
+    await expectCompletionModel("legacy-turn", "Model unavailable");
     for (const width of [1280, 390, 320]) {
       await page.setViewportSize({ width, height: width === 1280 ? 900 : 740 });
       await page.emulateMedia({ colorScheme: width === 320 ? "dark" : "light" });
@@ -193,6 +211,11 @@ async function main() {
       assert.ok(lines.active && lines.activeUnclipped, `Active status must fit one line at ${width}px`);
       assert.ok(lines.selected && lines.selectedHeight < 24, `Selected status must fit one line at ${width}px`);
       assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      assert.ok(await page.locator(".message-model").evaluateAll((nodes) => nodes.every((node) => {
+        const bounds = node.getBoundingClientRect();
+        const parent = node.closest(".message").getBoundingClientRect();
+        return bounds.left >= parent.left && bounds.right <= parent.right && bounds.right <= innerWidth;
+      })), `Completion models must fit at ${width}px`);
       if (artifacts) {
         await fs.mkdir(artifacts, { recursive: true });
         await page.screenshot({ path: path.join(artifacts, `active-model-${width}.png`) });
@@ -208,6 +231,7 @@ async function main() {
     const report = { activeAndSelectedDiffer: true, replyKeepsActiveModel: true, nextTurnUsesSelection: true,
       externalTurnRefresh: true, chatSwitching: true, reload: true, widths, pageErrors: errors,
       realConversationRequests: 0, reasoningLevels: true, singleLineStatus: true,
+      completionModels: true, completionModelPersistence: true, unknownHistoricalModels: true,
       metadataReads: calls.filter((call) => call.method === "thread/read").length };
     if (artifacts) await fs.writeFile(path.join(artifacts, "browser.json"), JSON.stringify(report, null, 2) + "\n");
     console.log(JSON.stringify(report));
