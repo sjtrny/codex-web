@@ -170,6 +170,14 @@ the conversation. Collapse the area to its question count when you need more
 space; new questions expand it again. Long question lists scroll separately.
 The original messages stay in chronological order in the conversation.
 
+Chats with unanswered questions show an amber **?** beside their title in the
+chat list and move above all other chats, including pinned chats. Within each
+group, pinned chats come first, followed by recent activity order. The indicator
+clears when you answer or the task ends. Active chats are checked on reload,
+including chats you have not opened. The browser downloads only a compact
+question status for these checks. The proxy uses read-only pagination of the
+latest turn; it does not send background conversation history to the browser.
+
 Answer using the same text box and **Reply** button; there are no separate
 answer controls. Accepted replies clear the pending questions. Failed replies
 keep both the questions and your draft. Questions are scoped to the current
@@ -268,6 +276,7 @@ the pin to keep it above recent chats. Pinned conversations keep a visible blue
 pin; select it again to unpin. Keyboard focus also reveals the control, and pins
 remain visible on touch devices. Both groups follow recent activity order, and
 pinned conversations remain available even outside the 50 most recent chats.
+Chats with pending questions take priority over pins.
 
 Pins are saved in this browser and shared between tabs for the same Codex Web
 site. Archiving or deleting a conversation removes its pin. The pin controls
@@ -275,6 +284,8 @@ support keyboard access and mobile touch input.
 
 Run `npm run test:browser:pins` with the demo's Playwright dependencies for an
 isolated desktop/mobile check.
+Run `npm run test:browser:sidebar-questions` to check question indicators,
+priority ordering, replies, reloads, and mobile layouts.
 
 ### Conversation history downloads
 

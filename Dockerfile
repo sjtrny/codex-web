@@ -19,7 +19,7 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir --requirement requirements.txt
 
-COPY app.py history.py ./
+COPY app.py history.py questions.py ./
 COPY codex-web-instructions.md ./
 COPY static ./static
 COPY --from=frontend /build/static/vendor ./static/vendor

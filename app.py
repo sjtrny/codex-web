@@ -33,6 +33,7 @@ from aiohttp import (
 from aiohttp.helpers import content_disposition_header
 
 from history import decode_cursor, read_history_chunk
+from questions import read_pending_questions
 
 APP_VERSION = "0.9.3"
 ROOT = Path(__file__).resolve().parent
@@ -1357,6 +1358,37 @@ async def conversation_history(request: web.Request) -> web.Response:
     return response
 
 
+async def conversation_questions(request: web.Request) -> web.Response:
+    try:
+        params = await request.json()
+        thread_id = params.get("threadId") if isinstance(params, dict) else None
+        if not isinstance(thread_id, str) or not thread_id:
+            raise ValueError
+    except (ValueError, TypeError):
+        return web.json_response({"error": "Invalid question status request"}, status=400)
+    try:
+        async with asyncio.timeout(15), connect_backend(close_timeout=1) as (upstream, _):
+            request_id = 0
+
+            async def rpc(method, arguments):
+                nonlocal request_id
+                request_id += 1
+                return await backend_rpc(upstream, request_id, method, arguments)
+
+            await rpc("initialize", {
+                "clientInfo": {"name": "codex_web_questions", "version": APP_VERSION},
+                "capabilities": {"experimentalApi": True},
+            })
+            await upstream.send_json({"method": "initialized", "params": {}})
+            result = await read_pending_questions(rpc, thread_id)
+    except TimeoutError:
+        return web.json_response({"error": "Question status timed out"}, status=504)
+    except (BackendRPCError, BackendProtocolError, ClientError, OSError, RuntimeError, ValueError) as exc:
+        LOG.warning("conversation question status failed: %s", exc)
+        return web.json_response({"error": "Could not load question status"}, status=502)
+    return web.json_response(result, headers={"Cache-Control": "no-store"})
+
+
 def proxy_notice(method: str, **params: object) -> str:
     return json.dumps({"method": method, "params": params}, separators=(",", ":"))
 
@@ -1606,6 +1638,7 @@ def create_app() -> web.Application:
             web.get("/api/host-images", host_image),
             web.post("/api/search", search_chat_history),
             web.post("/api/history", conversation_history),
+            web.post("/api/thread-questions", conversation_questions),
             web.post("/api/uploads", upload_files),
             web.get("/healthz", health),
             web.get("/ws", websocket_proxy),

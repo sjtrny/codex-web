@@ -78,6 +78,7 @@ async function main() {
           case "permissionProfile/list": result = { data: [] }; break;
           case "config/read": result = { config: {} }; break;
           case "configRequirements/read": result = { requirements: null }; break;
+          case "thread/read":
           case "thread/resume": result = { thread: threads.get(message.params.threadId) }; break;
           case "thread/list":
             if (message.params.cursor) {
