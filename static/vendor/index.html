@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+    <meta name="theme-color" content="#101112">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Codex Web">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <title>Codex Web</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" href="/static/icons/app-icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/icons/apple-touch-icon.png">
+    <script src="/static/vendor/theme-275bfdae82819616.js"></script>
+    <link rel="stylesheet" href="/static/vendor/style-8041f152c988f5c5.css">
+  </head>
+  <body>
+    <main id="shell" class="shell">
+      <button id="sidebar-scrim" class="sidebar-scrim" type="button" aria-label="Close conversations" hidden></button>
+      <div id="sidebar-swipe-edge" class="sidebar-swipe-edge" aria-hidden="true" hidden></div>
+      <aside id="sidebar" class="sidebar" aria-label="Conversations">
+        <div class="brand">
+          <a class="brand-home" href="/"><strong>Codex</strong></a>
+          <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-controls="sidebar-content" aria-expanded="true" aria-label="Collapse conversations sidebar" title="Collapse conversations sidebar">
+            <svg class="sidebar-toggle-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="m15 18-6-6 6-6"></path>
+            </svg>
+          </button>
+          <button id="preferences-toggle" class="settings-cog" type="button" aria-controls="preferences-dialog" aria-expanded="false" aria-haspopup="dialog" aria-label="Open settings" title="Settings">⚙</button>
+          <button id="close-sidebar" class="close-sidebar" type="button" aria-label="Close conversations">×</button>
+        </div>
+        <div id="sidebar-content" class="sidebar-content">
+          <button id="new-thread" class="wide">+ New thread</button>
+          <button id="search-chats" class="wide sidebar-action" type="button" aria-controls="search-view" aria-pressed="false">
+            <span aria-hidden="true">⌕</span>
+            <span>Search chats</span>
+          </button>
+          <nav id="threads" aria-label="Threads"></nav>
+        </div>
+      </aside>
+      <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-label="Resize conversations sidebar" aria-controls="sidebar" aria-orientation="vertical" aria-valuemin="220" aria-valuemax="520" aria-valuenow="260" tabindex="0" title="Drag to resize conversations"></div>
+
+      <section id="chat" class="chat">
+        <header class="topbar">
+          <button id="menu" class="menu-button" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="Open conversations">Chats</button>
+          <strong id="thread-title">New thread</strong>
+        </header>
+
+        <div class="chat-notices">
+          <div id="usage-limit-warning" class="notice usage-limit-warning" role="alert" aria-atomic="true" hidden>
+            <strong>Usage limit reached</strong>
+            <span id="usage-limit-detail"></span>
+          </div>
+          <div id="notice" class="notice" hidden></div>
+        </div>
+        <div class="messages-region">
+          <div id="messages" class="messages" aria-live="polite" aria-busy="false">
+            <p class="empty">Send a request to start a thread.</p>
+            <div id="thinking-indicator" class="thinking-indicator" role="status" aria-labelledby="thinking-label active-model active-reasoning-label active-reasoning" aria-live="polite" aria-atomic="true" hidden>
+              <span id="thinking-label">Thinking.</span>
+              <span class="active-model-details">
+                <span id="active-model">No active turn</span>
+                <span id="active-reasoning-detail" class="active-reasoning-detail" hidden><span id="active-reasoning-label" class="sr-only">Reasoning</span><span id="active-reasoning"></span></span>
+              </span>
+              <span class="thinking-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+            </div>
+          </div>
+          <button id="jump-present" class="jump-present" type="button" aria-controls="messages" hidden>↓ Jump to present</button>
+        </div>
+        <section id="requests" class="requests" aria-label="Requests"></section>
+
+        <section id="pending-questions" class="pending-questions" aria-labelledby="pending-questions-title" hidden>
+          <button id="pending-questions-toggle" class="pending-questions-toggle" type="button" aria-expanded="true" aria-controls="pending-questions-content">
+            <span id="pending-questions-title" role="status" aria-live="polite" aria-atomic="true"></span>
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6 15 6-6 6 6"></path></svg>
+          </button>
+          <div id="pending-questions-content" class="pending-questions-content">
+            <ol id="pending-questions-list" class="pending-questions-list" tabindex="0" aria-label="Unanswered questions"></ol>
+            <p id="pending-questions-hint" class="pending-questions-hint">Reply in the message box below.</p>
+          </div>
+        </section>
+
+        <form id="composer" class="composer">
+          <div id="selected-model-status" class="model-status" aria-label="Selected model and reasoning for the next turn" aria-live="polite" aria-atomic="true">
+            <span id="selected-model">Loading…</span><span aria-hidden="true">·</span><span class="sr-only">Reasoning</span><span id="selected-reasoning">default</span>
+          </div>
+          <div id="attachments" class="attachments" aria-label="Attachments" hidden></div>
+          <textarea id="prompt" rows="3" placeholder="Ask Codex…"></textarea>
+          <div class="composer-tools">
+            <button id="settings-toggle" class="composer-settings" type="button" aria-controls="settings-dialog" aria-expanded="false" aria-haspopup="dialog" aria-label="Model and chat settings" title="Model and chat settings" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M4 7h3m4 0h9M4 17h9m4 0h3"></path>
+                <circle cx="9" cy="7" r="2"></circle>
+                <circle cx="15" cy="17" r="2"></circle>
+              </svg>
+            </button>
+            <label class="file-picker" title="Attach files or images">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.19 9.19a2 2 0 0 1-2.83-2.83l8.48-8.48"></path>
+              </svg>
+              <span class="sr-only">Attach files or images</span>
+              <input id="file-input" type="file" multiple>
+            </label>
+            <button id="send" type="submit" disabled>Send</button>
+          </div>
+        </form>
+
+        <section id="search-view" class="search-view" aria-labelledby="search-title" hidden>
+          <header class="search-topbar">
+            <button id="search-menu" class="menu-button" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="Open conversations">Chats</button>
+            <div class="search-heading">
+              <h1 id="search-title">Search chat history</h1>
+              <p>Find a message across the conversations in your chat list. Dates use the containing turn's time.</p>
+            </div>
+          </header>
+          <div class="search-content">
+            <form id="search-form" class="search-form" role="search">
+              <div class="search-query-row">
+                <label class="sr-only" for="search-query">Search messages</label>
+                <input id="search-query" type="search" name="q" maxlength="256" placeholder="Search messages…" autocomplete="off" enterkeyhint="search">
+                <button id="search-submit" class="search-submit" type="submit">Search</button>
+              </div>
+              <fieldset class="search-filters">
+                <legend class="sr-only">Search filters</legend>
+                <label class="search-date-filter">
+                  <span>From</span>
+                  <input id="search-from" type="date" name="from">
+                </label>
+                <label class="search-date-filter">
+                  <span>To</span>
+                  <input id="search-to" type="date" name="to">
+                </label>
+                <label>
+                  <span>Sort</span>
+                  <select id="search-sort" name="sort">
+                    <option value="newest">Newest first</option>
+                    <option value="oldest">Oldest first</option>
+                  </select>
+                </label>
+                <button id="search-clear" class="search-clear" type="reset">Clear</button>
+              </fieldset>
+            </form>
+            <p id="search-status" class="search-status" role="status" aria-live="polite" aria-atomic="true">Enter a word or phrase to search your chat history.</p>
+            <ol id="search-results" class="search-results" aria-label="Search results" aria-busy="false"></ol>
+          </div>
+        </section>
+      </section>
+    </main>
+    <dialog id="settings-dialog" class="preferences-dialog settings-dialog" aria-labelledby="settings-title">
+      <header class="preferences-header">
+        <h2 id="settings-title">Model and chat settings</h2>
+        <button id="settings-close" class="preferences-close" type="button" aria-label="Close chat settings">×</button>
+      </header>
+      <div class="preferences-body">
+        <p class="active-model-summary" aria-live="polite" aria-atomic="true"><span>Active model</span><strong id="settings-active-model">No active turn</strong></p>
+        <div class="model-catalog-controls">
+          <button id="refresh-models" type="button" disabled>Refresh models</button>
+          <p id="model-catalog-status" role="status" aria-live="polite">Loading available models…</p>
+        </div>
+        <fieldset id="settings-fields" class="settings-grid" disabled>
+          <legend class="sr-only">Chat settings</legend>
+          <div class="setting working-folder">
+            <label for="cwd">Working folder</label>
+            <input id="cwd" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="cwd-help">
+            <small id="cwd-help">Folder where Codex starts commands and looks for project files. Changes apply to your next task, not one already running.</small>
+          </div>
+          <label class="setting">
+            <span>Selected model</span>
+            <select id="setting-model" data-setting="model" aria-describedby="selected-model-help model-help"><option value="">Loading instance default…</option></select>
+            <small id="selected-model-help">Used for the next new turn. Replies keep the active model.</small>
+            <small id="model-help"></small>
+          </label>
+          <label class="setting">
+            <span>Reasoning</span>
+            <select id="setting-effort" data-setting="effort" aria-describedby="effort-help"><option value="">Instance default</option></select>
+            <small id="effort-help"></small>
+          </label>
+          <label class="setting">
+            <span>Speed</span>
+            <select id="setting-service-tier" data-setting="serviceTier" aria-describedby="service-tier-help"><option value="">Instance default</option></select>
+            <small id="service-tier-help"></small>
+          </label>
+          <label class="setting">
+            <span>Personality</span>
+            <select id="setting-personality" data-setting="personality"><option value="">Instance default</option></select>
+          </label>
+          <label class="setting">
+            <span>Reasoning summary</span>
+            <select id="setting-summary" data-setting="summary"><option value="">Instance default</option></select>
+          </label>
+          <label class="setting">
+            <span id="tool-activity-label">Tool activity</span>
+            <select id="setting-tool-activity" data-setting="toolActivity" aria-labelledby="tool-activity-label" aria-describedby="tool-activity-help"><option value="">Instance default</option></select>
+            <small id="tool-activity-help">Show or hide tool details immediately. Tools still run.</small>
+          </label>
+          <label class="setting">
+            <span>Approvals</span>
+            <select id="setting-approval" data-setting="approvalPolicy"><option value="">Instance default</option></select>
+          </label>
+          <label class="setting">
+            <span>Permissions</span>
+            <select id="setting-permissions" data-setting="permissions"><option value="">Instance default</option></select>
+          </label>
+        </fieldset>
+        <p id="settings-note" class="settings-note">Instance defaults apply wherever Default is selected.</p>
+      </div>
+    </dialog>
+    <dialog id="preferences-dialog" class="preferences-dialog" aria-labelledby="preferences-title">
+      <header class="preferences-header">
+        <h2 id="preferences-title">Settings</h2>
+        <button id="preferences-close" class="preferences-close" type="button" aria-label="Close settings">×</button>
+      </header>
+      <section class="preferences-body" aria-labelledby="appearance-title">
+        <h3 id="appearance-title">Appearance</h3>
+        <div class="theme-options" role="group" aria-label="Color theme">
+          <button id="theme-system" class="theme-option" type="button" data-theme-preference="system" aria-pressed="false"><strong>System</strong><small>Browser / OS</small></button>
+          <button id="theme-light" class="theme-option" type="button" data-theme-preference="light" aria-pressed="false"><strong>Light</strong><small>Always light</small></button>
+          <button id="theme-dark" class="theme-option" type="button" data-theme-preference="dark" aria-pressed="false"><strong>Dark</strong><small>Always dark</small></button>
+        </div>
+        <p id="theme-summary" class="preferences-note" aria-live="polite"></p>
+      </section>
+    </dialog>
+    <template id="search-result-template">
+      <li class="search-result">
+        <a class="search-result-button">
+          <span class="search-result-heading"><strong class="search-result-title"></strong></span>
+          <span class="search-result-snippet"></span>
+          <span class="search-result-meta"></span>
+        </a>
+      </li>
+    </template>
+    <script src="/static/vendor/markdown-c0f644b2ef891c66.js" data-math-script="/static/vendor/math-35f6d5dcd9a27e66.js" data-math-style="/static/vendor/math-e62d87b6b64aac46.css" defer></script>
+    <script src="/static/vendor/app-6d9629eaad0e4bae.js" defer></script>
+  </body>
+</html>

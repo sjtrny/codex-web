@@ -439,3 +439,34 @@ npm run build
 Install Python dependencies in a virtual environment as shown above. The DOM
 tests use jsdom and the real page markup; the browser checks described above cover
 layout, focus, and interaction in Chromium.
+
+### Mobile loading and asset builds
+
+`npm run build` produces the production page and minified assets in
+`static/vendor/`. Run it after changing the frontend, page or styles. The server
+uses the generated page when available and falls back to the source page before
+the first build. Docker performs this build automatically.
+
+The production page references content-fingerprinted assets with a one-year
+immutable cache lifetime. Each JavaScript/CSS asset and the page have prebuilt
+Brotli and gzip representations; the server negotiates the supported encoding.
+Unversioned UI files require revalidation. The page, configuration, conversations,
+uploads and workspace files retain `no-store`; the service worker does not cache
+private data. The maths renderer and its styles/fonts load only when a message
+can contain maths. Failed maths downloads leave readable source and can retry on
+a later render. Message images use browser lazy loading.
+
+The selected conversation loads alongside settings and the sidebar. History
+downloads use negotiated compression while preserving the configured limit on
+decoded bytes, pagination cursors and `no-store` policy.
+
+With the demo's Playwright dependencies installed, run `npm run
+test:browser:loading` for slow settings, delayed/failed maths, sanitization and
+retry checks. `npm run test:browser:performance` measures three cold and warm
+mobile navigations at 500 kbit/s download, 128 kbit/s upload, 150 ms latency and
+4× CPU slowdown. It starts the real proxy with a synthetic backend; no real
+conversations are accessed. Set `PYTHON` and `PLAYWRIGHT_MODULE` if needed,
+`ARTIFACT_DIR` to save results, and `PERF_CHECK_BUDGET=1` to enforce the ordinary
+chat transfer budget. `PERF_SCENARIO=empty` or `math` checks those entry paths.
+The default `plain` scenario includes a short Markdown conversation; image-heavy
+histories and actual backend response times will vary.

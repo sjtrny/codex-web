@@ -573,8 +573,8 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[1]["source"], "composer_stop_button")
 
     async def test_headers_apply_to_files_errors_and_websocket_handshakes(self) -> None:
-        def check_headers(headers) -> None:
-            self.assertEqual(headers["Cache-Control"], "no-store")
+        def check_headers(headers, cache_control="no-store") -> None:
+            self.assertEqual(headers["Cache-Control"], cache_control)
             self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
             self.assertEqual(headers["Referrer-Policy"], "no-referrer")
             self.assertEqual(headers["X-Frame-Options"], "DENY")
@@ -592,7 +592,7 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(route=route):
                     async with session.get(base_url + route) as response:
                         self.assertEqual(response.status, status)
-                        check_headers(response.headers)
+                        check_headers(response.headers, "no-cache" if route.startswith("/static/") else "no-store")
             async with session.ws_connect(base_url + "/ws") as socket:
                 check_headers(socket._response.headers)
                 await socket.receive()
@@ -713,17 +713,17 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('id="thinking-indicator"', body)
             self.assertIn("Thinking.", body)
             self.assertIn('aria-busy="false"', body)
-            self.assertIn("/static/vendor/markdown.css", body)
-            self.assertIn("/static/vendor/markdown.js", body)
-            self.assertIn("/static/theme.js", body)
+            self.assertRegex(body, r'/static/vendor/markdown-[0-9a-f]{16}\.js')
+            self.assertRegex(body, r'data-math-script="/static/vendor/math-[0-9a-f]{16}\.js"')
+            self.assertNotRegex(body, r'<link[^>]+href="[^"]*math[^\"]*\.css"')
             self.assertIn('rel="manifest" href="/manifest.webmanifest"', body)
             self.assertIn('name="mobile-web-app-capable" content="yes"', body)
             self.assertIn('name="apple-mobile-web-app-capable" content="yes"', body)
             self.assertIn('name="apple-mobile-web-app-title" content="Codex Web"', body)
             self.assertIn('rel="apple-touch-icon" sizes="180x180"', body)
             self.assertLess(
-                body.index("/static/theme.js"),
-                body.index("/static/style.css"),
+                body.index("/static/vendor/theme-"),
+                body.index("/static/vendor/style-"),
             )
             self.assertNotIn("cdn.jsdelivr.net", body)
             self.assertIn("viewport-fit=cover", body)
@@ -1488,7 +1488,8 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
         async with ClientSession() as session:
             for asset, marker in (
                 ("markdown.js", "CodexMarkdown"),
-                ("markdown.css", ".katex"),
+                ("math.css", ".katex"),
+                ("math.js", "CodexMath"),
             ):
                 async with session.get(
                     f"http://127.0.0.1:{self.port}/static/vendor/{asset}"
