@@ -127,6 +127,7 @@ async function main() {
         if (!message.method || message.id == null) return;
         let result;
         switch (message.method) {
+          case "account/rateLimits/read": result = {}; break;
           case "initialize": result = { userAgent: "embedded-image-browser-test" }; break;
           case "model/list": result = { data: [] }; break;
           case "permissionProfile/list": result = { data: [] }; break;

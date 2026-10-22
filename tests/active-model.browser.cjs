@@ -73,6 +73,7 @@ async function main() {
         if (request.params?.threadId) assert.ok(threads.has(request.params.threadId));
         let result = {};
         switch (request.method) {
+          case "account/rateLimits/read": result = {}; break;
           case "initialize": case "config/read": case "configRequirements/read": break;
           case "model/list": result = { data: models }; break;
           case "permissionProfile/list": result = { data: [] }; break;

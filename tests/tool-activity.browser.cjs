@@ -106,6 +106,7 @@ async function checkMode(browser, value) {
         if (!message.method || message.id == null) return;
         let result;
         switch (message.method) {
+          case "account/rateLimits/read": result = {}; break;
           case "initialize": result = { userAgent: "tool-activity-browser-check" }; break;
           case "model/list": result = { data: [] }; break;
           case "permissionProfile/list": result = { data: [] }; break;

@@ -94,6 +94,7 @@ async function main() {
         if (message.id == null) return;
         let value;
         switch (message.method) {
+          case "account/rateLimits/read": value = {}; break;
           case "initialize": value = { userAgent: "search-browser-test" }; break;
           case "model/list":
           case "permissionProfile/list": value = { data: [] }; break;

@@ -77,6 +77,7 @@ async function main() {
         if (!message.method || message.id == null) return;
         let result;
         switch (message.method) {
+          case "account/rateLimits/read": result = {}; break;
           case "initialize": result = { userAgent: "fork-browser-test" }; break;
           case "model/list":
           case "permissionProfile/list": result = { data: [] }; break;

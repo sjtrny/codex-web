@@ -15,6 +15,8 @@ const THREAD_LIST_PARAMS = Object.freeze({
 const CHAT_SETTINGS_STORAGE_KEY = "codex-web-chat-settings-v1";
 const PINNED_THREADS_STORAGE_KEY = "codex-web-pinned-threads-v1";
 const MESSAGE_TIMES_STORAGE_KEY = "codex-web-message-times-v1";
+const USAGE_LIMIT_STORAGE_KEY = "codex-web-usage-limit-v1";
+const USAGE_LIMIT_REFRESH_MS = 30000;
 const MESSAGE_TIMES_LIMIT = 2000;
 const MESSAGE_TIME_FORMAT = new Intl.DateTimeFormat(undefined, {
   year: "numeric", month: "short", day: "numeric",
@@ -147,6 +149,8 @@ const ui = {
   settingPermissions: el("setting-permissions"),
   settingsNote: el("settings-note"),
   notice: el("notice"),
+  usageLimitWarning: el("usage-limit-warning"),
+  usageLimitDetail: el("usage-limit-detail"),
   messages: el("messages"),
   thinkingIndicator: el("thinking-indicator"),
   thinkingLabel: el("thinking-label"),
@@ -238,6 +242,11 @@ const state = {
   lastMessagesScrollTop: 0,
   messagesTouchY: null,
   connectionStatus: "offline",
+  usageLimitWarning: null,
+  usageAccountId: null,
+  usageRevision: 0,
+  usageRequest: null,
+  usageRefreshTimer: null,
 };
 
 function setStatus(_text, kind) {
@@ -306,6 +315,146 @@ function focusPreferencesReturnTarget() {
 function notice(text = "") {
   ui.notice.textContent = text;
   ui.notice.hidden = !text;
+}
+
+function renderUsageLimitWarning() {
+  const warning = state.usageLimitWarning;
+  ui.usageLimitWarning.hidden = !warning;
+  if (!warning) {
+    ui.usageLimitDetail.textContent = "";
+    return;
+  }
+  const parts = [warning.limitName ? `${warning.limitName}.` : "Some requests may be unavailable."];
+  if (warning.resetsAt) {
+    const reset = new Date(warning.resetsAt * 1000);
+    parts.push(reset.getTime() > Date.now()
+      ? `Expected reset: ${reset.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}.`
+      : "The reset time has passed; waiting for usage availability to be confirmed.");
+  }
+  parts.push("Availability is checked automatically.");
+  ui.usageLimitDetail.textContent = parts.join(" ");
+}
+
+function saveUsageLimitWarning() {
+  try {
+    localStorage.setItem(USAGE_LIMIT_STORAGE_KEY, JSON.stringify({
+      accountId: state.usageAccountId, warning: state.usageLimitWarning,
+    }));
+  } catch { /* Keep the warning in this tab when browser storage is unavailable. */ }
+}
+
+function setUsageLimitWarning(warning, newError = false) {
+  if (newError || JSON.stringify(warning) !== JSON.stringify(state.usageLimitWarning)) state.usageRevision += 1;
+  state.usageLimitWarning = warning;
+  renderUsageLimitWarning();
+  saveUsageLimitWarning();
+}
+
+function loadUsageLimitWarning() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(USAGE_LIMIT_STORAGE_KEY));
+    if (!saved || typeof saved !== "object") return;
+    const accountId = typeof saved.accountId === "string" ? saved.accountId : null;
+    if (state.usageAccountId && accountId !== state.usageAccountId) return;
+    const warning = saved.warning;
+    if (warning !== null && (!warning || typeof warning !== "object")) return;
+    state.usageAccountId = accountId;
+    state.usageLimitWarning = warning ? {
+      limitName: typeof warning.limitName === "string" ? warning.limitName.slice(0, 300) : "",
+      resetsAt: validUsageReset(warning.resetsAt),
+    } : null;
+    state.usageRevision += 1;
+    renderUsageLimitWarning();
+  } catch { /* Ignore unavailable or malformed browser storage. */ }
+}
+
+function handleUsageLimitStorage(event) {
+  if (event.key === USAGE_LIMIT_STORAGE_KEY) loadUsageLimitWarning();
+}
+
+function validUsageReset(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 && value < 8640000000000
+    ? value : null;
+}
+
+function applyUsageLimits(result) {
+  if (!result || typeof result !== "object") return;
+  const accountId = typeof result.accountId === "string" ? result.accountId : null;
+  if (accountId) {
+    const changed = state.usageAccountId && state.usageAccountId !== accountId;
+    state.usageAccountId = accountId;
+    if (changed) setUsageLimitWarning(null);
+  }
+  // Only an explicit backend permission confirms recovery. Sparse snapshots,
+  // rounded percentages and elapsed reset times must not dismiss a warning.
+  if (result.ordinaryUsageAllowed === true) {
+    setUsageLimitWarning(null);
+    return;
+  }
+  const buckets = [result.rateLimits, ...Object.values(result.rateLimitsByLimitId || {})]
+    .filter((bucket) => bucket && typeof bucket === "object");
+  const exhausted = buckets.filter((bucket) => bucket.rateLimitReachedType
+    || bucket.spendControlReached === true || bucket.individualLimit?.remainingPercent === 0
+    || [bucket.primary, bucket.secondary].some((window) => window?.usedPercent >= 100));
+  if (result.ordinaryUsageAllowed !== false && !exhausted.length) return;
+  const resets = exhausted.flatMap((bucket) => [
+    ...[bucket.primary, bucket.secondary].filter((window) => window?.usedPercent >= 100).map((window) => window.resetsAt),
+    ...(bucket.individualLimit?.remainingPercent === 0 ? [bucket.individualLimit.resetsAt] : []),
+  ]).map(validUsageReset).filter(Boolean);
+  const names = [...new Set(exhausted.map((bucket) => bucket.limitName).filter((name) => typeof name === "string" && name))];
+  setUsageLimitWarning({
+    limitName: names.join(", ").slice(0, 300),
+    resetsAt: resets.length ? Math.max(...resets) : state.usageLimitWarning?.resetsAt || null,
+  });
+}
+
+function observeUsageLimitError(error) {
+  if (!error || typeof error !== "object") return false;
+  const info = error.codexErrorInfo || error.data?.codexErrorInfo;
+  const message = typeof error.message === "string" ? error.message : "";
+  // Ordinary request throttling, context limits and per-session budgets are
+  // not account usage exhaustion. Older backends may expose only this text.
+  const exhausted = info === "usageLimitExceeded"
+    || (!info && /\b(?:you(?:'|’)ve|you have) hit your usage limit\b|\busage limit (?:has been )?(?:reached|exceeded)\b|\binsufficient_quota\b/i.test(message));
+  if (exhausted) setUsageLimitWarning(state.usageLimitWarning || { limitName: "", resetsAt: null }, true);
+  if (exhausted || info === "rateLimitExceeded") void refreshUsageLimits();
+  return exhausted;
+}
+
+function scheduleUsageLimitsRefresh(delay = USAGE_LIMIT_REFRESH_MS) {
+  window.clearTimeout(state.usageRefreshTimer);
+  if (!state.ready) return;
+  state.usageRefreshTimer = window.setTimeout(() => {
+    if (document.visibilityState === "hidden") scheduleUsageLimitsRefresh();
+    else void refreshUsageLimits();
+  }, delay);
+}
+
+function refreshUsageLimits() {
+  if (!state.ready) return Promise.resolve();
+  if (state.usageRequest?.socket === state.ws) return state.usageRequest.promise;
+  window.clearTimeout(state.usageRefreshTimer);
+  const request = { socket: state.ws, revision: state.usageRevision, promise: null };
+  state.usageRequest = request;
+  let superseded = false;
+  request.promise = rpc("account/rateLimits/read", { excludeResetCreditDetails: true }, 15000)
+    .then((result) => {
+      if (state.ws !== request.socket) return;
+      superseded = request.revision !== state.usageRevision;
+      if (!superseded) applyUsageLimits(result);
+    }).catch(() => {
+      // Limit checks must neither interrupt chat nor erase a known warning.
+    }).finally(() => {
+      if (state.usageRequest !== request) return;
+      state.usageRequest = null;
+      renderUsageLimitWarning();
+      scheduleUsageLimitsRefresh(superseded ? 0 : USAGE_LIMIT_REFRESH_MS);
+    });
+  return request.promise;
+}
+
+function refreshUsageLimitsWhenVisible() {
+  if (document.visibilityState !== "hidden") void refreshUsageLimits();
 }
 
 function selectedThreadForking() {
@@ -2820,6 +2969,7 @@ async function connect() {
       setStatus("connected", "online");
       notice("");
       updateControls();
+      void refreshUsageLimits();
       await loadChatSettingsCatalog();
       await refreshThreads();
       if (state.threadId) await openThread(state.threadId, false);
@@ -2840,6 +2990,7 @@ async function connect() {
   socket.addEventListener("close", () => {
     if (state.ws !== socket) return;
     state.ready = false;
+    window.clearTimeout(state.usageRefreshTimer);
     state.activeTurns.clear();
     state.activeModels.clear();
     state.liveThreadStatuses.clear();
@@ -2865,7 +3016,12 @@ function handleMessage(message) {
     if (!pending) return;
     window.clearTimeout(pending.timer);
     state.pending.delete(message.id);
-    if (message.error) pending.reject(new Error(message.error.message || "Codex request failed"));
+    if (message.error) {
+      if (["turn/start", "turn/steer", "thread/start", "thread/resume"].includes(pending.method)) {
+        observeUsageLimitError(message.error);
+      }
+      pending.reject(new Error(message.error.message || "Codex request failed"));
+    }
     else pending.resolve(message.result);
     return;
   }
@@ -2924,6 +3080,20 @@ function reconcileThreadHistory(threadId) {
 
 function handleNotification(method, params) {
   switch (method) {
+    case "account/rateLimits/updated":
+      applyUsageLimits(params);
+      if (state.usageLimitWarning) void refreshUsageLimits();
+      return;
+    case "account/updated":
+      // This event also covers plan changes and does not identify the account.
+      // Keep its warning until a fresh read confirms recovery or a new account.
+      state.usageRevision += 1;
+      if (params.authMode === null) {
+        state.usageAccountId = null;
+        setUsageLimitWarning(null);
+      }
+      void refreshUsageLimits();
+      return;
     case "codex-web/connected":
       return;
     case "codex-web/error":
@@ -2984,6 +3154,7 @@ function handleNotification(method, params) {
       refreshThreads();
       return;
     case "turn/completed":
+      observeUsageLimitError(params.turn?.error);
       // item/* notifications are the ordering authority for a live turn. The
       // completion snapshot can omit live-only tools and use canonical IDs, so
       // replacing the streamed sequence here would move those tools after the
@@ -3075,6 +3246,9 @@ function handleNotification(method, params) {
       removeRequest(params.requestId);
       return;
     case "error":
+      observeUsageLimitError(params.error || params);
+      notice(params.message || params.error?.message || method);
+      return;
     case "warning":
       notice(params.message || params.error?.message || method);
       return;
@@ -5166,6 +5340,7 @@ function handleServerRequest(message) {
 }
 
 async function boot() {
+  loadUsageLimitWarning();
   const requestedThreadId = threadIdFromSearch(globalThis.location?.search || "");
   if (requestedThreadId) {
     state.threadId = requestedThreadId;
@@ -5332,10 +5507,20 @@ if (globalThis.CODEX_WEB_TEST) {
     threadActivityTimestamp,
     ui,
     updateControls,
+    USAGE_LIMIT_STORAGE_KEY,
+    applyUsageLimits,
+    refreshUsageLimits,
+    loadUsageLimitWarning,
+    handleUsageLimitStorage,
+    observeUsageLimitError,
+    notice,
     upsertMessage,
   };
 } else {
   window.addEventListener("storage", handlePinnedThreadsStorage);
+  window.addEventListener("storage", handleUsageLimitStorage);
+  window.addEventListener("focus", refreshUsageLimitsWhenVisible);
+  document.addEventListener("visibilitychange", refreshUsageLimitsWhenVisible);
   ui.composer.addEventListener("submit", submitPrompt);
   renderThemeControl();
   globalThis.CodexTheme?.subscribe(renderThemeControl);
