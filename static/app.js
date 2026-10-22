@@ -179,6 +179,7 @@ const state = {
   threadId: null,
   activeTurns: new Map(),
   activeModels: new Map(),
+  chatModels: new Map(),
   turnModels: loadTurnModels(),
   liveThreadStatuses: new Map(),
   submittingThreads: new Set(),
@@ -1002,6 +1003,7 @@ function threadContainsPendingUser(thread, pending) {
 
 function cacheThreadSnapshot(thread) {
   if (!thread?.id) return null;
+  rememberChatModel(thread.id, thread.model);
   reconcileSteersFromThread(thread);
   reconcileRequestsFromThread(thread);
   const previous = state.threadCache.get(thread.id);
@@ -1022,6 +1024,7 @@ function cacheThreadSnapshot(thread) {
 
 function mergeThreadSnapshot(thread) {
   if (!thread?.id) return null;
+  rememberChatModel(thread.id, thread.model);
   const previous = state.threadCache.get(thread.id);
   if (!previous) return cacheThreadSnapshot(thread);
   const itemAliases = previous.itemAliases || new Map();
@@ -1308,6 +1311,7 @@ function normalizeChatSettings(value = {}) {
 function effectiveChatSettings(value = {}) {
   const overrides = normalizeChatSettings(value);
   const effective = normalizeChatSettings(state.chatDefaults);
+  if (state.threadId) effective.model = state.chatModels.get(state.threadId) || "";
   for (const field of CHAT_SETTING_FIELDS) {
     if (overrides[field]) effective[field] = overrides[field];
   }
@@ -1333,6 +1337,19 @@ function currentChatSettings() {
   return state.settingsByThread.get(state.threadId);
 }
 
+function rememberChatModel(threadId, model) {
+  if (!threadId || !validTurnModel(model) || state.chatModels.get(threadId) === model) return;
+  state.chatModels.set(threadId, model);
+  if (state.threadId === threadId) renderChatSettings();
+}
+
+function threadWithModel(result) {
+  const thread = result?.thread;
+  // Older app-servers expose the resolved model on the resume/start response.
+  return thread && !validTurnModel(thread.model) && validTurnModel(result.model)
+    ? { ...thread, model: result.model } : thread;
+}
+
 function refreshActiveModel(threadId, force = false) {
   if (!state.ready || !state.activeTurns.has(threadId)) return;
   const turnId = state.activeTurns.get(threadId);
@@ -1352,6 +1369,7 @@ function refreshActiveModel(threadId, force = false) {
       && state.activeTurns.has(threadId) && state.activeTurns.get(threadId) === turnId) {
       if (typeof thread.model === "string") record.model = thread.model;
       if (typeof thread.reasoningEffort === "string") record.effort = thread.reasoningEffort;
+      rememberChatModel(threadId, record.model);
       rememberTurnModel(threadId, turnId, record.model);
     }
   }).catch(() => {
@@ -1369,7 +1387,7 @@ function refreshActiveModel(threadId, force = false) {
 function renderModelStatus() {
   const settings = effectiveChatSettings(currentChatSettings());
   const selected = settings.model;
-  const selectedLabel = chatSettingValueLabel("model", selected);
+  const selectedLabel = !selected && state.threadId ? "Chat model" : chatSettingValueLabel("model", selected);
   const unavailable = selected && state.modelsLoaded
     && !state.models.some((model) => model.model === selected || model.id === selected);
   const selectedText = `${selectedLabel}${unavailable ? " (unavailable)" : ""}`;
@@ -1435,7 +1453,8 @@ function loadStoredChatSettings() {
     const stored = JSON.parse(localStorage.getItem(CHAT_SETTINGS_STORAGE_KEY) || "{}");
     state.newThreadSettings = normalizeChatSettings(stored.newThread);
     for (const [threadId, settings] of Object.entries(stored.threads || {})) {
-      state.settingsByThread.set(threadId, normalizeChatSettings(settings));
+      // A previous device-local model must never override the chat's saved model.
+      state.settingsByThread.set(threadId, normalizeChatSettings({ ...settings, model: "" }));
     }
   } catch {
     state.newThreadSettings = emptyChatSettings();
@@ -1446,7 +1465,8 @@ function loadStoredChatSettings() {
 function persistChatSettings() {
   if (globalThis.CODEX_WEB_TEST) return;
   try {
-    const threads = Object.fromEntries([...state.settingsByThread.entries()].slice(-200));
+    const threads = Object.fromEntries([...state.settingsByThread.entries()].slice(-200)
+      .map(([id, settings]) => [id, { ...settings, model: "" }]));
     localStorage.setItem(CHAT_SETTINGS_STORAGE_KEY, JSON.stringify({
       newThread: state.newThreadSettings,
       threads,
@@ -1458,9 +1478,9 @@ function persistChatSettings() {
 
 function modelForSettings(settings) {
   const modelId = settings.model
-    || state.chatDefaults.model
-    || state.configDefaults.model
-    || state.models.find((model) => model.isDefault)?.model;
+    || (state.threadId ? state.chatModels.get(state.threadId)
+      : state.chatDefaults.model || state.configDefaults.model
+        || state.models.find((model) => model.isDefault)?.model);
   return state.models.find((model) => model.model === modelId || model.id === modelId) || null;
 }
 
@@ -1483,6 +1503,11 @@ function chatSettingValueLabel(field, value) {
 }
 
 function defaultChatSettingOption(field) {
+  if (field === "model" && state.threadId) {
+    const model = state.chatModels.get(state.threadId);
+    return { value: "", label: model
+      ? `Chat model — ${chatSettingValueLabel("model", model)}` : "Chat model — saved on server" };
+  }
   const desired = state.chatDefaults[field];
   const effective = effectiveChatSettings({ ...currentChatSettings(), [field]: "" });
   const value = ["effort", "serviceTier"].includes(field) ? effective[field] : desired;
@@ -1584,8 +1609,9 @@ function renderChatSettings() {
   ui.settingServiceTier.disabled = false;
 
   const effective = effectiveChatSettings(settings);
-  ui.modelHelp.textContent = model?.description || (state.modelsLoaded
-    ? "This model is unavailable. Refresh models or choose another model." : "");
+  ui.modelHelp.textContent = model ? model.description || "" : (state.threadId && !effective.model
+    ? "This chat keeps its saved model. Select another model to change it."
+    : state.modelsLoaded ? "This model is unavailable. Refresh models or choose another model." : "");
   ui.effortHelp.textContent = efforts.find(
     (entry) => entry.reasoningEffort === (effective.effort || model?.defaultReasoningEffort),
   )?.description || "";
@@ -1623,7 +1649,10 @@ function renderChatSettings() {
 
   const count = CHAT_SETTING_FIELDS.filter((field) => settings[field]).length;
   const unavailable = !personalitySupported ? " Personality is unavailable for this model." : "";
-  ui.settingsNote.textContent = `${count || "No"} override${count === 1 ? "" : "s"} set. Instance defaults apply wherever Default is selected. Tool activity visibility changes immediately. Other changes apply to the next new turn, not replies sent while Codex works. Settings remain with this chat.${unavailable}`;
+  const modelNote = state.threadId
+    ? "The chat model follows the last-used model across devices. A new choice is saved when the next turn starts."
+    : "Instance defaults apply wherever Default is selected.";
+  ui.settingsNote.textContent = `${count || "No"} override${count === 1 ? "" : "s"} set. ${modelNote} Tool activity visibility changes immediately. Other changes apply to the next new turn, not replies sent while Codex works. Settings remain with this chat.${unavailable}`;
   renderModelStatus();
   persistChatSettings();
 }
@@ -3070,7 +3099,7 @@ function reconcileThreadHistory(threadId) {
       ) break;
       const selected = state.threadId === threadId;
       if (selected) saveCurrentThreadView();
-      entry = mergeThreadSnapshot(result.thread) || entry;
+      entry = mergeThreadSnapshot(threadWithModel(result)) || entry;
       if (selected && state.threadId === threadId) renderCachedThread(entry);
     } while (reconciliation.queued && state.ready);
     return entry;
@@ -3128,6 +3157,7 @@ function handleNotification(method, params) {
       state.liveThreadStatuses.delete(params.threadId);
       state.activeTurns.delete(params.threadId);
       state.activeModels.delete(params.threadId);
+      state.chatModels.delete(params.threadId);
       state.provisionalThreads.delete(params.threadId);
       state.threadCache.delete(params.threadId);
       state.threadReconciliations.delete(params.threadId);
@@ -4353,7 +4383,7 @@ async function refreshPagedHistoryOnce(threadId) {
   const result = await rpc("thread/resume", { threadId, excludeTurns: true });
   if (generation !== state.connectionGeneration || !state.ready
     || cachedThread(threadId, false)?.history !== expectedHistory) return null;
-  let entry = mergeThreadSnapshot({ ...result.thread, turns: [] });
+  let entry = mergeThreadSnapshot({ ...threadWithModel(result), turns: [] });
   const history = entry.history;
   if (ui.notice.textContent === history.error) notice("");
   if (history.loading) await history.loading;
@@ -4637,6 +4667,7 @@ async function refreshThreads() {
     if (refreshId !== state.threadRefreshId) return;
     if (!Array.isArray(result?.data)) throw new Error("Unable to load conversations.");
     const recent = result.data;
+    for (const thread of recent) rememberChatModel(thread.id, thread.model);
     const foundIds = new Set(recent.map((thread) => thread.id));
     const pins = new Map(state.threads
       .filter((thread) => state.pinnedThreads.has(thread.id) && !foundIds.has(thread.id)
@@ -4662,6 +4693,7 @@ async function refreshThreads() {
       if (refreshId !== state.threadRefreshId) return;
       if (!Array.isArray(page?.data)) throw new Error("Unable to load pinned conversations.");
       for (const thread of page.data) {
+        rememberChatModel(thread.id, thread.model);
         if (state.pinnedThreads.has(thread.id) && !foundIds.has(thread.id)) pins.set(thread.id, thread);
         foundIds.add(thread.id);
       }
@@ -4722,7 +4754,7 @@ async function openThread(threadId, showErrors = true) {
       return;
     }
     const result = await rpc("thread/resume", { threadId });
-    const thread = result.thread;
+    const thread = threadWithModel(result);
     const refreshed = mergeThreadSnapshot(thread);
     if (selectionId !== state.selectionId || state.threadId !== threadId) return;
     renderCachedThread(refreshed);
@@ -4799,7 +4831,7 @@ async function forkFromResponse(entry) {
       deferGoalContinuation: true,
       ...(state.historyChunkBytes ? { excludeTurns: true } : {}),
     });
-    const thread = result?.thread;
+    const thread = threadWithModel(result);
     if (!thread?.id || thread.id === sourceId) {
       throw new Error("The server did not return a separate chat.");
     }
@@ -4905,6 +4937,10 @@ async function submitPrompt(event) {
   const cwd = currentWorkingFolder();
   const chatSettingOverrides = { ...currentChatSettings() };
   const chatSettings = effectiveChatSettings(chatSettingOverrides);
+  const turnParams = turnSettingsParams(chatSettings);
+  // Omission uses the server's sticky model, including changes from another
+  // device since this page opened. Only an explicit choice overrides it.
+  if (state.threadId && !chatSettingOverrides.model) delete turnParams.model;
   if (state.modelsLoaded && chatSettings.model && !modelForSettings(chatSettings)) {
     notice("This model is unavailable. Open chat settings to refresh models or choose another model.");
     return;
@@ -4939,7 +4975,7 @@ async function submitPrompt(event) {
       targetThreadId = started.thread.id;
       targetComposerKey = threadComposerKey(targetThreadId, selectionId);
       moveComposerDraft(submissionComposerKey, targetComposerKey);
-      cacheThreadSnapshot(started.thread);
+      cacheThreadSnapshot(threadWithModel(started));
       const pending = {
         id: pendingId,
         text: pendingText,
@@ -4973,8 +5009,15 @@ async function submitPrompt(event) {
       input,
       cwd,
       clientUserMessageId: pendingId,
-      ...turnSettingsParams(chatSettings),
+      ...turnParams,
     });
+    if (turnParams.model) {
+      rememberChatModel(targetThreadId, turnParams.model);
+      const settings = state.settingsByThread.get(targetThreadId);
+      if (settings?.model === chatSettingOverrides.model) settings.model = "";
+      persistChatSettings();
+      if (state.threadId === targetThreadId) renderChatSettings();
+    }
     if (result.turn) cacheTurnUpdate(targetThreadId, result.turn);
     if (result.turn?.id) setPendingUserTurn(targetThreadId, result.turn.id);
     if (result.turn?.status === "inProgress") {
