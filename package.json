@@ -8,6 +8,7 @@
   "scripts": {
     "build": "node frontend/build.mjs",
     "test:browser:performance": "node tests/performance.browser.cjs",
+    "test:browser:list-loading": "node tests/list-loading.browser.cjs",
     "test:browser:loading": "node tests/loading.browser.cjs",
     "test": "npm run test:markdown && npm run test:copy && npm run test:links && npm run test:theme && npm run test:render && npm run test:fork && npm run test:pins && npm run test:timestamps && npm run test:models && npm run test:history && npm run test:usage-limit && npm run test:sidebar-questions",
     "test:usage-limit": "node --test tests/usage-limit.test.js",
