@@ -205,3 +205,44 @@ test("archiving and deletion remove only the affected pin", (t) => {
     assert.deepEqual(JSON.parse(app.window.localStorage.getItem(app.PINNED_THREADS_STORAGE_KEY)), ["middle"]);
   }
 });
+
+test("HTTP sidebar loads before the live connection and preserves older pinned chats", async (t) => {
+  const app = fixture(t, '["old"]');
+  app.state.threadListHttp = true;
+  const calls = [];
+  app.window.fetch = async (url, options) => {
+    assert.equal(url, "/api/threads");
+    assert.equal(options.cache, "no-store");
+    assert.equal(options.priority, "high");
+    const params = JSON.parse(options.body);
+    calls.push(params);
+    return { ok: true, json: async () => params.cursor
+      ? { data: [app.threads[2]], nextCursor: null }
+      : { data: [app.threads[0]], nextCursor: "older" } };
+  };
+  await app.refreshThreads();
+  assert.deepEqual(calls, [{ cursor: null }, { cursor: "older" }]);
+  assert.deepEqual(app.order(), ["old", "recent"]);
+  assert.equal(app.requests.length, 0, "the sidebar does not wait for or use the live socket");
+});
+
+test("failed HTTP sidebar refresh keeps existing rows and pins", async (t) => {
+  const app = fixture(t, '["old"]');
+  app.state.threadListHttp = true;
+  app.window.fetch = async () => ({ ok: false, json: async () => ({ error: "List unavailable" }) });
+  assert.equal(await app.refreshThreads(), false, "startup can retry a failed prefetch after connection");
+  assert.equal(app.state.pinnedThreads.has("old"), true);
+  assert.equal(app.order().length, 3);
+  assert.match(app.ui.notice.textContent, /List unavailable/);
+});
+
+test("a sidebar selection made before connection is retained for startup", async (t) => {
+  const app = fixture(t);
+  app.state.threadListHttp = true;
+  await app.openThread("old");
+  assert.equal(app.state.threadId, "old");
+  assert.equal(app.link("old").getAttribute("aria-current"), "page");
+  assert.equal(new URL(app.window.location.href).searchParams.get("thread"), "old");
+  assert.equal(app.requests.length, 0);
+  assert.match(app.ui.messages.textContent, /Loading conversation/);
+});

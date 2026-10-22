@@ -196,6 +196,8 @@ const state = {
   threadNodes: new Map(),
   provisionalThreads: new Map(),
   threadRefreshId: 0,
+  threadListHttp: false,
+  startupThreadList: null,
   threadCache: new Map(),
   threadQuestionTurns: new Map(),
   threadQuestionReads: new Map(),
@@ -3111,11 +3113,15 @@ async function connect() {
       notice("");
       updateControls();
       void refreshUsageLimits();
+      const listing = state.startupThreadList
+        ? state.startupThreadList.then((loaded) => loaded === false && state.ready ? refreshThreads() : undefined)
+        : refreshThreads();
+      state.startupThreadList = null;
       // A slow model catalog or a long pinned-chat listing must not delay the
-      // selected conversation. All three requests only require initialization.
+      // selected conversation. The HTTP sidebar may already be loading.
       await Promise.all([
         loadChatSettingsCatalog(),
-        refreshThreads(),
+        listing.then(() => refreshThreadQuestions(state.threads)),
         state.threadId ? openThread(state.threadId, false) : Promise.resolve(),
       ]);
     } catch (error) {
@@ -4795,12 +4801,25 @@ function mergeProvisionalThreads(threads) {
   ];
 }
 
+async function fetchThreadListPage(cursor = null) {
+  if (!state.threadListHttp) {
+    return rpc("thread/list", { ...THREAD_LIST_PARAMS, ...(cursor ? { cursor } : {}) });
+  }
+  const response = await fetch("/api/threads", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cursor }), cache: "no-store", priority: "high",
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || "Unable to load conversations.");
+  return result;
+}
+
 async function refreshThreads() {
-  if (!state.ready) return;
+  if (!state.ready && !state.threadListHttp) return;
   const refreshId = ++state.threadRefreshId;
   const requestedPins = new Set(state.pinnedThreads);
   try {
-    const result = await rpc("thread/list", THREAD_LIST_PARAMS);
+    const result = await fetchThreadListPage();
     if (refreshId !== state.threadRefreshId) return;
     if (!Array.isArray(result?.data)) throw new Error("Unable to load conversations.");
     const recent = result.data;
@@ -4827,7 +4846,7 @@ async function refreshThreads() {
         throw new Error("Unable to load pinned conversations: invalid history cursor.");
       }
       seenCursors.add(cursor);
-      const page = await rpc("thread/list", { ...THREAD_LIST_PARAMS, cursor });
+      const page = await fetchThreadListPage(cursor);
       if (refreshId !== state.threadRefreshId) return;
       if (!Array.isArray(page?.data)) throw new Error("Unable to load pinned conversations.");
       for (const thread of page.data) {
@@ -4847,14 +4866,16 @@ async function refreshThreads() {
     render();
     updateControls();
     void refreshThreadQuestions(state.threads);
+    return true;
   } catch (error) {
     if (refreshId === state.threadRefreshId) notice(error.message);
+    return false;
   }
 }
 
 async function openThread(threadId, showErrors = true) {
   closeSettingsForChatChange(threadId);
-  if (!state.ready) return;
+  if (!state.ready && !state.threadListHttp) return;
   saveCurrentThreadView();
   saveComposerDraft();
   const selectionId = ++state.selectionId;
@@ -4877,11 +4898,13 @@ async function openThread(threadId, showErrors = true) {
   }
   renderThreads(state.threads);
   updateControls();
+  // The HTTP sidebar may be ready before the live socket. Remember the
+  // selection now; connection initialization opens the latest selected chat.
+  if (!state.ready) return;
   if (cached?.generation === state.connectionGeneration) {
     await reconcileThreadHistory(threadId);
     if (selectionId !== state.selectionId || state.threadId !== threadId) return;
     await refreshPermissionProfiles();
-    await refreshThreads();
     return;
   }
   try {
@@ -4889,7 +4912,6 @@ async function openThread(threadId, showErrors = true) {
       await refreshPagedHistory(threadId);
       if (selectionId !== state.selectionId || state.threadId !== threadId) return;
       await refreshPermissionProfiles();
-      await refreshThreads();
       return;
     }
     const result = await rpc("thread/resume", { threadId });
@@ -4898,7 +4920,6 @@ async function openThread(threadId, showErrors = true) {
     if (selectionId !== state.selectionId || state.threadId !== threadId) return;
     renderCachedThread(refreshed);
     await refreshPermissionProfiles();
-    await refreshThreads();
   } catch (error) {
     if (showErrors && selectionId === state.selectionId && state.threadId === threadId) {
       notice(error.message);
@@ -5616,12 +5637,16 @@ async function boot() {
     state.chatDefaults.toolActivity = config.showToolActivity === false ? "hide" : "show";
     state.uploadLimits = config.uploads || null;
     state.historyChunkBytes = config.historyChunkBytes || 0;
+    state.threadListHttp = config.threadListHttp === true;
     renderChatSettings();
   } catch (error) {
     notice(`Configuration error: ${error.message}`);
     // Do not download unbounded history when its configuration is unavailable.
     return;
   }
+  // The sidebar can load before the live connection finishes initialization.
+  // Reuse this request when the socket opens instead of downloading it twice.
+  if (state.threadListHttp) state.startupThreadList = refreshThreads();
   connect();
 }
 

@@ -282,10 +282,22 @@ Pins are saved in this browser and shared between tabs for the same Codex Web
 site. Archiving or deleting a conversation removes its pin. The pin controls
 support keyboard access and mobile touch input.
 
+The recent conversation list loads through a separate, compressed HTTP request.
+It can appear while the live connection is still initializing. Responses contain
+only sidebar metadata and use `no-store`. Opening a chat reuses the displayed
+list; chat changes and live notifications still refresh it. Older pinned chats
+retain the same pagination and ordering.
+
 Run `npm run test:browser:pins` with the demo's Playwright dependencies for an
 isolated desktop/mobile check.
 Run `npm run test:browser:sidebar-questions` to check question indicators,
 priority ordering, replies, reloads, and mobile layouts.
+Run `PERF_CHECK_BUDGET=1 npm run test:browser:list-loading` for a 50-chat sidebar
+and large-history mobile scenario. It counts HTTP and WebSocket bytes, checks
+that startup requests the list once, and holds the live connection to verify
+that the sidebar loads independently. Chromium throttles both HTTP and WebSocket
+traffic. The synthetic backend adds a fixed processing delay; the measurements
+do not represent real backend load or a physical mobile device.
 
 ### Conversation history downloads
 

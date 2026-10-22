@@ -1,8 +1,9 @@
 "use strict";
 
 // Repeatable cold/warm navigation with the real server and a synthetic backend.
-// Network limits apply to HTTP. The fixture adds 150 ms per backend RPC because
-// Chromium's HTTP network emulation does not delay WebSocket messages.
+// The fixture adds 150 ms of backend work per RPC. Chromium also throttles the
+// browser's HTTP and WebSocket traffic. This asset check counts HTTP bytes;
+// list-loading.browser.cjs measures both transports with a larger sidebar.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
