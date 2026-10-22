@@ -711,7 +711,7 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('aria-live="polite"', body)
             self.assertIn("Jump to present", body)
             self.assertIn('id="thinking-indicator"', body)
-            self.assertIn("Codex is thinking", body)
+            self.assertIn("Thinking.", body)
             self.assertIn('aria-busy="false"', body)
             self.assertIn("/static/vendor/markdown.css", body)
             self.assertIn("/static/vendor/markdown.js", body)
@@ -1621,7 +1621,7 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
                 ".thread.running { border-left-color: var(--success); }", stylesheet
             )
             self.assertIn(
-                'grid-template-areas: "attachments attachments" "prompt tools";',
+                'grid-template-areas: "models models" "attachments attachments" "prompt tools";',
                 stylesheet,
             )
             self.assertIn(

@@ -137,6 +137,14 @@ Open **Model and chat settings** beside the paperclip (**Attach**) to change the
 reasoning, and other chat options in a modal. Changes are saved for the chat and
 apply to the next new turn. Replies use the current task's settings.
 
+The thinking indicator shows **Thinking. model reasoning …** on one line,
+using values reported by the server, with animated dots at the end. Above the message box, a single
+line shows the model and reasoning for your next new turn. The
+settings dialog also shows the active model and reasoning. Changing the selection
+does not change a running turn. When idle, the thinking line is hidden and settings
+shows **No active turn**. Missing model information shows **Unavailable**, and
+missing active reasoning shows **unknown**. Open settings to retry the read.
+
 **Working folder** is the folder on the Codex server where commands start and
 project files are found. It replaces the old `cwd` header input. The field shows
 the current path, uses the chat's folder by default, and keeps your changes with

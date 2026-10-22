@@ -2039,7 +2039,7 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
     turns: [{ ...activeTurn, items: sky.items.slice(0, 4) }],
   }).thread;
   renderThreadHistory(answeredReconnect);
-  assert.equal(ui.thinkingLabel.textContent, "Codex is thinking",
+  assert.equal(ui.thinkingLabel.textContent, "Thinking.",
     "a user reply in an active snapshot must clear the question's waiting state");
   assert.equal(ui.messages.getAttribute("aria-busy"), "true");
   assert.equal(ui.pendingQuestions.hidden, true, "an answered snapshot must clear the pinned question");
@@ -2057,7 +2057,7 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
   }).thread;
   state.threadId = laterThread.id;
   renderThreadHistory(laterThread);
-  assert.equal(ui.thinkingLabel.textContent, "Codex is thinking",
+  assert.equal(ui.thinkingLabel.textContent, "Thinking.",
     "even an unanswered question in a completed turn must not mark a later turn as waiting");
 
   // A previous answer is not the terminal answer once the user adds a reply.
@@ -2126,14 +2126,14 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
   assert.equal(ui.pendingQuestionsList.children.length, 3, "a sparse snapshot must not lose or duplicate questions");
 
   selectActiveThread("async-question-unrelated", "async-other-turn");
-  assert.equal(ui.thinkingLabel.textContent, "Codex is thinking", "an asynchronous question must remain scoped to its conversation");
+  assert.equal(ui.thinkingLabel.textContent, "Thinking.", "an asynchronous question must remain scoped to its conversation");
   assert.equal(ui.pendingQuestions.hidden, true, "questions must not leak into another conversation");
   state.threadId = "async-question-live";
   state.composerKey = threadComposerKey(state.threadId, state.selectionId);
   renderThreadHistory(cachedThread(state.threadId).thread);
   assert.equal(ui.pendingQuestionsList.children.length, 3, "switching back must restore pending questions");
   sendItem(sky.items[3]);
-  assert.equal(ui.thinkingLabel.textContent, "Codex is thinking",
+  assert.equal(ui.thinkingLabel.textContent, "Thinking.",
     "a user-message event must clear waiting even when the reply comes from another client");
   assert.equal(ui.thinkingIndicator.classList.contains("waiting"), false);
   assert.equal(ui.pendingQuestions.hidden, true, "replies from another client must clear the question area");
@@ -2154,7 +2154,7 @@ async function checkAsyncQuestionMessages({ selectActiveThread, notify, settle, 
   const acceptedReply = submitPrompt({ preventDefault() {} });
   settle(latestSteer(), { turnId: sky.id });
   await acceptedReply;
-  assert.equal(ui.thinkingLabel.textContent, "Codex is thinking",
+  assert.equal(ui.thinkingLabel.textContent, "Thinking.",
     "an accepted answer must clear waiting without waiting for the user-message echo");
   assert.equal(ui.messages.getAttribute("aria-busy"), "true");
   assert.equal(ui.pendingQuestions.hidden, true, "an accepted reply must clear its entire batch before the server echo");
@@ -2491,7 +2491,7 @@ async function checkQuestionsInComposer(rpcMessages) {
   assert.equal(ui.thinkingLabel.textContent, "Waiting for approval");
   updateStatus("questions-thread", []);
   updateStatus("other-open-thread", ["waitingOnUserInput"]);
-  assert.equal(ui.thinkingLabel.textContent, "Codex is thinking");
+  assert.equal(ui.thinkingLabel.textContent, "Thinking.");
 
   handleServerRequest(question);
   const request = state.requestCards.get(question.id);

@@ -117,6 +117,7 @@ test("unsupported instance effort and speed use valid model defaults without cha
   app.renderChatSettings();
   const effective = app.effectiveChatSettings(app.state.newThreadSettings);
   assert.equal(effective.effort, "medium");
+  assert.equal(app.ui.selectedReasoning.textContent, "medium");
   assert.equal(effective.serviceTier, "default");
   assert.equal(app.ui.settingEffort.selectedOptions[0].textContent, "Model default — medium");
   assert.equal(app.ui.settingServiceTier.selectedOptions[0].textContent, "Model default — Standard");
@@ -138,4 +139,129 @@ test("missing saved model is retained and cannot silently submit with another mo
   assert.equal(app.calls.length, 0);
   assert.equal(app.ui.prompt.value, "Preserve this draft");
   assert.match(app.ui.notice.textContent, /model is unavailable/);
+});
+
+test("active model comes from the server while the selected model stays a next-turn preference", async (t) => {
+  const app = fixture(t);
+  const id = "model-mismatch";
+  app.state.threadId = id;
+  app.state.settingsByThread.set(id, app.normalizeChatSettings({ model: "gpt-6-astra", effort: "ultra" }));
+  app.cacheThreadSnapshot({ id, model: "stale-model", turns: [] });
+  app.replyWith(() => ({ thread: { id, model: "gpt-5.6-sol", reasoningEffort: "max", status: { type: "active" } } }));
+  app.setThreadActivity(id, "turn-one");
+  assert.equal(app.ui.activeModel.textContent, "Loading…");
+  assert.equal(app.ui.selectedModel.textContent, "gpt-6-astra");
+  await app.state.activeModels.get(id).promise;
+  assert.equal(app.ui.activeModel.textContent, "gpt-5.6-sol");
+  assert.equal(app.ui.settingsActiveModel.textContent, "gpt-5.6-sol · max reasoning");
+  assert.equal(app.ui.activeReasoning.textContent, "max");
+  assert.equal(app.ui.selectedReasoning.textContent, "ultra");
+  app.renderChatSettings();
+  assert.equal(app.ui.settingModel.value, "gpt-6-astra");
+  app.ui.settingModel.value = "gpt-6-sol";
+  app.saveChatSettingsFromControls();
+  assert.equal(app.ui.activeModel.textContent, "gpt-5.6-sol");
+  assert.equal(app.ui.selectedModel.textContent, "gpt-6-sol");
+  assert.equal(app.ui.activeReasoning.textContent, "max");
+  assert.equal(app.ui.selectedReasoning.textContent, "ultra");
+  app.updateControls();
+  app.updateControls();
+  assert.equal(app.calls.length, 1, "streaming updates must not repeatedly request metadata");
+  assert.equal(app.calls[0].method, "thread/read");
+  assert.deepEqual(app.calls[0].params, { threadId: id, includeTurns: false });
+});
+
+test("idle, disconnected and missing metadata never present the selected model as active", async (t) => {
+  const app = fixture(t);
+  assert.equal(app.ui.activeModel.textContent, "No active turn");
+  assert.equal(app.ui.selectedModel.textContent, "gpt-5.6-sol");
+  const id = "unknown-model";
+  app.state.threadId = id;
+  app.replyWith(() => { throw new Error("Metadata unavailable"); });
+  app.setThreadActivity(id, "turn-one");
+  await app.state.activeModels.get(id).promise;
+  assert.equal(app.ui.activeModel.textContent, "Unavailable");
+  assert.equal(app.ui.selectedModel.textContent, "gpt-5.6-sol");
+  app.state.ready = false;
+  app.updateControls();
+  assert.equal(app.ui.activeModel.textContent, "Not connected");
+  app.state.ready = true;
+  app.state.connectionGeneration += 1;
+  app.replyWith(() => ({ thread: { id, model: "gpt-6-astra", status: { type: "active" } } }));
+  app.updateControls();
+  assert.equal(app.ui.activeModel.textContent, "Loading…");
+  await app.state.activeModels.get(id).promise;
+  assert.equal(app.ui.activeModel.textContent, "gpt-6-astra");
+  assert.equal(app.ui.activeReasoning.textContent, "unknown", "missing active reasoning must not use the selected level");
+  app.handleNotification("thread/status/changed", { threadId: id, status: { type: "idle" } });
+  assert.equal(app.ui.activeModel.textContent, "No active turn");
+});
+
+test("new turns reject late model reads from previous turns or connections", async (t) => {
+  const app = fixture(t);
+  const id = "changing-model";
+  app.state.threadId = id;
+  const responses = [];
+  app.replyWith(() => new Promise((resolve) => responses.push(resolve)));
+  app.setThreadActivity(id, "old-turn");
+  const oldRead = app.state.activeModels.get(id).promise;
+  await Promise.resolve();
+  app.setThreadActivity(id, "new-turn");
+  const newRead = app.state.activeModels.get(id).promise;
+  await Promise.resolve();
+  responses[1]({ thread: { id, model: "gpt-6-astra", reasoningEffort: "ultra", status: { type: "active" } } });
+  await newRead;
+  responses[0]({ thread: { id, model: "gpt-5.6-sol", reasoningEffort: "high", status: { type: "active" } } });
+  await oldRead;
+  assert.equal(app.ui.activeModel.textContent, "gpt-6-astra");
+  assert.equal(app.ui.activeReasoning.textContent, "ultra");
+  app.state.connectionGeneration += 1;
+  app.updateControls();
+  const reconnectRead = app.state.activeModels.get(id).promise;
+  assert.equal(app.ui.activeModel.textContent, "Loading…");
+  await Promise.resolve();
+  responses[2]({ thread: { id, model: "gpt-6-sol", reasoningEffort: "low", status: { type: "active" } } });
+  await reconnectRead;
+  assert.equal(app.ui.activeModel.textContent, "gpt-6-sol");
+  assert.equal(app.ui.activeReasoning.textContent, "low");
+});
+
+test("chat switches isolate model reads and settings can retry missing model information", async (t) => {
+  const app = fixture(t);
+  app.state.threadId = "first";
+  let resolveFirst;
+  app.replyWith(({ params }) => params.threadId === "first"
+    ? new Promise((resolve) => { resolveFirst = resolve; })
+    : { thread: { id: "second", status: { type: "active" } } });
+  app.setThreadActivity("first", "first-turn");
+  const firstRead = app.state.activeModels.get("first").promise;
+  await Promise.resolve();
+  app.state.threadId = "second";
+  app.setThreadActivity("second", "second-turn");
+  await app.state.activeModels.get("second").promise;
+  assert.equal(app.ui.activeModel.textContent, "Unavailable");
+  resolveFirst({ thread: { id: "first", model: "gpt-6-astra", status: { type: "active" } } });
+  await firstRead;
+  assert.equal(app.ui.activeModel.textContent, "Unavailable");
+  app.replyWith(() => ({ thread: { id: "second", model: "gpt-5.6-sol", reasoningEffort: "max", status: { type: "active" } } }));
+  app.setSettingsOpen(true, false);
+  await app.state.activeModels.get("second").promise;
+  assert.equal(app.ui.settingsActiveModel.textContent, "gpt-5.6-sol · max reasoning");
+  app.state.threadId = "first";
+  app.renderChatSettings();
+  assert.equal(app.ui.activeModel.textContent, "gpt-6-astra");
+});
+
+test("completed or mismatched metadata does not label an active turn", async (t) => {
+  const app = fixture(t);
+  app.state.threadId = "active-thread";
+  for (const thread of [
+    { id: "active-thread", model: "gpt-6-astra", status: { type: "idle" } },
+    { id: "other-thread", model: "gpt-6-astra", status: { type: "active" } },
+  ]) {
+    app.replyWith(() => ({ thread }));
+    app.setThreadActivity("active-thread", thread.id);
+    await app.state.activeModels.get("active-thread").promise;
+    assert.equal(app.ui.activeModel.textContent, "Unavailable");
+  }
 });
