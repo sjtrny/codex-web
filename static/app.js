@@ -15,6 +15,8 @@ const THREAD_LIST_PARAMS = Object.freeze({
 const CHAT_SETTINGS_STORAGE_KEY = "codex-web-chat-settings-v1";
 const PINNED_THREADS_STORAGE_KEY = "codex-web-pinned-threads-v1";
 const MESSAGE_TIMES_STORAGE_KEY = "codex-web-message-times-v1";
+const TURN_MODELS_STORAGE_KEY = "codex-web-turn-models-v1";
+const TURN_MODELS_LIMIT = 2000;
 const USAGE_LIMIT_STORAGE_KEY = "codex-web-usage-limit-v1";
 const USAGE_LIMIT_REFRESH_MS = 30000;
 const MESSAGE_TIMES_LIMIT = 2000;
@@ -177,6 +179,7 @@ const state = {
   threadId: null,
   activeTurns: new Map(),
   activeModels: new Map(),
+  turnModels: loadTurnModels(),
   liveThreadStatuses: new Map(),
   submittingThreads: new Set(),
   forkingThreads: new Set(),
@@ -1147,6 +1150,7 @@ function cacheTurnUpdate(
   preserveStreamedItems = false,
 ) {
   const entry = cachedThread(threadId, false);
+  rememberTurnModel(threadId, turn?.id, turn?.model);
   if (!entry || !turn?.id) return null;
   if (!Array.isArray(entry.thread.turns)) entry.thread.turns = [];
   let cached = findCachedTurn(entry, turn.id);
@@ -1342,9 +1346,13 @@ function refreshActiveModel(threadId, force = false) {
   const record = { turnId, generation, pending: true, model: "", effort: "", promise: null };
   state.activeModels.set(threadId, record);
   record.promise = rpc("thread/read", { threadId, includeTurns: false }).then(({ thread }) => {
-    if (thread?.id === threadId && thread.status?.type === "active") {
+    if (thread?.id === threadId && thread.status?.type === "active"
+      && state.ready && generation === state.connectionGeneration
+      && state.activeModels.get(threadId) === record
+      && state.activeTurns.has(threadId) && state.activeTurns.get(threadId) === turnId) {
       if (typeof thread.model === "string") record.model = thread.model;
       if (typeof thread.reasoningEffort === "string") record.effort = thread.reasoningEffort;
+      rememberTurnModel(threadId, turnId, record.model);
     }
   }).catch(() => {
     // Missing metadata is shown explicitly. Opening settings retries the read.
@@ -3539,6 +3547,59 @@ function itemMessageTime(itemId, threadId, turnId, item = null) {
   return state.messageTimes.get(renderedItemKey(itemId, threadId, turnId)) || null;
 }
 
+function turnModelKey(threadId, turnId) {
+  return JSON.stringify([threadId, turnId]);
+}
+
+function validTurnModel(model) {
+  return typeof model === "string" && model.trim().length > 0 && model.length <= 256;
+}
+
+function loadTurnModels() {
+  const models = new Map();
+  try {
+    const stored = JSON.parse(localStorage.getItem(TURN_MODELS_STORAGE_KEY) || "[]");
+    if (!Array.isArray(stored)) return models;
+    for (const record of stored.slice(-TURN_MODELS_LIMIT)) {
+      if (!Array.isArray(record)) continue;
+      const [key, model] = record;
+      if (typeof key !== "string" || key.length > 1024 || !validTurnModel(model)) continue;
+      models.set(key, model);
+    }
+  } catch {
+    // Confirmed models still work within this page when storage is unavailable.
+  }
+  return models;
+}
+
+function rememberTurnModel(threadId, turnId, model) {
+  if (!threadId || !turnId || !validTurnModel(model)) return;
+  const key = turnModelKey(threadId, turnId);
+  if (state.turnModels.get(key) === model) return;
+  state.turnModels.set(key, model);
+  while (state.turnModels.size > TURN_MODELS_LIMIT) {
+    state.turnModels.delete(state.turnModels.keys().next().value);
+  }
+  try {
+    localStorage.setItem(TURN_MODELS_STORAGE_KEY, JSON.stringify([...state.turnModels]));
+  } catch {
+    // Retain the confirmed value in memory if persistence is disabled or full.
+  }
+  for (const entry of state.items.values()) {
+    if (entry.threadId === threadId && entry.turnId === turnId) renderMessageModel(entry);
+  }
+}
+
+function renderMessageModel(entry) {
+  if (!entry.modelLabel) return;
+  const turn = findCachedTurn(cachedThread(entry.threadId, false), entry.turnId);
+  const model = validTurnModel(turn?.model) ? turn.model
+    : state.turnModels.get(turnModelKey(entry.threadId, entry.turnId));
+  entry.modelLabel.textContent = model ? chatSettingValueLabel("model", model) : "Model unavailable";
+  entry.modelLabel.title = model ? `Model used for this turn: ${model}`
+    : "The model used for this turn was not recorded. It cannot be inferred from current settings.";
+}
+
 function renderMessageTimestamp(entry, time) {
   const key = time ? `${time.at}:${time.source}` : "unavailable";
   if (entry.timestampKey === key) return;
@@ -3657,6 +3718,11 @@ function upsertMessage(
     const timestamp = document.createElement("time");
     timestamp.className = "message-timestamp";
     header.append(label, timestamp);
+    const modelLabel = role === "agent" ? document.createElement("span") : null;
+    if (modelLabel) {
+      modelLabel.className = "message-model";
+      header.append(modelLabel);
+    }
     const body = document.createElement("div");
     body.className = "body";
     const attachmentList = document.createElement("div");
@@ -3671,6 +3737,7 @@ function upsertMessage(
       itemKey,
       phase,
       timestamp,
+      modelLabel,
       responseToolbar: null,
       forkButton: null,
       forkButtonLabel: null,
@@ -3687,6 +3754,7 @@ function upsertMessage(
   }
   if (phase !== null && phase !== undefined) entry.phase = phase;
   renderMessageTimestamp(entry, messageTime === undefined ? itemMessageTime(id, threadId, turnId) : messageTime);
+  renderMessageModel(entry);
   syncResponseToolbar(entry);
   entry.text = append ? entry.text + (text || "") : (text || "");
   if (attachments !== null) {
@@ -4317,6 +4385,7 @@ function renderThreadHistory(thread) {
   state.renderTarget = fragment;
   try {
     for (const turn of turns) {
+      rememberTurnModel(thread.id, turn.id, turn.model);
       for (const item of turn.items || []) renderItem(item, true, thread.id, turn.id);
     }
   } finally {

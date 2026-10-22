@@ -89,7 +89,7 @@ async def read_history_chunk(rpc, cursor: dict, limit: int) -> tuple[bytes, str,
                 raise ValueError("Invalid history turn from Codex backend")
             cursor.update(
                 turn={key: turn[key] for key in (
-                    "id", "status", "startedAt", "completedAt", "durationMs",
+                    "id", "status", "startedAt", "completedAt", "durationMs", "model",
                 ) if key in turn},
                 turnCursor=next_turn, stage="turn", itemCursor=None,
             )
