@@ -80,6 +80,16 @@ See the provided [`compose.yaml`](compose.yaml) for all configuration options;
 
 Open `http://HOST_IP:8765`.
 
+### Shared model limits (optional)
+
+For a shared instance, the [native model policy](patches/model-policy/README.md)
+can restrict models, reasoning levels and service tiers across the web UI,
+attached terminals and subagents. It uses a custom patch to Codex 0.159.1 and
+keeps ChatGPT sign-in. Administrators choose the allowed settings through
+environment variables on the backend process. The source patch, build
+instructions and configuration reference are included. These limits require
+the patched backend; frontend defaults alone do not enforce them.
+
 ### Backend response size
 
 `CODEX_BACKEND_MAX_MESSAGE_BYTES` sets the maximum size of a single WebSocket
