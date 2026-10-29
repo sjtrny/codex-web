@@ -1,0 +1,19 @@
+# Merge these entries into an existing workspace + codex-web deployment.
+# This fragment is not a complete deployment or a replacement Compose file.
+# Adjust the host binary path to the location where you installed your build.
+services:
+  workspace:
+    environment:
+      CODEX_ALLOWED_MODELS: ${CODEX_ALLOWED_MODELS:?Set CODEX_ALLOWED_MODELS}
+      CODEX_ALLOWED_REASONING_EFFORTS: ${CODEX_ALLOWED_REASONING_EFFORTS:?Set CODEX_ALLOWED_REASONING_EFFORTS}
+      CODEX_ALLOWED_SERVICE_TIERS: ${CODEX_ALLOWED_SERVICE_TIERS:?Set CODEX_ALLOWED_SERVICE_TIERS}
+    volumes:
+      - /opt/codex-policy/0.159.1-1/codex:/opt/codex-policy/codex:ro
+    # In build.dockerfile_inline, after npm install and before USER node:
+    # RUN ln -sf /opt/codex-policy/codex /usr/local/bin/codex
+
+  codex-web:
+    environment:
+      CODEX_DEFAULT_MODEL: ${CODEX_DEFAULT_MODEL:-gpt-6-luna}
+      CODEX_DEFAULT_REASONING_EFFORT: ${CODEX_DEFAULT_REASONING_EFFORT:-medium}
+      CODEX_DEFAULT_SERVICE_TIER: ${CODEX_DEFAULT_SERVICE_TIER:-default}

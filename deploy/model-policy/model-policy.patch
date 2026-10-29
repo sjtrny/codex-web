@@ -1,0 +1,719 @@
+diff --git a/codex-rs/app-server/src/lib.rs b/codex-rs/app-server/src/lib.rs
+index c219467..9a8dd74 100644
+--- a/codex-rs/app-server/src/lib.rs
++++ b/codex-rs/app-server/src/lib.rs
+@@ -511,12 +511,25 @@ pub async fn run_main_with_transport_options(
+ 
+     // Parse CLI overrides once and derive the base Config eagerly so later
+     // components do not need to work with raw TOML values.
+-    let cli_kv_overrides = cli_config_overrides.parse_overrides().map_err(|e| {
++    let mut cli_kv_overrides = cli_config_overrides.parse_overrides().map_err(|e| {
+         std::io::Error::new(
+             ErrorKind::InvalidInput,
+             format!("error parsing -c overrides: {e}"),
+         )
+     })?;
++    if let Some(policy) = codex_model_provider::runtime_model_policy()
++        .map_err(|error| std::io::Error::new(ErrorKind::InvalidInput, error.to_string()))?
++    {
++        for (key, value) in [
++            ("model", policy.default_model()),
++            ("model_reasoning_effort", policy.default_effort()),
++            ("service_tier", policy.default_tier()),
++        ] {
++            if !cli_kv_overrides.iter().any(|(name, _)| name == key) {
++                cli_kv_overrides.push((key.to_owned(), toml::Value::String(value.to_owned())));
++            }
++        }
++    }
+     let codex_home = find_codex_home()?;
+     let local_runtime_paths = ExecServerRuntimeOptions::from_optional_paths(
+         arg0_paths.codex_self_exe.clone(),
+diff --git a/codex-rs/app-server/src/request_processors/catalog_processor.rs b/codex-rs/app-server/src/request_processors/catalog_processor.rs
+index 01fce38..23f06ac 100644
+--- a/codex-rs/app-server/src/request_processors/catalog_processor.rs
++++ b/codex-rs/app-server/src/request_processors/catalog_processor.rs
+@@ -286,11 +286,16 @@ impl CatalogRequestProcessor {
+             cursor,
+             include_hidden,
+         } = params;
+-        let presets = self
++        let mut presets = self
+             .model_catalog
+             .list_models(codex_models_manager::manager::RefreshStrategy::OnlineIfUncached)
+             .await
+             .map_err(|err| config_load_error(&err))?;
++        if let Some(policy) = codex_model_provider::runtime_model_policy()
++            .map_err(|error| invalid_request(error.to_string()))?
++        {
++            policy.filter_catalog(&mut presets);
++        }
+         let models = supported_models(presets, include_hidden.unwrap_or(false));
+         let total = models.len();
+ 
+diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
+index 51f3e06..40e4864 100644
+--- a/codex-rs/app-server/tests/suite/v2/mod.rs
++++ b/codex-rs/app-server/tests/suite/v2/mod.rs
+@@ -79,6 +79,7 @@ mod misalignment_policy;
+ mod model_auto_review;
+ mod model_list;
+ mod model_list_requirements_tests;
++mod model_policy_tests;
+ mod model_provider_capabilities_read;
+ #[path = "model_provider_enforcement_tests.rs"]
+ mod model_provider_enforcement;
+diff --git a/codex-rs/app-server/tests/suite/v2/model_policy_tests.rs b/codex-rs/app-server/tests/suite/v2/model_policy_tests.rs
+new file mode 100644
+index 0000000..956f97c
+--- /dev/null
++++ b/codex-rs/app-server/tests/suite/v2/model_policy_tests.rs
+@@ -0,0 +1,99 @@
++//! Policy follows actual inference, including explicit and inherited RPC settings.
++use anyhow::Result;
++use app_test_support::ChatGptAuthFixture;
++use app_test_support::MockResponsesConfig;
++use app_test_support::TestAppServer;
++use app_test_support::write_chatgpt_auth;
++use codex_app_server_protocol::ThreadStartParams;
++use codex_app_server_protocol::TurnStartParams;
++use codex_config::types::AuthCredentialsStoreMode;
++use core_test_support::responses;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++use std::time::Duration;
++use tempfile::TempDir;
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn model_policy_blocks_overrides_and_inherited_settings_before_inference() -> Result<()> {
++    let upstream = responses::start_mock_server().await;
++    let requests = responses::mount_sse_once(
++        &upstream,
++        responses::sse(vec![responses::ev_completed("allowed")]),
++    )
++    .await;
++    let home = TempDir::new()?;
++    MockResponsesConfig::new(&upstream.uri())
++        .with_model("gpt-6-astra")
++        .with_provider_config("requires_openai_auth = true\nsupports_websockets = false")
++        .write(home.path())?;
++    write_chatgpt_auth(
++        home.path(),
++        ChatGptAuthFixture::new("fake-policy-test-token").plan_type("pro"),
++        AuthCredentialsStoreMode::File,
++    )?;
++    let mut server = TestAppServer::builder()
++        .with_codex_home(home.path())
++        .with_env_overrides(&[
++            ("OPENAI_API_KEY", None),
++            ("CODEX_ALLOWED_MODELS", Some("gpt-6-luna")),
++            ("CODEX_ALLOWED_REASONING_EFFORTS", Some("low,medium")),
++            ("CODEX_ALLOWED_SERVICE_TIERS", Some("default")),
++        ])
++        .without_managed_config()
++        .build_initialized()
++        .await?;
++
++    for overrides in [
++        json!({"model": "gpt-6-astra"}),
++        json!({"effort": "high"}),
++        json!({"serviceTier": "priority"}),
++    ] {
++        let thread = server.start_thread(ThreadStartParams::default()).await?;
++        assert_eq!(thread.model, "gpt-6-luna");
++        let mut params = json!({"threadId": thread.thread.id, "input": [{"type": "text", "text": "policy test"}]});
++        params
++            .as_object_mut()
++            .unwrap()
++            .extend(overrides.as_object().unwrap().clone());
++        // The next turn omits overrides, exercising the saved thread settings too.
++        for attempt in 0..2 {
++            let turn: TurnStartParams = serde_json::from_value(params.clone())?;
++            let completed = tokio::time::timeout(
++                Duration::from_secs(20),
++                server.start_turn_and_wait_for_completion(turn),
++            )
++            .await??;
++            let completed = serde_json::to_value(completed)?;
++            assert_eq!(
++                completed["turn"]["status"], "failed",
++                "attempt {attempt}: {completed}"
++            );
++            assert!(
++                completed["turn"]["error"]["message"]
++                    .as_str()
++                    .unwrap()
++                    .contains("Instance model policy")
++            );
++            assert!(requests.requests().is_empty());
++            params = json!({"threadId": thread.thread.id, "input": [{"type": "text", "text": "inherited policy test"}]});
++        }
++    }
++    let thread = server.start_thread(ThreadStartParams::default()).await?;
++    let params: TurnStartParams = serde_json::from_value(json!({
++        "threadId": thread.thread.id, "input": [{"type": "text", "text": "allowed request"}]
++    }))?;
++    let completed = tokio::time::timeout(
++        Duration::from_secs(20),
++        server.start_turn_and_wait_for_completion(params),
++    )
++    .await??;
++    assert_eq!(
++        serde_json::to_value(completed)?["turn"]["status"],
++        "completed"
++    );
++    let request = requests.single_request().body_json();
++    assert_eq!(request["model"], "gpt-6-luna");
++    assert_eq!(request["reasoning"]["effort"], "medium");
++    assert_eq!(request["service_tier"], "default");
++    Ok(())
++}
+diff --git a/codex-rs/codex-api/src/endpoint/images.rs b/codex-rs/codex-api/src/endpoint/images.rs
+index 2217ce8..56b1ec0 100644
+--- a/codex-rs/codex-api/src/endpoint/images.rs
++++ b/codex-rs/codex-api/src/endpoint/images.rs
+@@ -89,6 +89,8 @@ impl<T: HttpTransport> ImagesClient<T> {
+         extra_headers: HeaderMap,
+         operation: &str,
+     ) -> Result<(ImageResponse, Option<String>), ImageRequestError> {
++        crate::model_policy::reject_unmanaged_inference(operation)
++            .map_err(ImageRequestError::from_api_error)?;
+         let body = to_value(request).map_err(|e| ImageRequestError {
+             error: ApiError::Stream(format!("failed to encode {operation} request: {e}")),
+             imagegen_request_id: None,
+diff --git a/codex-rs/codex-api/src/endpoint/memories.rs b/codex-rs/codex-api/src/endpoint/memories.rs
+index 122ca56..8305767 100644
+--- a/codex-rs/codex-api/src/endpoint/memories.rs
++++ b/codex-rs/codex-api/src/endpoint/memories.rs
+@@ -38,6 +38,7 @@ impl<T: HttpTransport> MemoriesClient<T> {
+         body: serde_json::Value,
+         extra_headers: HeaderMap,
+     ) -> Result<Vec<MemorySummarizeOutput>, ApiError> {
++        crate::model_policy::reject_unmanaged_inference("background memory summarization")?;
+         let resp = self
+             .session
+             .execute(Method::POST, Self::path(), extra_headers, Some(body))
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_call.rs b/codex-rs/codex-api/src/endpoint/realtime_call.rs
+index b43e02d..a59fe73 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_call.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_call.rs
+@@ -105,6 +105,7 @@ impl<T: HttpTransport> RealtimeCallClient<T> {
+         sdp: String,
+         extra_headers: HeaderMap,
+     ) -> Result<RealtimeCallResponse, ApiError> {
++        crate::model_policy::reject_unmanaged_inference("realtime calls")?;
+         let resp = self
+             .session
+             .execute_with(
+@@ -132,6 +133,7 @@ impl<T: HttpTransport> RealtimeCallClient<T> {
+         session_config: RealtimeSessionConfig,
+         extra_headers: HeaderMap,
+     ) -> Result<RealtimeCallResponse, ApiError> {
++        crate::model_policy::reject_unmanaged_inference("realtime calls")?;
+         trace!(target: "codex_api::realtime_websocket::wire", "realtime call request SDP: {sdp}");
+         // WebRTC can begin inference as soon as the peer connection comes up, so the initial
+         // session payload is sent with call creation. Legacy sidebands still send session.update
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+index 58ade3b..5e3f06b 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+@@ -1014,6 +1014,7 @@ impl RealtimeWebsocketClient {
+         session_initialization: RealtimeSessionInitialization,
+         transcript_state: RealtimeTranscriptState,
+     ) -> Result<RealtimeWebsocketConnection, ApiError> {
++        crate::model_policy::reject_unmanaged_inference("realtime sessions")?;
+         ensure_rustls_crypto_provider();
+ 
+         let mut request = ws_url
+diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/src/endpoint/responses.rs
+index 9c41a80..6373f16 100644
+--- a/codex-rs/codex-api/src/endpoint/responses.rs
++++ b/codex-rs/codex-api/src/endpoint/responses.rs
+@@ -80,8 +80,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+             compression,
+             turn_state,
+         } = options;
+-        let body = EncodedJsonBody::encode(&request)
+-            .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
++        let body = crate::model_policy::encode_request(&request)?;
+ 
+         let mut headers = extra_headers;
+         if let Some(ref thread_id) = thread_id {
+@@ -114,8 +113,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
+         compression: Compression,
+         turn_state: Option<Arc<OnceLock<String>>>,
+     ) -> Result<ResponseStream, ApiError> {
+-        let body = EncodedJsonBody::encode(&body)
+-            .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
++        let body = crate::model_policy::encode_request(&body)?;
+         self.stream_encoded(body, extra_headers, compression, turn_state)
+             .await
+     }
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index 7f3ebd7..c0b89f3 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -919,6 +919,14 @@ async fn send_websocket_request(
+ }
+ 
+ fn serialize_websocket_request(request: &ResponsesWsRequest<'_>) -> Result<String, ApiError> {
++    if let Some(policy) = crate::model_policy::runtime_model_policy()? {
++        let mut body = serde_json::to_value(request).map_err(|err| {
++            ApiError::Stream(format!("failed to encode websocket request: {err}"))
++        })?;
++        policy.apply(&mut body)?;
++        return serde_json::to_string(&body)
++            .map_err(|err| ApiError::Stream(format!("failed to encode websocket request: {err}")));
++    }
+     serde_json::to_string(request)
+         .map_err(|err| ApiError::Stream(format!("failed to encode websocket request: {err}")))
+ }
+diff --git a/codex-rs/codex-api/src/lib.rs b/codex-rs/codex-api/src/lib.rs
+index b7511d9..de40259 100644
+--- a/codex-rs/codex-api/src/lib.rs
++++ b/codex-rs/codex-api/src/lib.rs
+@@ -5,6 +5,7 @@ pub(crate) mod endpoint;
+ pub(crate) mod error;
+ pub(crate) mod files;
+ pub(crate) mod images;
++mod model_policy;
+ pub(crate) mod provider;
+ pub(crate) mod rate_limits;
+ pub(crate) mod requests;
+@@ -18,6 +19,8 @@ pub use crate::requests::headers::build_session_headers;
+ pub use codex_client::RequestTelemetry;
+ pub use codex_client::ReqwestTransport;
+ pub use codex_client::TransportError;
++pub use model_policy::ModelPolicy;
++pub use model_policy::runtime_model_policy;
+ 
+ pub use crate::api_bridge::map_api_error;
+ pub use crate::auth::AgentIdentityTelemetry;
+diff --git a/codex-rs/codex-api/src/model_policy.rs b/codex-rs/codex-api/src/model_policy.rs
+new file mode 100644
+index 0000000..fcfb7bc
+--- /dev/null
++++ b/codex-rs/codex-api/src/model_policy.rs
+@@ -0,0 +1,262 @@
++//! Process-scoped model limits for an administrator-managed shared app-server.
++//!
++//! Read once, outside user/project configuration. The request check is the
++//! enforcement boundary; filtering the client catalog is only a convenience.
++use crate::error::ApiError;
++use codex_client::EncodedJsonBody;
++use codex_protocol::openai_models::ModelPreset;
++use serde::Serialize;
++use serde_json::Value;
++use std::sync::OnceLock;
++
++const VARIABLES: [&str; 3] = [
++    "CODEX_ALLOWED_MODELS",
++    "CODEX_ALLOWED_REASONING_EFFORTS",
++    "CODEX_ALLOWED_SERVICE_TIERS",
++];
++static POLICY: OnceLock<Result<Option<ModelPolicy>, String>> = OnceLock::new();
++
++/// Immutable administrator policy shared by all conversations in this process.
++#[derive(Debug)]
++pub struct ModelPolicy {
++    models: Vec<String>,
++    efforts: Vec<String>,
++    tiers: Vec<String>,
++}
++
++fn denied(message: impl Into<String>) -> ApiError {
++    ApiError::InvalidRequest {
++        message: format!("Instance model policy: {}", message.into()),
++    }
++}
++
++/// Load the process policy once. Partial, empty or malformed policies fail closed.
++pub fn runtime_model_policy() -> Result<Option<&'static ModelPolicy>, ApiError> {
++    match POLICY.get_or_init(|| {
++        let values = VARIABLES.map(std::env::var_os);
++        let values = values
++            .iter()
++            .map(|value| {
++                value
++                    .as_ref()
++                    .map(|value| value.to_str().ok_or("policy must be UTF-8"))
++                    .transpose()
++            })
++            .collect::<Result<Vec<_>, _>>()?;
++        ModelPolicy::parse([values[0], values[1], values[2]])
++    }) {
++        Ok(policy) => Ok(policy.as_ref()),
++        Err(message) => Err(denied(message)),
++    }
++}
++
++impl ModelPolicy {
++    fn parse(values: [Option<&str>; 3]) -> Result<Option<Self>, String> {
++        if values.iter().all(Option::is_none) {
++            return Ok(None);
++        }
++        let parse_list = |name: &str, value: Option<&str>| -> Result<Vec<String>, String> {
++            let value = value.ok_or_else(|| format!("{name} is required"))?;
++            let entries: Vec<String> = value.split(',').map(|s| s.trim().to_owned()).collect();
++            if entries.len() > 64
++                || entries.iter().any(|s| {
++                    s.is_empty()
++                        || s.len() > 128
++                        || !s
++                            .bytes()
++                            .all(|c| c.is_ascii_alphanumeric() || b"-._/".contains(&c))
++                })
++            {
++                return Err(format!(
++                    "{name} must contain nonempty, exact comma-separated IDs"
++                ));
++            }
++            Ok(entries)
++        };
++        let models = parse_list(VARIABLES[0], values[0])?;
++        let efforts = parse_list(VARIABLES[1], values[1])?;
++        let tiers = parse_list(VARIABLES[2], values[2])?;
++        if efforts.iter().any(|effort| {
++            !matches!(
++                effort.as_str(),
++                "none"
++                    | "minimal"
++                    | "low"
++                    | "medium"
++                    | "high"
++                    | "xhigh"
++                    | "max"
++                    | "ultra"
++                    | "persistent"
++            )
++        }) {
++            return Err("reasoning efforts must be named levels, not numeric budgets".into());
++        }
++        if tiers.iter().any(|tier| tier == "auto") {
++            return Err("service tier 'auto' cannot enforce a fixed service tier".into());
++        }
++        Ok(Some(Self {
++            models,
++            efforts,
++            tiers,
++        }))
++    }
++
++    /// First configured model is the instance default.
++    pub fn default_model(&self) -> &str {
++        &self.models[0]
++    }
++
++    /// Prefer medium when permitted; otherwise use the first configured effort.
++    pub fn default_effort(&self) -> &str {
++        self.efforts
++            .iter()
++            .find(|s| *s == "medium")
++            .unwrap_or(&self.efforts[0])
++    }
++
++    /// Prefer Standard when permitted; otherwise use the first configured tier.
++    pub fn default_tier(&self) -> &str {
++        self.tiers
++            .iter()
++            .find(|s| *s == "default")
++            .unwrap_or(&self.tiers[0])
++    }
++
++    /// Keep only selectable combinations and remove migration suggestions.
++    pub fn filter_catalog(&self, models: &mut Vec<ModelPreset>) {
++        models.retain_mut(|model| {
++            if !self.models.contains(&model.model) {
++                return false;
++            }
++            model
++                .supported_reasoning_efforts
++                .retain(|e| self.efforts.iter().any(|s| s == e.effort.as_str()));
++            let Some(first) = model.supported_reasoning_efforts.first() else {
++                return false;
++            };
++            if !model
++                .supported_reasoning_efforts
++                .iter()
++                .any(|e| e.effort == model.default_reasoning_effort)
++            {
++                model.default_reasoning_effort = first.effort.clone();
++            }
++            model
++                .service_tiers
++                .retain(|tier| self.tiers.contains(&tier.id));
++            if !self.tiers.iter().any(|s| s == "default") && model.service_tiers.is_empty() {
++                return false;
++            }
++            model.additional_speed_tiers.clear();
++            model.default_service_tier = Some(if self.default_tier() == "default" {
++                "default".to_owned()
++            } else {
++                model.service_tiers[0].id.clone()
++            });
++            model.upgrade = None;
++            model.is_default = model.model == self.default_model();
++            true
++        });
++    }
++
++    /// Validate the actual outbound request, including mid-conversation changes.
++    /// Missing effort/tier values are made explicit to avoid upstream defaults.
++    pub(crate) fn apply(&self, body: &mut Value) -> Result<(), ApiError> {
++        let object = body
++            .as_object_mut()
++            .ok_or_else(|| denied("request must be an object"))?;
++        let model = object.get("model").and_then(Value::as_str).unwrap_or("");
++        if !self.models.iter().any(|allowed| allowed == model) {
++            return Err(denied(format!(
++                "model '{model}' is not allowed; choose {}",
++                self.models.join(", ")
++            )));
++        }
++        let reasoning = object.entry("reasoning").or_insert(Value::Null);
++        self.apply_reasoning(reasoning)?;
++        let tier = object.entry("service_tier").or_insert(Value::Null);
++        if tier.is_null() {
++            *tier = Value::String(self.default_tier().to_owned());
++        }
++        if !tier
++            .as_str()
++            .is_some_and(|s| self.tiers.iter().any(|allowed| allowed == s))
++        {
++            return Err(denied(format!(
++                "service tier is not allowed; choose {}",
++                self.tiers.join(", ")
++            )));
++        }
++        if let Some(input) = object.get("input").and_then(Value::as_array) {
++            for item in input {
++                if item.get("type").and_then(Value::as_str) == Some("configuration_update") {
++                    // Preserve saved context, including cache prefixes. Fail closed for
++                    // old disallowed settings, also when WebSocket continuations omit
++                    // the earlier update. A new allowed chat has no such history.
++                    let mut reasoning = item["reasoning"].clone();
++                    if reasoning.get("effort").and_then(Value::as_str).is_none() {
++                        return Err(denied("saved reasoning update must specify a named effort"));
++                    }
++                    self.apply_reasoning(&mut reasoning).map_err(|_| denied(
++                        "saved reasoning update is outside the allowed settings; start a new chat"
++                    ))?;
++                }
++            }
++        }
++        Ok(())
++    }
++
++    fn apply_reasoning(&self, reasoning: &mut Value) -> Result<(), ApiError> {
++        if reasoning.is_null() {
++            *reasoning = serde_json::json!({});
++        }
++        let reasoning = reasoning
++            .as_object_mut()
++            .ok_or_else(|| denied("reasoning must be an object"))?;
++        if let Some(mode) = reasoning.get("mode")
++            && mode != "standard"
++        {
++            return Err(denied("only standard reasoning mode is allowed"));
++        }
++        let effort = reasoning.entry("effort").or_insert(Value::Null);
++        if effort.is_null() {
++            *effort = Value::String(self.default_effort().to_owned());
++        }
++        if !effort
++            .as_str()
++            .is_some_and(|s| self.efforts.iter().any(|allowed| allowed == s))
++        {
++            return Err(denied(format!(
++                "reasoning effort is not allowed; choose {}",
++                self.efforts.join(", ")
++            )));
++        }
++        Ok(())
++    }
++}
++
++/// These auxiliary endpoints cannot express the full model/effort/tier policy.
++pub(crate) fn reject_unmanaged_inference(operation: &str) -> Result<(), ApiError> {
++    if runtime_model_policy()?.is_some() {
++        return Err(denied(format!(
++            "{operation} is unavailable while model limits are enabled"
++        )));
++    }
++    Ok(())
++}
++
++pub(crate) fn encode_request<T: Serialize>(request: &T) -> Result<EncodedJsonBody, ApiError> {
++    let encode_error = |e| ApiError::Stream(format!("failed to encode responses request: {e}"));
++    if let Some(policy) = runtime_model_policy()? {
++        let mut body = serde_json::to_value(request).map_err(encode_error)?;
++        policy.apply(&mut body)?;
++        EncodedJsonBody::encode(&body).map_err(encode_error)
++    } else {
++        EncodedJsonBody::encode(request).map_err(encode_error)
++    }
++}
++
++#[cfg(test)]
++#[path = "model_policy_tests.rs"]
++mod tests;
+diff --git a/codex-rs/codex-api/src/model_policy_tests.rs b/codex-rs/codex-api/src/model_policy_tests.rs
+new file mode 100644
+index 0000000..35262b3
+--- /dev/null
++++ b/codex-rs/codex-api/src/model_policy_tests.rs
+@@ -0,0 +1,142 @@
++use super::*;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++
++fn policy() -> ModelPolicy {
++    ModelPolicy::parse([Some("gpt-6-luna"), Some("low,medium"), Some("default")])
++        .unwrap()
++        .unwrap()
++}
++
++#[test]
++fn policy_is_opt_in_and_partial_or_malformed_configuration_fails_closed() {
++    assert!(ModelPolicy::parse([None, None, None]).unwrap().is_none());
++    for values in [
++        [Some("gpt-6-luna"), None, None],
++        [Some(""), Some("low"), Some("default")],
++        [Some("gpt-*"), Some("low"), Some("default")],
++        [Some("gpt-6-luna,"), Some("low"), Some("default")],
++        [Some("gpt-6-luna"), Some("1024"), Some("default")],
++        [Some("gpt-6-luna"), Some("low"), Some("auto")],
++    ] {
++        assert!(ModelPolicy::parse(values).is_err(), "{values:?}");
++    }
++    let policy = policy();
++    assert_eq!(policy.default_model(), "gpt-6-luna");
++    assert_eq!(policy.default_effort(), "medium");
++    assert_eq!(policy.default_tier(), "default");
++}
++
++#[test]
++fn missing_settings_become_explicit_without_changing_content() {
++    let mut request =
++        json!({"model": "gpt-6-luna", "input": [{"role": "user", "content": "hello"}]});
++    policy().apply(&mut request).unwrap();
++    assert_eq!(
++        request,
++        json!({
++            "model": "gpt-6-luna", "reasoning": {"effort": "medium"}, "service_tier": "default",
++            "input": [{"role": "user", "content": "hello"}]
++        })
++    );
++}
++
++#[test]
++fn allowed_settings_and_saved_context_are_preserved() {
++    let mut request = json!({
++        "model": "gpt-6-luna", "reasoning": {"effort": "low", "summary": "auto"},
++        "service_tier": "default", "input": [
++            {"type": "configuration_update", "reasoning": {"effort": "medium"}},
++            {"type": "configuration_update", "reasoning": {"effort": "low"}}
++        ]
++    });
++    let original = request.clone();
++    policy().apply(&mut request).unwrap();
++    assert_eq!(request, original);
++}
++
++#[test]
++fn disallowed_models_efforts_tiers_and_modes_are_nonretryable_errors() {
++    for mut request in [
++        json!({"model": "gpt-6-astra"}),
++        json!({"model": "gpt-6-luna-extra"}),
++        json!({"model": "gpt-6-luna", "reasoning": {"effort": "high"}}),
++        json!({"model": "gpt-6-luna", "reasoning": {"effort": 4096}}),
++        json!({"model": "gpt-6-luna", "reasoning": {"effort": "medium", "mode": "pro"}}),
++        json!({"model": "gpt-6-luna", "reasoning": []}),
++        json!({"model": "gpt-6-luna", "service_tier": "priority"}),
++        json!({"model": "gpt-6-luna", "service_tier": "auto"}),
++        json!({"model": "gpt-6-luna", "service_tier": 1}),
++        json!({}),
++        json!([]),
++    ] {
++        assert!(
++            matches!(
++                policy().apply(&mut request),
++                Err(ApiError::InvalidRequest { .. })
++            ),
++            "{request}"
++        );
++    }
++}
++
++#[test]
++fn forbidden_saved_updates_cannot_override_allowed_outer_settings() {
++    for effort in [json!("high"), json!(4096), Value::Null] {
++        let mut request = json!({
++            "model": "gpt-6-luna", "reasoning": {"effort": "low"}, "service_tier": "default",
++            "input": [{"type": "configuration_update", "reasoning": {"effort": effort}}]
++        });
++        let original = request.clone();
++        assert!(matches!(
++            policy().apply(&mut request),
++            Err(ApiError::InvalidRequest { .. })
++        ));
++        assert_eq!(request, original);
++    }
++}
++
++fn model(name: &str) -> ModelPreset {
++    serde_json::from_value(json!({
++        "id": name, "model": name, "display_name": name, "description": "fixture",
++        "default_reasoning_effort": "high",
++        "supported_reasoning_efforts": [
++            {"effort": "low", "description": "Low"},
++            {"effort": "medium", "description": "Medium"},
++            {"effort": "high", "description": "High"}
++        ],
++        "service_tiers": [{"id": "priority", "name": "Fast", "description": "Fast"}],
++        "additional_speed_tiers": ["fast"], "default_service_tier": "priority",
++        "is_default": true, "show_in_picker": true, "supported_in_api": true
++    }))
++    .unwrap()
++}
++
++#[test]
++fn catalog_exposes_only_allowed_choices_and_a_valid_default() {
++    let mut models = vec![model("gpt-6-astra"), model("gpt-6-luna")];
++    policy().filter_catalog(&mut models);
++    let mut expected = model("gpt-6-luna");
++    expected.supported_reasoning_efforts.pop();
++    expected.default_reasoning_effort = codex_protocol::openai_models::ReasoningEffort::Low;
++    expected.service_tiers.clear();
++    expected.additional_speed_tiers.clear();
++    expected.default_service_tier = Some("default".into());
++    assert_eq!(models, vec![expected]);
++}
++
++#[test]
++fn catalog_hides_models_with_no_permitted_effort_or_tier() {
++    let restricted = ModelPolicy::parse([Some("gpt-6-luna"), Some("minimal"), Some("default")])
++        .unwrap()
++        .unwrap();
++    let mut models = vec![model("gpt-6-luna")];
++    restricted.filter_catalog(&mut models);
++    assert!(models.is_empty());
++    let restricted = ModelPolicy::parse([Some("gpt-6-luna"), Some("low"), Some("flex")])
++        .unwrap()
++        .unwrap();
++    let mut models = vec![model("gpt-6-luna")];
++    restricted.filter_catalog(&mut models);
++    assert!(models.is_empty());
++}
+diff --git a/codex-rs/model-provider/src/lib.rs b/codex-rs/model-provider/src/lib.rs
+index 2eefe68..8047651 100644
+--- a/codex-rs/model-provider/src/lib.rs
++++ b/codex-rs/model-provider/src/lib.rs
+@@ -22,6 +22,7 @@ pub use auth::auth_provider_from_auth_manager;
+ pub use auth::unauthenticated_auth_provider;
+ pub use bearer_auth_provider::BearerAuthProvider;
+ pub use bearer_auth_provider::BearerAuthProvider as CoreAuthProvider;
++pub use codex_api::runtime_model_policy;
+ pub use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+ pub use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID;
+ pub use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
