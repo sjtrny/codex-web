@@ -1,15 +1,15 @@
 # Build the policy engine
 
 Build from the pinned upstream source and apply the supplied patch. These
-instructions describe the Linux x86-64 GNU build used for the shared workspace.
-The web application image does not contain this engine.
+instructions describe a Linux x86-64 GNU build. Use the upstream build guidance
+for other targets. The web application image does not contain this engine.
 
 ## Prepare the source
 
 Start in the root of this Codex Web checkout:
 
 ```bash
-policy_dir="$PWD/deploy/model-policy"
+policy_dir="$PWD/patches/model-policy"
 cd "$policy_dir"
 sha256sum --check SHA256SUMS
 cd ../..
@@ -34,11 +34,11 @@ uses `0.159.1`. Cargo normalizes those local versions on the first build. Those
 local-version changes are not part of this patch, and no third-party dependency
 version was changed for the policy implementation.
 
-## Build OpenSSL for the workspace runtime
+## Build OpenSSL
 
-A binary built against the host's OpenSSL 1.1 will not run in a Bookworm
-workspace that supplies OpenSSL 3. For the portable build, statically link the
-OpenSSL source already pinned in upstream Cargo.lock:
+The example build statically links OpenSSL so it does not depend on the target
+environment's OpenSSL shared libraries. It uses the source already pinned in
+upstream Cargo.lock:
 
 - Cargo package: `openssl-src` `300.6.1+3.6.3`
 - Crate archive SHA256:
@@ -89,15 +89,16 @@ ldd target/release/codex
 sha256sum target/release/codex
 ```
 
-The binary must not require `libssl.so.1.1` or `libcrypto.so.1.1`. It still needs
-the Linux loader, glibc, libgcc and liblzma from a compatible runtime. Check it
-in a disposable instance of your actual workspace image before installation.
-Use the workspace UID, a temporary Codex home and no live credentials or data.
+This build should have no dynamic dependency on `libssl` or `libcrypto`. It
+still needs the Linux loader, glibc, libgcc and liblzma from a compatible
+runtime. Check it in your target environment before replacing a running
+backend. Use the intended runtime account and a temporary Codex home for an
+isolated startup check.
 
-Copy the binary to the Docker host and make it executable by the workspace
-user. The [installation guide](README.md#install-through-dokploy) uses
-`/opt/codex-policy/0.159.1-1/codex` as the example host path. Mount it read-only
-and recreate the app-server to activate it.
+Install the binary at a location of your choice, make it executable by the
+runtime user, and [run the backend](README.md#run-the-backend) with the policy
+environment. Apply the binary and environment through your normal deployment
+or process-management workflow.
 
 ## Development checks
 

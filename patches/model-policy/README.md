@@ -49,52 +49,51 @@ limits. Set the web service's `CODEX_DEFAULT_MODEL`,
 values as well. Those three variables set the web defaults; they do not enforce
 limits by themselves.
 
-## Install through Dokploy
+## Run the backend
 
-These steps assume an existing Compose deployment with a `workspace` service
-running the app-server as `node`, a `codex-web` service, and persistent home,
-workspace and socket volumes. Rename the service references for your setup.
+Follow [BUILD.md](BUILD.md) to build the patched executable. Run it in the
+environment where Codex should access files and tools, with the normal Codex
+home and authentication for that environment. Choose the executable location,
+runtime user, process manager and socket path to suit your deployment.
 
-1. Follow [BUILD.md](BUILD.md) to build the engine. Copy the executable to the
-   Docker host, outside the shared workspace. The example host path is
-   `/opt/codex-policy/0.159.1-1/codex`. Keep it owned by the administrator and
-   executable by the workspace user. Building and copying the file do not
-   activate it.
-2. In the application's **Environment** tab, add the six entries from
-   [.env.example](.env.example) and save. The example allows Luna, Low/Medium
-   reasoning and Standard speed, with Medium as the default.
-3. In the Compose editor, merge [compose.fragment.yaml](compose.fragment.yaml)
-   into the existing services. Add the three `CODEX_ALLOWED_*` entries under
-   `workspace.environment`, the binary mount under `workspace.volumes`, and the
-   three `CODEX_DEFAULT_*` entries under `codex-web.environment`. Use the actual
-   host path from step 1 for the mount source. Preserve existing environment
-   entries, volumes, networks and startup commands.
-4. In `workspace.build.dockerfile_inline`, immediately after
-   `RUN npm install -g @openai/codex@0.159.1` and before `USER node`, add:
+For example, start an app-server with Luna, Low/Medium reasoning and Standard
+service available:
 
-   ```dockerfile
-   RUN ln -sf /opt/codex-policy/codex /usr/local/bin/codex
-   ```
+```bash
+mkdir -p /absolute/shared/path
+chmod 700 /absolute/shared/path
 
-   This selects the mounted engine for the `codex` command, including the
-   app-server startup command. If you use a separate Dockerfile, add the line
-   there instead. The original npm package remains available for rollback.
-5. Save and deploy. Rebuild the workspace image and recreate the services so
-   the new binary and environment are used. If your Dokploy app has a custom
-   Compose run command, retain its project/file options and include
-   `up -d --build --remove-orphans --force-recreate`. Dokploy adds the `docker`
-   prefix. Existing persistent volumes retain login and conversation data.
-6. Refresh the website and start a new chat. The example should show Luna,
-   Low/Medium reasoning and Standard speed. Attach a workspace terminal to the
-   same backend with:
+CODEX_ALLOWED_MODELS=gpt-6-luna \
+CODEX_ALLOWED_REASONING_EFFORTS=low,medium \
+CODEX_ALLOWED_SERVICE_TIERS=default \
+  /absolute/path/to/patched/codex app-server \
+  --listen unix:///absolute/shared/path/app.sock
+```
 
-   ```bash
-   codex --remote unix:///run/codex/app.sock
-   ```
+The values are examples; select models and settings appropriate to your
+instance. [.env.example](.env.example) lists both backend policy and web-default
+variables. Apply each group to the corresponding process using your usual
+configuration mechanism. The example file is not loaded automatically.
 
-Use the actual socket path if it differs. The same command can run in a VS Code
-Remote-SSH terminal after SSH access is configured. The desktop Codex extension
-is a separate client and is not configured by these steps.
+## Connect clients
+
+Point Codex Web at the app-server socket through `CODEX_APP_SERVER_SOCKET` and
+set its `CODEX_DEFAULT_*` variables to permitted values. Use a socket path
+visible to the web process. See the main [setup guide](../../README.md#setup)
+for the web configuration options.
+
+Attach a terminal to the same backend:
+
+```bash
+codex --remote unix:///absolute/shared/path/app.sock
+```
+
+This command can also run in an editor's integrated terminal if it can access
+the socket. An editor extension that starts its own backend must be configured
+separately.
+
+After starting the backend, refresh the web UI and start a new chat. The model
+picker should reflect the allowed settings supported by the account.
 
 Local commands that use the patched binary and policy environment also get
 the outbound request checks. Use `--remote` to share live conversations with
@@ -119,12 +118,13 @@ that server's policy; an independent stock CLI process is not.
   Codex. The build instructions describe Linux x86-64; other targets need
   their own build and runtime checks.
 
-## Roll back
+## Disable or remove the policy
 
-Remove the added Dockerfile symlink line, binary mount and the three
-`CODEX_ALLOWED_*` service environment entries. Rebuild and redeploy. The
-existing pinned npm installation becomes the `codex` command again. Restore
-previous web defaults if needed. Keep the persistent volumes.
+To disable the policy, remove all three `CODEX_ALLOWED_*` variables from the
+backend process environment and restart it. To remove the custom engine,
+switch the app-server executable back to the stock Codex release. Retain the
+same Codex home and workspace paths to keep login and conversation data.
+Adjust the web defaults if needed.
 
 ## Source
 
