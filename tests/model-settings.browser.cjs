@@ -49,6 +49,7 @@ async function main() {
       if (message.id === undefined) return;
       let result = {};
       switch (message.method) {
+        case "account/read": result = { account: null, requiresOpenaiAuth: false }; break;
         case "model/list":
           if (failRefresh && message.params.cursor) {
             ws.send(JSON.stringify({ id: message.id, error: { code: -32000, message: "Catalog temporarily unavailable" } }));

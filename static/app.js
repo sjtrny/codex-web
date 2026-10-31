@@ -240,6 +240,17 @@ const state = {
   connectionStatus: "offline",
 };
 
+const accountControls = globalThis.CodexAccount?.create({
+  rpc,
+  openSettings: () => setPreferencesOpen(true),
+  onSignedIn: () => {
+    if (/access token|refresh token|unauthorized|sign in|not logged in/i.test(ui.notice.textContent)) notice("");
+    // A response requested for the previous account must not restore its catalog.
+    state.settingsCatalogRequest = null;
+    void loadChatSettingsCatalog();
+  },
+});
+
 function setStatus(_text, kind) {
   state.connectionStatus = kind;
 }
@@ -276,6 +287,7 @@ function renderThemeControl() {
 function setPreferencesOpen(open, moveFocus = true) {
   if (open) {
     renderThemeControl();
+    void accountControls?.refresh();
     ui.preferencesToggle.setAttribute("aria-expanded", "true");
     if (!ui.preferencesDialog.open) {
       if (typeof ui.preferencesDialog.showModal === "function") {
@@ -1582,7 +1594,7 @@ async function refreshChatSettingsCatalog(request) {
       rpc("configRequirements/read", {}),
       rpc("permissionProfile/list", { cwd: currentWorkingFolder() }),
     ]);
-    if (state.ws !== request.socket) return;
+    if (state.ws !== request.socket || state.settingsCatalogRequest !== request) return;
     if (models.status === "fulfilled") {
       state.models = models.value;
       state.modelsLoaded = true;
@@ -2818,6 +2830,7 @@ async function connect() {
       state.connectionGeneration += 1;
       state.ready = true;
       setStatus("connected", "online");
+      accountControls?.connectionChanged(true);
       notice("");
       updateControls();
       await loadChatSettingsCatalog();
@@ -2840,6 +2853,7 @@ async function connect() {
   socket.addEventListener("close", () => {
     if (state.ws !== socket) return;
     state.ready = false;
+    accountControls?.connectionChanged(false);
     state.activeTurns.clear();
     state.activeModels.clear();
     state.liveThreadStatuses.clear();
@@ -2865,7 +2879,13 @@ function handleMessage(message) {
     if (!pending) return;
     window.clearTimeout(pending.timer);
     state.pending.delete(message.id);
-    if (message.error) pending.reject(new Error(message.error.message || "Codex request failed"));
+    if (message.error) {
+      accountControls?.observeError(message.error, pending.method);
+      const error = new Error(message.error.message || "Codex request failed");
+      error.data = message.error.data;
+      error.codexErrorInfo = message.error.codexErrorInfo;
+      pending.reject(error);
+    }
     else pending.resolve(message.result);
     return;
   }
@@ -2923,6 +2943,7 @@ function reconcileThreadHistory(threadId) {
 }
 
 function handleNotification(method, params) {
+  accountControls?.notification(method, params);
   switch (method) {
     case "codex-web/connected":
       return;

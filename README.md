@@ -103,6 +103,29 @@ Values must be positive integers in bytes. Empty values use the default;
 invalid values prevent the web service from starting. This setting does not
 change the browser-input or attachment-upload limits.
 
+### Account sign-in and recovery
+
+Open **Settings → OpenAI account** to sign in with ChatGPT or switch accounts.
+Select **Sign in with ChatGPT** or **Switch account**, open the sign-in page,
+and enter the displayed code. Keep Codex Web open while you authorize the account.
+The page checks the connected account after sign-in completes. Device-code login
+must be enabled in the account's security settings or workspace permissions.
+
+An authentication error also shows a **Sign in** button above the conversation.
+These controls call the app-server directly, so they work when authentication
+prevents the chat agent from responding. The app-server saves and loads the new
+credentials; no terminal command or server restart is needed. This requires a
+Codex version that supports `account/login/start` with `chatgptDeviceCode`.
+
+The account applies to every user connected to the same app-server. Sign-in does
+not change the website's own access controls or create separate user accounts.
+Closing Settings leaves a pending login active. Use **Cancel sign-in** to stop
+it. The temporary code is kept in this tab's session storage until completion,
+cancellation or expiry; access and refresh tokens never enter the web UI.
+
+Run `npm run test:account` and `npm run test:browser:account` to check the login
+flow with simulated accounts and no real authentication changes.
+
 ### Agent instructions
 
 Codex Web bundles [`codex-web-instructions.md`](codex-web-instructions.md) in
