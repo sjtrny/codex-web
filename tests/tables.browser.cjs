@@ -41,6 +41,7 @@ async function main() {
     await page.route("**/api/**", route => {
       const pathname = new URL(route.request().url()).pathname;
       if (pathname === "/api/config") return route.fulfill({ json: { defaultCwd: "/workspaces", workspaceRoot: "/workspaces", historyChunkBytes: 1000000, chatDefaults: {} } });
+      if (pathname === "/api/pins") return route.fulfill({ json: { storeId: "table-fixture", revision: 0, threadIds: [] } });
       if (pathname === "/api/history") return route.fulfill({ contentType: "application/x-ndjson", headers: { "X-Codex-History-Cursor": "", "X-Codex-History-Reset": "0" }, body: [
         { turn: { id: "turn-table", status: "completed" } },
         { turnId: "turn-table", item: { id: "table-answer", type: "agentMessage", phase: "final_answer", text: source } },
@@ -164,6 +165,22 @@ async function main() {
     await frame();
     const cases = page.locator("#table-cases .chat-table");
     assert.equal(await cases.count(), 3);
+    for (const width of [1440, 390, 320]) {
+      await page.setViewportSize({ width, height: 1000 });
+      await frame();
+      const size = await cases.nth(0).evaluate(panel => ({
+        prose: panel.closest(".body").getBoundingClientRect().width,
+        panel: panel.getBoundingClientRect().width,
+        viewport: panel.querySelector(".table-scroll").clientWidth,
+        table: panel.querySelector("table").getBoundingClientRect().width,
+        pageOverflow: document.documentElement.scrollWidth > innerWidth,
+      }));
+      assert.ok(Math.abs(size.panel - size.prose) <= 1,
+        `Short tables fill the message width at ${width}px: ${JSON.stringify(size)}`);
+      assert.ok(Math.abs(size.table - size.viewport) <= 1,
+        `Cells fill the table panel at ${width}px: ${JSON.stringify(size)}`);
+      assert.equal(size.pageOverflow, false);
+    }
     assert.equal(await cases.nth(0).locator(".table-scroll-hint").isVisible(), false, "Small tables should fit without scroll hints");
     assert.equal(await cases.nth(1).locator("tbody td").evaluateAll(cells => cells.every(cell => cell.scrollWidth <= cell.clientWidth + 1)), true, "Long URLs and code must stay within their cells");
     assert.equal(await cases.nth(1).locator("a").getAttribute("target"), "_blank");
@@ -202,7 +219,8 @@ async function main() {
     assert.ok(requests.every(method => !["turn/start", "turn/steer", "thread/start"].includes(method)));
     const report = { metrics, keyboardScroll: true, streamingScrollAndFocus: true, expandedStreaming: true,
       escapeRestoresFocusAndPosition: true, explicitAlignment: true, numericAlignment: true,
-      longTokensContained: true, math: true, stickyHeader: true, backgroundPositionDuringStream: true, pageErrors: errors, realConversationRequests: 0 };
+      longTokensContained: true, math: true, stickyHeader: true, backgroundPositionDuringStream: true,
+      shortTablesFillMessage: true, pageErrors: errors, realConversationRequests: 0 };
     if (artifacts) await fs.writeFile(path.join(artifacts, "browser.json"), JSON.stringify(report, null, 2) + "\n");
     console.log(JSON.stringify(report));
   } finally {
