@@ -3084,6 +3084,7 @@ function handleNotification(method, params) {
 }
 
 function clearMessages() {
+  globalThis.CodexMarkdown?.closeExpandedTable?.(false);
   for (const entry of state.items.values()) {
     if (entry.renderFrame && globalThis.window?.cancelAnimationFrame) {
       window.cancelAnimationFrame(entry.renderFrame);
@@ -3194,6 +3195,7 @@ function jumpToPresent() {
 
 function presentContentChanged(shouldFollow = state.followPresent) {
   if (state.renderTarget) return;
+  if (globalThis.CodexMarkdown?.isTableExpanded?.()) shouldFollow = false;
   if (shouldFollow && state.followPresent) {
     jumpToPresent();
   } else {
@@ -3409,7 +3411,8 @@ function renderMessageBody(entry, role) {
     const shouldFollow = shouldFollowMessages();
     entry.renderFrame = null;
     entry.body.classList.remove("plain-text");
-    entry.body.replaceChildren(renderMarkdown(entry.text));
+    if (globalThis.CodexMarkdown?.renderInto) globalThis.CodexMarkdown.renderInto(entry.body, entry.text);
+    else entry.body.replaceChildren(renderMarkdown(entry.text));
     presentContentChanged(shouldFollow);
   };
   if (state.renderTarget || typeof window.requestAnimationFrame !== "function") {

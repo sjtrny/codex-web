@@ -7,6 +7,15 @@ app-server share conversations.
 
 ![Codex Web in a browser window receives the same conversation updates as Codex CLI in a terminal window.](docs/sync-demo.gif)
 
+## Chat tables
+
+Tables use extra space on wide screens and scroll horizontally when needed.
+The scroll hint and edge shadows show when more columns are available. Select
+**Expand** to read a table in a larger view with a fixed header. **Close** or
+Escape returns to the same place in the chat. Keyboard users can focus a
+scrolling table and use the arrow keys. New response text keeps the table's
+horizontal position and also updates an open expanded view.
+
 ## Setup
 
 ### 1. App server

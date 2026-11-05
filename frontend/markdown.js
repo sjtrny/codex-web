@@ -3,6 +3,7 @@ import "katex/dist/katex.min.css";
 import { Marked } from "marked";
 import markedKatex from "marked-katex-extension";
 import { enhanceCodeBlocks } from "./code-copy.mjs";
+import { closeExpandedTable, enhanceTables, isTableExpanded, replaceTableContent } from "./tables.mjs";
 import standardLatex from "./standard-latex.mjs";
 import {
   isSameOriginHttpUrl,
@@ -79,6 +80,7 @@ function render(value) {
       }
     }
     enhanceCodeBlocks(fragment);
+    enhanceTables(fragment);
     return fragment;
   } catch (error) {
     console.warn("Markdown rendering failed; showing plain text", error);
@@ -90,4 +92,8 @@ function configure(options = {}) {
   if (options.workspaceRoot) setWorkspaceRoot(options.workspaceRoot);
 }
 
-globalThis.CodexMarkdown = Object.freeze({ configure, render });
+function renderInto(root, value) {
+  replaceTableContent(root, () => root.replaceChildren(render(value)));
+}
+
+globalThis.CodexMarkdown = Object.freeze({ configure, render, renderInto, closeExpandedTable, isTableExpanded });
