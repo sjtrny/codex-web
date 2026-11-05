@@ -13,7 +13,6 @@
     <link rel="icon" href="/static/icons/app-icon.svg" type="image/svg+xml">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/icons/apple-touch-icon.png">
     <script src="/static/theme.js"></script>
-    <link rel="stylesheet" href="/static/vendor/markdown.css">
     <link rel="stylesheet" href="/static/style.css">
   </head>
   <body>
@@ -52,6 +51,10 @@
           <div id="account-banner" class="account-banner" hidden>
             <span id="account-banner-message" role="status">Sign in to use Codex.</span>
             <button id="account-banner-open" type="button">Sign in</button>
+          </div>
+          <div id="usage-limit-warning" class="notice usage-limit-warning" role="alert" aria-atomic="true" hidden>
+            <strong>Usage limit reached</strong>
+            <span id="usage-limit-detail"></span>
           </div>
           <div id="notice" class="notice" hidden></div>
         </div>
@@ -251,7 +254,7 @@
         </a>
       </li>
     </template>
-    <script src="/static/vendor/markdown.js" defer></script>
+    <script src="/static/vendor/markdown.js" data-math-script="/static/vendor/math.js" data-math-style="/static/vendor/math.css" defer></script>
     <script src="/static/account.js" defer></script>
     <script src="/static/app.js" defer></script>
   </body>

@@ -33,8 +33,9 @@ from aiohttp import (
 )
 from aiohttp.helpers import content_disposition_header
 
-from history import decode_cursor, read_history_chunk
+from history import decode_cursor, history_page, read_history_chunk
 from pins import PinStore
+from questions import read_pending_questions
 
 PIN_STORE = web.AppKey("pin_store", PinStore)
 PIN_CLIENTS = web.AppKey("pin_clients", set)
@@ -406,10 +407,21 @@ class UploadRejected(Exception):
         self.status = status
 
 
-async def security_headers(_: web.Request, response: web.StreamResponse) -> None:
+async def security_headers(request: web.Request, response: web.StreamResponse) -> None:
+    cache_control = "no-store"
+    if request.path.startswith("/static/") and response.status in {200, 206, 304}:
+        # Only content-addressed public UI files may be reused across releases.
+        fingerprinted = re.fullmatch(
+            r"/static/vendor/(?:[\w-]+-[0-9a-f]{16}\.(?:js|css)|fonts/[\w-]+-[A-Z0-9]{8}\.(?:woff2?|ttf))",
+            request.path,
+        )
+        cache_control = "public, max-age=31536000, immutable" if fingerprinted else "no-cache"
+    if request.path == "/" or request.path.startswith("/static/"):
+        # Include this on identity and 304 responses as well as compressed ones.
+        response.headers["Vary"] = "Accept-Encoding"
     response.headers.update(
         {
-            "Cache-Control": "no-store",
+            "Cache-Control": cache_control,
             "Content-Security-Policy": (
                 "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; "
                 "style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; "
@@ -423,7 +435,8 @@ async def security_headers(_: web.Request, response: web.StreamResponse) -> None
 
 
 async def index(_: web.Request) -> web.FileResponse:
-    return web.FileResponse(STATIC / "index.html")
+    built = STATIC / "vendor" / "index.html"
+    return web.FileResponse(built if built.is_file() else STATIC / "index.html")
 
 
 async def pwa_manifest(_: web.Request) -> web.FileResponse:
@@ -452,6 +465,7 @@ async def app_config(_: web.Request) -> web.Response:
             "chatDefaults": chat_defaults(),
             "showToolActivity": env_bool("CODEX_WEB_SHOW_TOOL_ACTIVITY", True),
             "historyChunkBytes": history_chunk_limit(),
+            "threadListHttp": True,
             "uploads": {
                 "maxBytes": max_bytes,
                 "maxFiles": max_files,
@@ -1355,6 +1369,54 @@ async def search_chat_history(request: web.Request) -> web.StreamResponse:
     )
 
 
+async def conversation_list(request: web.Request) -> web.Response:
+    try:
+        params = await request.json()
+        if not isinstance(params, dict):
+            raise ValueError
+        cursor = params.get("cursor")
+        if cursor is not None and (not isinstance(cursor, str) or not cursor or len(cursor) > 16384):
+            raise ValueError
+    except (ValueError, TypeError):
+        return web.json_response({"error": "Invalid conversation list request"}, status=400)
+    try:
+        async with asyncio.timeout(20), connect_backend(close_timeout=1) as (upstream, _):
+            await backend_rpc(upstream, 1, "initialize", {
+                "clientInfo": {"name": "codex_web_threads", "version": APP_VERSION},
+                "capabilities": {"experimentalApi": True},
+            })
+            await upstream.send_json({"method": "initialized", "params": {}})
+            result = await backend_rpc(upstream, 2, "thread/list", {
+                "limit": 50, "sourceKinds": CHAT_SOURCE_KINDS,
+                "sortKey": "recency_at", "sortDirection": "desc", "cursor": cursor,
+            })
+        threads, continuation = history_page(result, cursor)
+        if len(threads) > 50:
+            raise ValueError("Oversized conversation list")
+        summaries = []
+        for thread in threads:
+            if not isinstance(thread, dict) or not isinstance(thread.get("id"), str) or not thread["id"]:
+                raise ValueError("Invalid conversation summary")
+            # Preserve fields used by sidebar labels, ordering, activity, pins
+            # and model inheritance. Full metadata arrives when a chat opens.
+            summaries.append({key: thread[key] for key in (
+                "id", "name", "preview", "forkedFromId", "cwd", "model", "ephemeral",
+                "recencyAt", "updatedAt", "createdAt", "status",
+            ) if key in thread})
+    except TimeoutError:
+        return web.json_response({"error": "Conversation list timed out. Try again."}, status=504)
+    except (BackendRPCError, BackendProtocolError, ClientError, OSError, RuntimeError, ValueError) as exc:
+        LOG.warning("conversation list failed: %s", exc)
+        return web.json_response({"error": "Could not load conversations. Try again."}, status=502)
+    response = web.Response(
+        body=json.dumps({"data": summaries, "nextCursor": continuation}, separators=(",", ":")).encode(),
+        content_type="application/json", zlib_executor_size=4096,
+        headers={"Cache-Control": "no-store", "Vary": "Accept-Encoding"},
+    )
+    response.enable_compression()
+    return response
+
+
 async def conversation_history(request: web.Request) -> web.Response:
     try:
         params = await request.json()
@@ -1392,11 +1454,47 @@ async def conversation_history(request: web.Request) -> web.Response:
         return web.json_response({
             "error": "Could not load history. The Codex backend must support thread/turns/list and thread/items/list.",
         }, status=502)
-    return web.Response(body=body, content_type="application/x-ndjson", headers={
+    response = web.Response(body=body, content_type="application/x-ndjson", zlib_executor_size=4096, headers={
         "Cache-Control": "no-store",
+        "Vary": "Accept-Encoding",
         "X-Codex-History-Cursor": continuation,
         "X-Codex-History-Reset": "1" if reset else "0",
     })
+    # The byte budget still bounds decoded history. Compress only on the wire,
+    # with larger chunks offloaded so other websocket clients remain responsive.
+    response.enable_compression()
+    return response
+
+
+async def conversation_questions(request: web.Request) -> web.Response:
+    try:
+        params = await request.json()
+        thread_id = params.get("threadId") if isinstance(params, dict) else None
+        if not isinstance(thread_id, str) or not thread_id:
+            raise ValueError
+    except (ValueError, TypeError):
+        return web.json_response({"error": "Invalid question status request"}, status=400)
+    try:
+        async with asyncio.timeout(15), connect_backend(close_timeout=1) as (upstream, _):
+            request_id = 0
+
+            async def rpc(method, arguments):
+                nonlocal request_id
+                request_id += 1
+                return await backend_rpc(upstream, request_id, method, arguments)
+
+            await rpc("initialize", {
+                "clientInfo": {"name": "codex_web_questions", "version": APP_VERSION},
+                "capabilities": {"experimentalApi": True},
+            })
+            await upstream.send_json({"method": "initialized", "params": {}})
+            result = await read_pending_questions(rpc, thread_id)
+    except TimeoutError:
+        return web.json_response({"error": "Question status timed out"}, status=504)
+    except (BackendRPCError, BackendProtocolError, ClientError, OSError, RuntimeError, ValueError) as exc:
+        LOG.warning("conversation question status failed: %s", exc)
+        return web.json_response({"error": "Could not load question status"}, status=502)
+    return web.json_response(result, headers={"Cache-Control": "no-store"})
 
 
 def proxy_notice(method: str, **params: object) -> str:
@@ -1669,6 +1767,8 @@ def create_app() -> web.Application:
             web.get("/api/host-images", host_image),
             web.post("/api/search", search_chat_history),
             web.post("/api/history", conversation_history),
+            web.post("/api/threads", conversation_list),
+            web.post("/api/thread-questions", conversation_questions),
             web.post("/api/uploads", upload_files),
             web.get("/healthz", health),
             web.get("/ws", websocket_proxy),

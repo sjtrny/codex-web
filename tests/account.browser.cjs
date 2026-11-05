@@ -11,7 +11,7 @@ const artifacts = process.env.ARTIFACT_DIR;
 const server = http.createServer(async (req, res) => {
   try {
     const pathname = new URL(req.url, "http://localhost").pathname;
-    const file = path.resolve(root, pathname === "/" ? "index.html" : pathname.replace(/^\/static\//, ""));
+    const file = path.resolve(root, pathname === "/" ? "vendor/index.html" : pathname.replace(/^\/static\//, ""));
     if (!file.startsWith(root + path.sep)) throw new Error("Invalid path");
     res.setHeader("Content-Type", ({ ".html": "text/html", ".js": "text/javascript", ".css": "text/css" })[path.extname(file)] || "application/octet-stream");
     res.end(await fs.readFile(file));
@@ -26,6 +26,9 @@ async function main() {
     const page = await context.newPage();
     page.setDefaultTimeout(10000);
     const errors = [], calls = [], sockets = new Set();
+    await context.route("**/api/pins", (route) => route.fulfill({ json: {
+      storeId: "account-test", revision: 0, threadIds: [],
+    } }));
     let email = "previous@example.com", authorized = false, loginId = null, counter = 0;
     const notify = (method, params) => {
       for (const ws of sockets) ws.send(JSON.stringify({ method, params }));

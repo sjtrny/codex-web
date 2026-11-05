@@ -30,7 +30,7 @@ async def main():
                 if "id" not in payload:
                     continue
                 method = payload["method"]
-                if method in {"initialize", "account/rateLimits/read"}:
+                if method in {"initialize", "account/rateLimits/read", "account/read"}:
                     result = {}
                 elif method == "thread/list":
                     result = {"data": threads, "nextCursor": None}

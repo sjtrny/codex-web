@@ -86,6 +86,7 @@ async function main() {
         if (!message.method || message.id == null) return;
         let result;
         switch (message.method) {
+          case "account/rateLimits/read": result = {}; break;
           case "initialize": result = { userAgent: "browser-test" }; break;
           case "model/list": result = { data: [{
             id: "model-a", model: "model-a", displayName: "Example model",

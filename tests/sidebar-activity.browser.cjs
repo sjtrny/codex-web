@@ -83,6 +83,7 @@ async function main() {
         if (!message.method || message.id == null) return;
         let result;
         switch (message.method) {
+          case "account/rateLimits/read": result = {}; break;
           case "initialize": result = { userAgent: "sidebar-browser-test" }; break;
           case "model/list":
           case "permissionProfile/list": result = { data: [] }; break;
@@ -93,6 +94,12 @@ async function main() {
             if (holdLists) { pendingLists.push({ id: message.id, result }); return; }
             break;
           case "thread/resume": result = { thread: threads.find((thread) => thread.id === message.params.threadId) }; break;
+          case "thread/read": {
+            assert.equal(message.params.includeTurns, false);
+            const thread = threads.find((thread) => thread.id === message.params.threadId);
+            result = { thread: { ...thread, turns: [] } };
+            break;
+          }
           case "turn/start": pendingStarts.push(message); return;
           default: errors.push(`Unexpected RPC: ${message.method}`); result = {};
         }

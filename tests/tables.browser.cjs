@@ -20,7 +20,7 @@ const source = [
 const server = http.createServer(async (req, res) => {
   try {
     const pathname = new URL(req.url, "http://localhost").pathname;
-    const file = path.resolve(root, pathname === "/" ? "index.html" : pathname.replace(/^\/static\//, ""));
+    const file = path.resolve(root, pathname === "/" ? "vendor/index.html" : pathname.replace(/^\/static\//, ""));
     if (!file.startsWith(root + path.sep)) throw new Error("Invalid path");
     res.setHeader("Content-Type", ({ ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".woff2": "font/woff2" })[path.extname(file)] || "application/octet-stream");
     res.end(await fs.readFile(file));
@@ -57,7 +57,7 @@ async function main() {
         requests.push(request.method);
         let result = {};
         switch (request.method) {
-          case "initialize": case "config/read": case "configRequirements/read": case "account/rateLimits/read": break;
+          case "initialize": case "config/read": case "configRequirements/read": case "account/rateLimits/read": case "account/read": break;
           case "model/list": case "permissionProfile/list": result = { data: [] }; break;
           case "thread/list": result = { data: [thread] }; break;
           case "thread/resume": case "thread/read": result = { thread }; break;

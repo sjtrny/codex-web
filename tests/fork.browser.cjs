@@ -77,12 +77,14 @@ async function main() {
         if (!message.method || message.id == null) return;
         let result;
         switch (message.method) {
+          case "account/rateLimits/read": result = {}; break;
           case "initialize": result = { userAgent: "fork-browser-test" }; break;
           case "model/list":
           case "permissionProfile/list": result = { data: [] }; break;
           case "config/read": result = { config: {} }; break;
           case "configRequirements/read": result = { requirements: null }; break;
           case "thread/list": result = { data: [...threads.values()], nextCursor: null }; break;
+          case "thread/read":
           case "thread/resume": result = { thread: threads.get(message.params.threadId) }; break;
           case "thread/fork":
             assert.equal("beforeTurnId" in message.params, false);
