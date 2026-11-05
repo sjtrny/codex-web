@@ -268,9 +268,25 @@ pin; select it again to unpin. Keyboard focus also reveals the control, and pins
 remain visible on touch devices. Both groups follow recent activity order, and
 pinned conversations remain available even outside the 50 most recent chats.
 
-Pins are saved in this browser and shared between tabs for the same Codex Web
-site. Archiving or deleting a conversation removes its pin. The pin controls
-support keyboard access and mobile touch input.
+Pins are saved on the server and shared across browsers and devices that use
+this Codex Web instance. Connected browsers receive changes immediately; opening,
+reconnecting or returning to a tab also refreshes pins. Visible tabs check every
+30 seconds as a fallback. Confirmed archive and delete events remove the pin.
+The pin controls support keyboard access and mobile touch input.
+
+Existing browser pins are imported automatically when that browser next opens
+the updated site. Imports add pins without replacing existing server choices.
+An explicit unpin is remembered so a stale browser cannot restore it. Clearing
+browser storage after migration does not remove server pins. Failed saves show
+an error and restore the last confirmed state.
+
+The database is `pins.sqlite3` in `CODEX_WEB_STATE_DIR`. By default this is
+`.codex-web` inside `CODEX_UPLOAD_DIR` (`/uploads/.codex-web` in Docker), so the
+existing persistent uploads mount also preserves pins across container
+recreation. A custom state directory must be absolute, writable by the service,
+and mounted on persistent storage. Back up this directory with the instance.
+All clients of one instance share the same pins, just as they share conversations;
+independent instances must use separate state directories.
 
 Run `npm run test:browser:pins` with the demo's Playwright dependencies for an
 isolated desktop/mobile check.

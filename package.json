@@ -22,6 +22,7 @@
     "test:timestamps": "node --test tests/timestamps.test.js",
     "test:pins": "node --test tests/pins.test.js",
     "test:browser:pins": "node tests/pins.browser.cjs",
+    "test:browser:server-pins": "node tests/server-pins.browser.cjs",
     "test:browser:fork": "node tests/fork.browser.cjs",
     "test:browser:timestamps": "node tests/timestamps.browser.cjs",
     "test:browser:files": "node tests/file-previews.browser.cjs",
