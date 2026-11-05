@@ -48,7 +48,13 @@
           <strong id="thread-title">New thread</strong>
         </header>
 
-        <div id="notice" class="notice" hidden></div>
+        <div class="chat-notices">
+          <div id="account-banner" class="account-banner" hidden>
+            <span id="account-banner-message" role="status">Sign in to use Codex.</span>
+            <button id="account-banner-open" type="button">Sign in</button>
+          </div>
+          <div id="notice" class="notice" hidden></div>
+        </div>
         <div class="messages-region">
           <div id="messages" class="messages" aria-live="polite" aria-busy="false">
             <p class="empty">Send a request to start a thread.</p>
@@ -206,6 +212,26 @@
         <h2 id="preferences-title">Settings</h2>
         <button id="preferences-close" class="preferences-close" type="button" aria-label="Close settings">×</button>
       </header>
+      <section class="preferences-body account-section" aria-labelledby="account-title">
+        <h3 id="account-title">OpenAI account</h3>
+        <p id="account-status" role="status" aria-live="polite">Connecting…</p>
+        <p class="preferences-note">This account is shared by everyone using this Codex Web instance.</p>
+        <div class="account-actions">
+          <button id="account-sign-in" type="button" disabled>Sign in with ChatGPT</button>
+          <button id="account-refresh" type="button" disabled>Check account</button>
+        </div>
+        <div id="account-login" class="account-login" hidden>
+          <p>Open the sign-in page, choose the account you want to use, and enter this code:</p>
+          <div class="account-code-row">
+            <code id="account-code" aria-label="Sign-in code"></code>
+            <button id="account-copy" type="button">Copy code</button>
+          </div>
+          <a id="account-login-link" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open sign-in page</a>
+          <p id="account-login-time" class="preferences-note"></p>
+          <button id="account-cancel" type="button">Cancel sign-in</button>
+        </div>
+        <p id="account-message" class="preferences-note" role="status" aria-live="polite"></p>
+      </section>
       <section class="preferences-body" aria-labelledby="appearance-title">
         <h3 id="appearance-title">Appearance</h3>
         <div class="theme-options" role="group" aria-label="Color theme">
@@ -226,6 +252,7 @@
       </li>
     </template>
     <script src="/static/vendor/markdown.js" defer></script>
+    <script src="/static/account.js" defer></script>
     <script src="/static/app.js" defer></script>
   </body>
 </html>
