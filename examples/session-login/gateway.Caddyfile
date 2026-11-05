@@ -1,0 +1,33 @@
+# Reference for the existing gateway behind the HTTPS reverse proxy.
+{
+    auto_https off
+    admin off
+}
+
+http://codex.example.com:8080 {
+    @insecure not header_regexp X-Forwarded-Proto ^(https|wss)$
+    @wrong_ws_origin {
+        path /ws
+        not header Origin https://codex.example.com
+    }
+    @wrong_write_origin {
+        method POST PUT PATCH DELETE
+        not header Origin https://codex.example.com
+    }
+    route {
+        redir @insecure https://codex.example.com{uri} 308
+        basic_auth bcrypt "Codex Web" {
+            {env.CODEX_WEB_LOGIN_USERNAME} {env.CODEX_WEB_LOGIN_PASSWORD_HASH}
+        }
+        respond @wrong_ws_origin "Forbidden" 403
+        respond @wrong_write_origin "Forbidden" 403
+        reverse_proxy codex-web:8000 {
+            header_up -Authorization
+            header_up X-Forwarded-Proto https
+        }
+    }
+}
+
+:8080 {
+    respond "Unknown host" 404
+}

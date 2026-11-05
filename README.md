@@ -411,8 +411,14 @@ web service if historical downloads and previews should remain available.
 
 ## Security
 
-The UI is unauthenticated and listens on all interfaces. Keep it behind a VPN
-or firewall.
+The UI is unauthenticated by default and listens on all interfaces. Keep it
+behind a VPN, firewall, or authenticated reverse proxy.
+
+The optional [website session login](docs/session-login.md) adds a normal sign-in
+form and persistent browser cookies in front of an existing Basic Auth gateway.
+It covers HTTP and WebSocket requests without repeated browser password prompts.
+It protects access to a shared workspace; it does not create separate Codex
+accounts or change the OpenAI account used by the app-server.
 
 ## Development
 
