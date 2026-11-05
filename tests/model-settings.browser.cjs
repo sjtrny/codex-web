@@ -49,6 +49,7 @@ async function main() {
       if (message.id === undefined) return;
       let result = {};
       switch (message.method) {
+        case "account/read": result = { account: null, requiresOpenaiAuth: false }; break;
         case "model/list":
           if (failRefresh && message.params.cursor) {
             ws.send(JSON.stringify({ id: message.id, error: { code: -32000, message: "Catalog temporarily unavailable" } }));
@@ -61,6 +62,7 @@ async function main() {
         case "thread/list": result = { data: [] }; break;
         case "thread/start": result = { thread: { id: "synthetic-model-check", cwd: "/workspaces", turns: [], status: { type: "idle" } } }; break;
         case "turn/start": result = { turn: { id: "synthetic-turn", status: "completed", items: [] } }; break;
+        case "account/rateLimits/read": result = {}; break;
         case "initialize": case "config/read": case "configRequirements/read": case "permissionProfile/list": break;
         default: throw new Error(`Unexpected request: ${message.method}`);
       }

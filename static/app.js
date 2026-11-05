@@ -15,6 +15,10 @@ const THREAD_LIST_PARAMS = Object.freeze({
 const CHAT_SETTINGS_STORAGE_KEY = "codex-web-chat-settings-v1";
 const PINNED_THREADS_STORAGE_KEY = "codex-web-pinned-threads-v1";
 const MESSAGE_TIMES_STORAGE_KEY = "codex-web-message-times-v1";
+const TURN_MODELS_STORAGE_KEY = "codex-web-turn-models-v1";
+const TURN_MODELS_LIMIT = 2000;
+const USAGE_LIMIT_STORAGE_KEY = "codex-web-usage-limit-v1";
+const USAGE_LIMIT_REFRESH_MS = 30000;
 const MESSAGE_TIMES_LIMIT = 2000;
 const MESSAGE_TIME_FORMAT = new Intl.DateTimeFormat(undefined, {
   year: "numeric", month: "short", day: "numeric",
@@ -147,6 +151,8 @@ const ui = {
   settingPermissions: el("setting-permissions"),
   settingsNote: el("settings-note"),
   notice: el("notice"),
+  usageLimitWarning: el("usage-limit-warning"),
+  usageLimitDetail: el("usage-limit-detail"),
   messages: el("messages"),
   thinkingIndicator: el("thinking-indicator"),
   thinkingLabel: el("thinking-label"),
@@ -173,6 +179,8 @@ const state = {
   threadId: null,
   activeTurns: new Map(),
   activeModels: new Map(),
+  chatModels: new Map(),
+  turnModels: loadTurnModels(),
   liveThreadStatuses: new Map(),
   submittingThreads: new Set(),
   forkingThreads: new Set(),
@@ -185,10 +193,20 @@ const state = {
   selectionId: 0,
   threads: [],
   pinnedThreads: new Set(),
+  serverPinnedThreads: new Set(),
+  pinsPending: new Map(),
+  pinsLoaded: false,
+  pinsRevision: -1,
+  pinsStoreId: null,
+  pinsSyncPromise: null,
   threadNodes: new Map(),
   provisionalThreads: new Map(),
   threadRefreshId: 0,
+  threadListHttp: false,
+  startupThreadList: null,
   threadCache: new Map(),
+  threadQuestionTurns: new Map(),
+  threadQuestionReads: new Map(),
   threadReconciliations: new Map(),
   connectionGeneration: 0,
   models: [],
@@ -238,7 +256,23 @@ const state = {
   lastMessagesScrollTop: 0,
   messagesTouchY: null,
   connectionStatus: "offline",
+  usageLimitWarning: null,
+  usageAccountId: null,
+  usageRevision: 0,
+  usageRequest: null,
+  usageRefreshTimer: null,
 };
+
+const accountControls = globalThis.CodexAccount?.create({
+  rpc,
+  openSettings: () => setPreferencesOpen(true),
+  onSignedIn: () => {
+    if (/access token|refresh token|unauthorized|sign in|not logged in/i.test(ui.notice.textContent)) notice("");
+    // A response requested for the previous account must not restore its catalog.
+    state.settingsCatalogRequest = null;
+    void loadChatSettingsCatalog();
+  },
+});
 
 function setStatus(_text, kind) {
   state.connectionStatus = kind;
@@ -276,6 +310,7 @@ function renderThemeControl() {
 function setPreferencesOpen(open, moveFocus = true) {
   if (open) {
     renderThemeControl();
+    void accountControls?.refresh();
     ui.preferencesToggle.setAttribute("aria-expanded", "true");
     if (!ui.preferencesDialog.open) {
       if (typeof ui.preferencesDialog.showModal === "function") {
@@ -306,6 +341,146 @@ function focusPreferencesReturnTarget() {
 function notice(text = "") {
   ui.notice.textContent = text;
   ui.notice.hidden = !text;
+}
+
+function renderUsageLimitWarning() {
+  const warning = state.usageLimitWarning;
+  ui.usageLimitWarning.hidden = !warning;
+  if (!warning) {
+    ui.usageLimitDetail.textContent = "";
+    return;
+  }
+  const parts = [warning.limitName ? `${warning.limitName}.` : "Some requests may be unavailable."];
+  if (warning.resetsAt) {
+    const reset = new Date(warning.resetsAt * 1000);
+    parts.push(reset.getTime() > Date.now()
+      ? `Expected reset: ${reset.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}.`
+      : "The reset time has passed; waiting for usage availability to be confirmed.");
+  }
+  parts.push("Availability is checked automatically.");
+  ui.usageLimitDetail.textContent = parts.join(" ");
+}
+
+function saveUsageLimitWarning() {
+  try {
+    localStorage.setItem(USAGE_LIMIT_STORAGE_KEY, JSON.stringify({
+      accountId: state.usageAccountId, warning: state.usageLimitWarning,
+    }));
+  } catch { /* Keep the warning in this tab when browser storage is unavailable. */ }
+}
+
+function setUsageLimitWarning(warning, newError = false) {
+  if (newError || JSON.stringify(warning) !== JSON.stringify(state.usageLimitWarning)) state.usageRevision += 1;
+  state.usageLimitWarning = warning;
+  renderUsageLimitWarning();
+  saveUsageLimitWarning();
+}
+
+function loadUsageLimitWarning() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(USAGE_LIMIT_STORAGE_KEY));
+    if (!saved || typeof saved !== "object") return;
+    const accountId = typeof saved.accountId === "string" ? saved.accountId : null;
+    if (state.usageAccountId && accountId !== state.usageAccountId) return;
+    const warning = saved.warning;
+    if (warning !== null && (!warning || typeof warning !== "object")) return;
+    state.usageAccountId = accountId;
+    state.usageLimitWarning = warning ? {
+      limitName: typeof warning.limitName === "string" ? warning.limitName.slice(0, 300) : "",
+      resetsAt: validUsageReset(warning.resetsAt),
+    } : null;
+    state.usageRevision += 1;
+    renderUsageLimitWarning();
+  } catch { /* Ignore unavailable or malformed browser storage. */ }
+}
+
+function handleUsageLimitStorage(event) {
+  if (event.key === USAGE_LIMIT_STORAGE_KEY) loadUsageLimitWarning();
+}
+
+function validUsageReset(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 && value < 8640000000000
+    ? value : null;
+}
+
+function applyUsageLimits(result) {
+  if (!result || typeof result !== "object") return;
+  const accountId = typeof result.accountId === "string" ? result.accountId : null;
+  if (accountId) {
+    const changed = state.usageAccountId && state.usageAccountId !== accountId;
+    state.usageAccountId = accountId;
+    if (changed) setUsageLimitWarning(null);
+  }
+  // Only an explicit backend permission confirms recovery. Sparse snapshots,
+  // rounded percentages and elapsed reset times must not dismiss a warning.
+  if (result.ordinaryUsageAllowed === true) {
+    setUsageLimitWarning(null);
+    return;
+  }
+  const buckets = [result.rateLimits, ...Object.values(result.rateLimitsByLimitId || {})]
+    .filter((bucket) => bucket && typeof bucket === "object");
+  const exhausted = buckets.filter((bucket) => bucket.rateLimitReachedType
+    || bucket.spendControlReached === true || bucket.individualLimit?.remainingPercent === 0
+    || [bucket.primary, bucket.secondary].some((window) => window?.usedPercent >= 100));
+  if (result.ordinaryUsageAllowed !== false && !exhausted.length) return;
+  const resets = exhausted.flatMap((bucket) => [
+    ...[bucket.primary, bucket.secondary].filter((window) => window?.usedPercent >= 100).map((window) => window.resetsAt),
+    ...(bucket.individualLimit?.remainingPercent === 0 ? [bucket.individualLimit.resetsAt] : []),
+  ]).map(validUsageReset).filter(Boolean);
+  const names = [...new Set(exhausted.map((bucket) => bucket.limitName).filter((name) => typeof name === "string" && name))];
+  setUsageLimitWarning({
+    limitName: names.join(", ").slice(0, 300),
+    resetsAt: resets.length ? Math.max(...resets) : state.usageLimitWarning?.resetsAt || null,
+  });
+}
+
+function observeUsageLimitError(error) {
+  if (!error || typeof error !== "object") return false;
+  const info = error.codexErrorInfo || error.data?.codexErrorInfo;
+  const message = typeof error.message === "string" ? error.message : "";
+  // Ordinary request throttling, context limits and per-session budgets are
+  // not account usage exhaustion. Older backends may expose only this text.
+  const exhausted = info === "usageLimitExceeded"
+    || (!info && /\b(?:you(?:'|’)ve|you have) hit your usage limit\b|\busage limit (?:has been )?(?:reached|exceeded)\b|\binsufficient_quota\b/i.test(message));
+  if (exhausted) setUsageLimitWarning(state.usageLimitWarning || { limitName: "", resetsAt: null }, true);
+  if (exhausted || info === "rateLimitExceeded") void refreshUsageLimits();
+  return exhausted;
+}
+
+function scheduleUsageLimitsRefresh(delay = USAGE_LIMIT_REFRESH_MS) {
+  window.clearTimeout(state.usageRefreshTimer);
+  if (!state.ready) return;
+  state.usageRefreshTimer = window.setTimeout(() => {
+    if (document.visibilityState === "hidden") scheduleUsageLimitsRefresh();
+    else void refreshUsageLimits();
+  }, delay);
+}
+
+function refreshUsageLimits() {
+  if (!state.ready) return Promise.resolve();
+  if (state.usageRequest?.socket === state.ws) return state.usageRequest.promise;
+  window.clearTimeout(state.usageRefreshTimer);
+  const request = { socket: state.ws, revision: state.usageRevision, promise: null };
+  state.usageRequest = request;
+  let superseded = false;
+  request.promise = rpc("account/rateLimits/read", { excludeResetCreditDetails: true }, 15000)
+    .then((result) => {
+      if (state.ws !== request.socket) return;
+      superseded = request.revision !== state.usageRevision;
+      if (!superseded) applyUsageLimits(result);
+    }).catch(() => {
+      // Limit checks must neither interrupt chat nor erase a known warning.
+    }).finally(() => {
+      if (state.usageRequest !== request) return;
+      state.usageRequest = null;
+      renderUsageLimitWarning();
+      scheduleUsageLimitsRefresh(superseded ? 0 : USAGE_LIMIT_REFRESH_MS);
+    });
+  return request.promise;
+}
+
+function refreshUsageLimitsWhenVisible() {
+  if (document.visibilityState !== "hidden") void refreshUsageLimits();
 }
 
 function selectedThreadForking() {
@@ -367,9 +542,12 @@ function pendingAsyncQuestions(threadId) {
   if (!state.activeTurns.has(threadId)) return [];
   const entry = cachedThread(threadId, false);
   const turnId = state.activeTurns.get(threadId);
-  const turn = turnId
+  const cachedTurn = turnId
     ? findCachedTurn(entry, turnId)
     : [...(entry?.thread.turns || [])].reverse().find((item) => item.status === "inProgress");
+  const summary = state.threadQuestionTurns.get(threadId);
+  const turn = summary ? summary.turn : cachedTurn;
+  if (turnId && turn?.id !== turnId) return [];
   if (!turn || turn.status !== "inProgress") return [];
   let questions = [];
   for (const item of turn.items || []) {
@@ -383,6 +561,101 @@ function pendingAsyncQuestions(threadId) {
     .flatMap((pending) => pending.asyncQuestionIds || [])
     .map((id) => String(resolvedThreadItemId(threadId, turn.id, id))));
   return questions.filter((question) => !answered.has(String(question.id)));
+}
+
+function rememberThreadQuestions(thread, partial = false) {
+  const turn = [...(thread.turns || [])].reverse().find((item) => item.status === "inProgress");
+  const items = (turn?.items || []).filter((item) => item.type === "userMessage"
+    || (item.type === "agentMessage" && (item.questions?.length || item.phase === "final_answer")))
+    .map(({ id, type, phase, questions }) => ({ id, type, phase, questions }));
+  // Metadata and partial history may not yet contain the question or its answer.
+  if (partial && !items.length) return;
+  // Keep only question-related messages, independently of the bounded history
+  // cache, so unopened chats and evicted histories can still show their badge.
+  state.threadQuestionTurns.set(thread.id, {
+    generation: state.connectionGeneration,
+    turn: turn ? {
+      id: turn.id, status: turn.status,
+      items,
+    } : null,
+  });
+}
+
+function rememberQuestionItem({ threadId, turnId, item }) {
+  if (!threadId || !turnId || !item?.id) return;
+  item = {
+    id: resolvedThreadItemId(threadId, turnId, item.id),
+    type: item.type,
+    ...(item.phase === undefined ? {} : { phase: item.phase }),
+    ...(item.questions === undefined ? {} : { questions: item.questions }),
+  };
+  const previous = state.threadQuestionTurns.get(threadId);
+  const turn = previous?.turn?.id === turnId ? previous.turn : { id: turnId, status: "inProgress", items: [] };
+  const index = turn.items.findIndex((entry) => String(entry.id) === String(item.id));
+  if (index < 0 && item.type !== "userMessage"
+    && !(item.type === "agentMessage" && (item.questions?.length || item.phase === "final_answer"))) return;
+  const items = [...turn.items];
+  if (index < 0) items.push(item);
+  else items[index] = mergeThreadItem(item, items[index]);
+  state.threadQuestionTurns.set(threadId, { generation: previous?.generation, turn: { ...turn, items } });
+  renderThreads(state.threads);
+}
+
+function threadHasPendingQuestions(thread) {
+  if ([...state.requestCards.values()].some((request) => request.requestKind === "input"
+    && request.requestParams.threadId === thread.id
+    && request.inputIndex < (request.requestParams.questions || []).length)) return true;
+  if (pendingAsyncQuestions(thread.id).length) return true;
+  const summary = state.threadQuestionTurns.get(thread.id);
+  const turnId = state.activeTurns.get(thread.id);
+  if (state.activeTurns.has(thread.id) && summary?.pending
+    && (!turnId || summary.turnId === turnId)) return true;
+  const status = state.liveThreadStatuses.get(thread.id) || thread.status;
+  return status?.type === "active" && status.activeFlags?.includes("waitingOnUserInput");
+}
+
+async function refreshThreadQuestions(threads) {
+  for (const thread of threads) {
+    if (!state.activeTurns.has(thread.id)) {
+      reconcileRequestsFromThread({ id: thread.id, status: state.liveThreadStatuses.get(thread.id) || thread.status });
+    }
+  }
+  // Only a compact status crosses the mobile connection. The proxy inspects the
+  // latest turn without resuming tasks; newer live events take priority.
+  for (const thread of threads) {
+    if (!state.ready) return;
+    if (!state.activeTurns.has(thread.id)) continue;
+    if (thread.id === state.threadId && !state.historyChunkBytes) continue;
+    const previous = state.threadQuestionTurns.get(thread.id);
+    if (previous?.generation === state.connectionGeneration) continue;
+    const existing = state.threadQuestionReads.get(thread.id);
+    if (existing) { await existing; continue; }
+    const generation = state.connectionGeneration;
+    const read = Promise.resolve().then(async () => {
+      try {
+        const response = await fetch("/api/thread-questions", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ threadId: thread.id }), cache: "no-store",
+        });
+        if (!response.ok) throw new Error("Question status unavailable");
+        const result = await response.json();
+        if (generation !== state.connectionGeneration || !state.ready
+          || !state.activeTurns.has(thread.id)
+          || state.threadQuestionTurns.get(thread.id) !== previous
+          || result?.threadId !== thread.id || typeof result.pending !== "boolean"
+          || (state.activeTurns.get(thread.id) && result.turnId !== state.activeTurns.get(thread.id))) return;
+        state.threadQuestionTurns.set(thread.id, { generation, turnId: result.turnId, pending: result.pending });
+        renderThreads(state.threads);
+        updateControls();
+      } catch {
+        // Existing live questions and status flags remain usable if history is unavailable.
+      } finally {
+        if (state.threadQuestionReads.get(thread.id) === read) state.threadQuestionReads.delete(thread.id);
+      }
+    });
+    state.threadQuestionReads.set(thread.id, read);
+    await read;
+  }
 }
 
 function inputQuestionText(question) {
@@ -529,6 +802,7 @@ function clearThreadActivity(threadId) {
   state.submittingThreads.delete(threadId);
   state.activeTurns.delete(threadId);
   state.activeModels.delete(threadId);
+  state.threadQuestionTurns.delete(threadId);
   rememberThreadStatus(threadId, { type: "idle" });
   renderThreads(state.threads);
   updateControls();
@@ -850,6 +1124,7 @@ function threadContainsPendingUser(thread, pending) {
 
 function cacheThreadSnapshot(thread) {
   if (!thread?.id) return null;
+  rememberChatModel(thread.id, thread.model);
   reconcileSteersFromThread(thread);
   reconcileRequestsFromThread(thread);
   const previous = state.threadCache.get(thread.id);
@@ -864,12 +1139,14 @@ function cacheThreadSnapshot(thread) {
     history: previous?.history || null,
   };
   state.threadCache.set(thread.id, entry);
+  rememberThreadQuestions(thread, state.historyChunkBytes > 0);
   pruneThreadCache();
   return entry;
 }
 
 function mergeThreadSnapshot(thread) {
   if (!thread?.id) return null;
+  rememberChatModel(thread.id, thread.model);
   const previous = state.threadCache.get(thread.id);
   if (!previous) return cacheThreadSnapshot(thread);
   const itemAliases = previous.itemAliases || new Map();
@@ -886,6 +1163,7 @@ function mergeThreadSnapshot(thread) {
     entry.pendingUser = null;
   }
   state.threadCache.set(thread.id, entry);
+  rememberThreadQuestions(entry.thread, state.historyChunkBytes > 0);
   reconcileSteersFromThread(entry.thread);
   reconcileRequestsFromThread(entry.thread);
   pruneThreadCache();
@@ -998,6 +1276,7 @@ function cacheTurnUpdate(
   preserveStreamedItems = false,
 ) {
   const entry = cachedThread(threadId, false);
+  rememberTurnModel(threadId, turn?.id, turn?.model);
   if (!entry || !turn?.id) return null;
   if (!Array.isArray(entry.thread.turns)) entry.thread.turns = [];
   let cached = findCachedTurn(entry, turn.id);
@@ -1027,6 +1306,7 @@ function cacheTurnUpdate(
 }
 
 function cacheItemUpdate(params) {
+  rememberQuestionItem(params);
   reconcilePendingSteer(params.threadId, params.turnId, params.item);
   const entry = cachedThread(params.threadId, false);
   const item = params.item;
@@ -1155,6 +1435,7 @@ function normalizeChatSettings(value = {}) {
 function effectiveChatSettings(value = {}) {
   const overrides = normalizeChatSettings(value);
   const effective = normalizeChatSettings(state.chatDefaults);
+  if (state.threadId) effective.model = state.chatModels.get(state.threadId) || "";
   for (const field of CHAT_SETTING_FIELDS) {
     if (overrides[field]) effective[field] = overrides[field];
   }
@@ -1180,6 +1461,19 @@ function currentChatSettings() {
   return state.settingsByThread.get(state.threadId);
 }
 
+function rememberChatModel(threadId, model) {
+  if (!threadId || !validTurnModel(model) || state.chatModels.get(threadId) === model) return;
+  state.chatModels.set(threadId, model);
+  if (state.threadId === threadId) renderChatSettings();
+}
+
+function threadWithModel(result) {
+  const thread = result?.thread;
+  // Older app-servers expose the resolved model on the resume/start response.
+  return thread && !validTurnModel(thread.model) && validTurnModel(result.model)
+    ? { ...thread, model: result.model } : thread;
+}
+
 function refreshActiveModel(threadId, force = false) {
   if (!state.ready || !state.activeTurns.has(threadId)) return;
   const turnId = state.activeTurns.get(threadId);
@@ -1193,9 +1487,14 @@ function refreshActiveModel(threadId, force = false) {
   const record = { turnId, generation, pending: true, model: "", effort: "", promise: null };
   state.activeModels.set(threadId, record);
   record.promise = rpc("thread/read", { threadId, includeTurns: false }).then(({ thread }) => {
-    if (thread?.id === threadId && thread.status?.type === "active") {
+    if (thread?.id === threadId && thread.status?.type === "active"
+      && state.ready && generation === state.connectionGeneration
+      && state.activeModels.get(threadId) === record
+      && state.activeTurns.has(threadId) && state.activeTurns.get(threadId) === turnId) {
       if (typeof thread.model === "string") record.model = thread.model;
       if (typeof thread.reasoningEffort === "string") record.effort = thread.reasoningEffort;
+      rememberChatModel(threadId, record.model);
+      rememberTurnModel(threadId, turnId, record.model);
     }
   }).catch(() => {
     // Missing metadata is shown explicitly. Opening settings retries the read.
@@ -1212,7 +1511,7 @@ function refreshActiveModel(threadId, force = false) {
 function renderModelStatus() {
   const settings = effectiveChatSettings(currentChatSettings());
   const selected = settings.model;
-  const selectedLabel = chatSettingValueLabel("model", selected);
+  const selectedLabel = !selected && state.threadId ? "Chat model" : chatSettingValueLabel("model", selected);
   const unavailable = selected && state.modelsLoaded
     && !state.models.some((model) => model.model === selected || model.id === selected);
   const selectedText = `${selectedLabel}${unavailable ? " (unavailable)" : ""}`;
@@ -1278,7 +1577,8 @@ function loadStoredChatSettings() {
     const stored = JSON.parse(localStorage.getItem(CHAT_SETTINGS_STORAGE_KEY) || "{}");
     state.newThreadSettings = normalizeChatSettings(stored.newThread);
     for (const [threadId, settings] of Object.entries(stored.threads || {})) {
-      state.settingsByThread.set(threadId, normalizeChatSettings(settings));
+      // A previous device-local model must never override the chat's saved model.
+      state.settingsByThread.set(threadId, normalizeChatSettings({ ...settings, model: "" }));
     }
   } catch {
     state.newThreadSettings = emptyChatSettings();
@@ -1289,7 +1589,8 @@ function loadStoredChatSettings() {
 function persistChatSettings() {
   if (globalThis.CODEX_WEB_TEST) return;
   try {
-    const threads = Object.fromEntries([...state.settingsByThread.entries()].slice(-200));
+    const threads = Object.fromEntries([...state.settingsByThread.entries()].slice(-200)
+      .map(([id, settings]) => [id, { ...settings, model: "" }]));
     localStorage.setItem(CHAT_SETTINGS_STORAGE_KEY, JSON.stringify({
       newThread: state.newThreadSettings,
       threads,
@@ -1301,9 +1602,9 @@ function persistChatSettings() {
 
 function modelForSettings(settings) {
   const modelId = settings.model
-    || state.chatDefaults.model
-    || state.configDefaults.model
-    || state.models.find((model) => model.isDefault)?.model;
+    || (state.threadId ? state.chatModels.get(state.threadId)
+      : state.chatDefaults.model || state.configDefaults.model
+        || state.models.find((model) => model.isDefault)?.model);
   return state.models.find((model) => model.model === modelId || model.id === modelId) || null;
 }
 
@@ -1326,6 +1627,11 @@ function chatSettingValueLabel(field, value) {
 }
 
 function defaultChatSettingOption(field) {
+  if (field === "model" && state.threadId) {
+    const model = state.chatModels.get(state.threadId);
+    return { value: "", label: model
+      ? `Chat model — ${chatSettingValueLabel("model", model)}` : "Chat model — saved on server" };
+  }
   const desired = state.chatDefaults[field];
   const effective = effectiveChatSettings({ ...currentChatSettings(), [field]: "" });
   const value = ["effort", "serviceTier"].includes(field) ? effective[field] : desired;
@@ -1427,8 +1733,9 @@ function renderChatSettings() {
   ui.settingServiceTier.disabled = false;
 
   const effective = effectiveChatSettings(settings);
-  ui.modelHelp.textContent = model?.description || (state.modelsLoaded
-    ? "This model is unavailable. Refresh models or choose another model." : "");
+  ui.modelHelp.textContent = model ? model.description || "" : (state.threadId && !effective.model
+    ? "This chat keeps its saved model. Select another model to change it."
+    : state.modelsLoaded ? "This model is unavailable. Refresh models or choose another model." : "");
   ui.effortHelp.textContent = efforts.find(
     (entry) => entry.reasoningEffort === (effective.effort || model?.defaultReasoningEffort),
   )?.description || "";
@@ -1466,7 +1773,10 @@ function renderChatSettings() {
 
   const count = CHAT_SETTING_FIELDS.filter((field) => settings[field]).length;
   const unavailable = !personalitySupported ? " Personality is unavailable for this model." : "";
-  ui.settingsNote.textContent = `${count || "No"} override${count === 1 ? "" : "s"} set. Instance defaults apply wherever Default is selected. Tool activity visibility changes immediately. Other changes apply to the next new turn, not replies sent while Codex works. Settings remain with this chat.${unavailable}`;
+  const modelNote = state.threadId
+    ? "The chat model follows the last-used model across devices. A new choice is saved when the next turn starts."
+    : "Instance defaults apply wherever Default is selected.";
+  ui.settingsNote.textContent = `${count || "No"} override${count === 1 ? "" : "s"} set. ${modelNote} Tool activity visibility changes immediately. Other changes apply to the next new turn, not replies sent while Codex works. Settings remain with this chat.${unavailable}`;
   renderModelStatus();
   persistChatSettings();
 }
@@ -1582,7 +1892,7 @@ async function refreshChatSettingsCatalog(request) {
       rpc("configRequirements/read", {}),
       rpc("permissionProfile/list", { cwd: currentWorkingFolder() }),
     ]);
-    if (state.ws !== request.socket) return;
+    if (state.ws !== request.socket || state.settingsCatalogRequest !== request) return;
     if (models.status === "fulfilled") {
       state.models = models.value;
       state.modelsLoaded = true;
@@ -2818,11 +3128,21 @@ async function connect() {
       state.connectionGeneration += 1;
       state.ready = true;
       setStatus("connected", "online");
+      accountControls?.connectionChanged(true);
       notice("");
       updateControls();
-      await loadChatSettingsCatalog();
-      await refreshThreads();
-      if (state.threadId) await openThread(state.threadId, false);
+      void refreshUsageLimits();
+      const listing = state.startupThreadList
+        ? state.startupThreadList.then((loaded) => loaded === false && state.ready ? refreshThreads() : undefined)
+        : loadPinnedThreads(false).then(refreshThreads);
+      state.startupThreadList = null;
+      // A slow model catalog or a long pinned-chat listing must not delay the
+      // selected conversation. The HTTP sidebar may already be loading.
+      await Promise.all([
+        loadChatSettingsCatalog(),
+        listing.then(() => refreshThreadQuestions(state.threads)),
+        state.threadId ? openThread(state.threadId, false) : Promise.resolve(),
+      ]);
     } catch (error) {
       notice(error.message);
       socket.close();
@@ -2840,9 +3160,12 @@ async function connect() {
   socket.addEventListener("close", () => {
     if (state.ws !== socket) return;
     state.ready = false;
+    accountControls?.connectionChanged(false);
+    window.clearTimeout(state.usageRefreshTimer);
     state.activeTurns.clear();
     state.activeModels.clear();
     state.liveThreadStatuses.clear();
+    state.threadQuestionReads.clear();
     state.threadRefreshId += 1;
     state.submittingThreads.clear();
     state.submittingViews.clear();
@@ -2865,7 +3188,16 @@ function handleMessage(message) {
     if (!pending) return;
     window.clearTimeout(pending.timer);
     state.pending.delete(message.id);
-    if (message.error) pending.reject(new Error(message.error.message || "Codex request failed"));
+    if (message.error) {
+      if (["turn/start", "turn/steer", "thread/start", "thread/resume"].includes(pending.method)) {
+        observeUsageLimitError(message.error);
+      }
+      accountControls?.observeError(message.error, pending.method);
+      const error = new Error(message.error.message || "Codex request failed");
+      error.data = message.error.data;
+      error.codexErrorInfo = message.error.codexErrorInfo;
+      pending.reject(error);
+    }
     else pending.resolve(message.result);
     return;
   }
@@ -2906,7 +3238,7 @@ function reconcileThreadHistory(threadId) {
       ) break;
       const selected = state.threadId === threadId;
       if (selected) saveCurrentThreadView();
-      entry = mergeThreadSnapshot(result.thread) || entry;
+      entry = mergeThreadSnapshot(threadWithModel(result)) || entry;
       if (selected && state.threadId === threadId) renderCachedThread(entry);
     } while (reconciliation.queued && state.ready);
     return entry;
@@ -2923,7 +3255,25 @@ function reconcileThreadHistory(threadId) {
 }
 
 function handleNotification(method, params) {
+  accountControls?.notification(method, params);
   switch (method) {
+    case "codex-web/pins/updated":
+      if (applyPinnedThreads(params)) void refreshThreads();
+      return;
+    case "account/rateLimits/updated":
+      applyUsageLimits(params);
+      if (state.usageLimitWarning) void refreshUsageLimits();
+      return;
+    case "account/updated":
+      // This event also covers plan changes and does not identify the account.
+      // Keep its warning until a fresh read confirms recovery or a new account.
+      state.usageRevision += 1;
+      if (params.authMode === null) {
+        state.usageAccountId = null;
+        setUsageLimitWarning(null);
+      }
+      void refreshUsageLimits();
+      return;
     case "codex-web/connected":
       return;
     case "codex-web/error":
@@ -2940,18 +3290,18 @@ function handleNotification(method, params) {
       refreshThreads();
       return;
     case "thread/archived":
-      setThreadPinned(params.threadId, false);
       state.provisionalThreads.delete(params.threadId);
       refreshThreads();
       return;
     case "thread/deleted":
-      setThreadPinned(params.threadId, false);
       removeRequestsForTurn(params.threadId);
       state.liveThreadStatuses.delete(params.threadId);
       state.activeTurns.delete(params.threadId);
       state.activeModels.delete(params.threadId);
+      state.chatModels.delete(params.threadId);
       state.provisionalThreads.delete(params.threadId);
       state.threadCache.delete(params.threadId);
+      state.threadQuestionTurns.delete(params.threadId);
       state.threadReconciliations.delete(params.threadId);
       state.composerDrafts.delete(threadComposerKey(params.threadId));
       state.composerAttachmentDrafts.delete(threadComposerKey(params.threadId));
@@ -2968,6 +3318,7 @@ function handleNotification(method, params) {
       } else {
         state.activeTurns.delete(params.threadId);
         state.activeModels.delete(params.threadId);
+        state.threadQuestionTurns.delete(params.threadId);
         removeRequestsForTurn(params.threadId);
       }
       renderThreads(state.threads);
@@ -2975,8 +3326,14 @@ function handleNotification(method, params) {
       refreshThreads();
       return;
     case "turn/started":
-      cacheTurnUpdate(params.threadId, params.turn || {});
       {
+        const summary = state.threadQuestionTurns.get(params.threadId);
+        const previous = summary?.turn;
+        const turn = cacheTurnUpdate(params.threadId, params.turn || {})
+          || (previous?.id === params.turn?.id ? mergeTurnSnapshot(params.turn, previous, null, false) : params.turn);
+        if (turn?.id) rememberThreadQuestions(
+          { id: params.threadId, turns: [{ ...turn, status: "inProgress" }] }, summary?.turnId === turn.id,
+        );
         const hasLocalPrompt = setPendingUserTurn(params.threadId, params.turn?.id);
         if (!hasLocalPrompt) void reconcileThreadHistory(params.threadId);
       }
@@ -2984,6 +3341,7 @@ function handleNotification(method, params) {
       refreshThreads();
       return;
     case "turn/completed":
+      observeUsageLimitError(params.turn?.error);
       // item/* notifications are the ordering authority for a live turn. The
       // completion snapshot can omit live-only tools and use canonical IDs, so
       // replacing the streamed sequence here would move those tools after the
@@ -3075,6 +3433,9 @@ function handleNotification(method, params) {
       removeRequest(params.requestId);
       return;
     case "error":
+      observeUsageLimitError(params.error || params);
+      notice(params.message || params.error?.message || method);
+      return;
     case "warning":
       notice(params.message || params.error?.message || method);
       return;
@@ -3084,6 +3445,7 @@ function handleNotification(method, params) {
 }
 
 function clearMessages() {
+  globalThis.CodexMarkdown?.closeExpandedTable?.(false);
   for (const entry of state.items.values()) {
     if (entry.renderFrame && globalThis.window?.cancelAnimationFrame) {
       window.cancelAnimationFrame(entry.renderFrame);
@@ -3194,6 +3556,7 @@ function jumpToPresent() {
 
 function presentContentChanged(shouldFollow = state.followPresent) {
   if (state.renderTarget) return;
+  if (globalThis.CodexMarkdown?.isTableExpanded?.()) shouldFollow = false;
   if (shouldFollow && state.followPresent) {
     jumpToPresent();
   } else {
@@ -3365,6 +3728,59 @@ function itemMessageTime(itemId, threadId, turnId, item = null) {
   return state.messageTimes.get(renderedItemKey(itemId, threadId, turnId)) || null;
 }
 
+function turnModelKey(threadId, turnId) {
+  return JSON.stringify([threadId, turnId]);
+}
+
+function validTurnModel(model) {
+  return typeof model === "string" && model.trim().length > 0 && model.length <= 256;
+}
+
+function loadTurnModels() {
+  const models = new Map();
+  try {
+    const stored = JSON.parse(localStorage.getItem(TURN_MODELS_STORAGE_KEY) || "[]");
+    if (!Array.isArray(stored)) return models;
+    for (const record of stored.slice(-TURN_MODELS_LIMIT)) {
+      if (!Array.isArray(record)) continue;
+      const [key, model] = record;
+      if (typeof key !== "string" || key.length > 1024 || !validTurnModel(model)) continue;
+      models.set(key, model);
+    }
+  } catch {
+    // Confirmed models still work within this page when storage is unavailable.
+  }
+  return models;
+}
+
+function rememberTurnModel(threadId, turnId, model) {
+  if (!threadId || !turnId || !validTurnModel(model)) return;
+  const key = turnModelKey(threadId, turnId);
+  if (state.turnModels.get(key) === model) return;
+  state.turnModels.set(key, model);
+  while (state.turnModels.size > TURN_MODELS_LIMIT) {
+    state.turnModels.delete(state.turnModels.keys().next().value);
+  }
+  try {
+    localStorage.setItem(TURN_MODELS_STORAGE_KEY, JSON.stringify([...state.turnModels]));
+  } catch {
+    // Retain the confirmed value in memory if persistence is disabled or full.
+  }
+  for (const entry of state.items.values()) {
+    if (entry.threadId === threadId && entry.turnId === turnId) renderMessageModel(entry);
+  }
+}
+
+function renderMessageModel(entry) {
+  if (!entry.modelLabel) return;
+  const turn = findCachedTurn(cachedThread(entry.threadId, false), entry.turnId);
+  const model = validTurnModel(turn?.model) ? turn.model
+    : state.turnModels.get(turnModelKey(entry.threadId, entry.turnId));
+  entry.modelLabel.textContent = model ? chatSettingValueLabel("model", model) : "Model unavailable";
+  entry.modelLabel.title = model ? `Model used for this turn: ${model}`
+    : "The model used for this turn was not recorded. It cannot be inferred from current settings.";
+}
+
 function renderMessageTimestamp(entry, time) {
   const key = time ? `${time.at}:${time.source}` : "unavailable";
   if (entry.timestampKey === key) return;
@@ -3409,7 +3825,8 @@ function renderMessageBody(entry, role) {
     const shouldFollow = shouldFollowMessages();
     entry.renderFrame = null;
     entry.body.classList.remove("plain-text");
-    entry.body.replaceChildren(renderMarkdown(entry.text));
+    if (globalThis.CodexMarkdown?.renderInto) globalThis.CodexMarkdown.renderInto(entry.body, entry.text);
+    else entry.body.replaceChildren(renderMarkdown(entry.text));
     presentContentChanged(shouldFollow);
   };
   if (state.renderTarget || typeof window.requestAnimationFrame !== "function") {
@@ -3483,6 +3900,11 @@ function upsertMessage(
     const timestamp = document.createElement("time");
     timestamp.className = "message-timestamp";
     header.append(label, timestamp);
+    const modelLabel = role === "agent" ? document.createElement("span") : null;
+    if (modelLabel) {
+      modelLabel.className = "message-model";
+      header.append(modelLabel);
+    }
     const body = document.createElement("div");
     body.className = "body";
     const attachmentList = document.createElement("div");
@@ -3497,6 +3919,7 @@ function upsertMessage(
       itemKey,
       phase,
       timestamp,
+      modelLabel,
       responseToolbar: null,
       forkButton: null,
       forkButtonLabel: null,
@@ -3513,6 +3936,7 @@ function upsertMessage(
   }
   if (phase !== null && phase !== undefined) entry.phase = phase;
   renderMessageTimestamp(entry, messageTime === undefined ? itemMessageTime(id, threadId, turnId) : messageTime);
+  renderMessageModel(entry);
   syncResponseToolbar(entry);
   entry.text = append ? entry.text + (text || "") : (text || "");
   if (attachments !== null) {
@@ -3996,6 +4420,8 @@ function applyHistoryChunk(entry, page, older = false, fragment = "", beforeRequ
   }
   reconcileSteersFromThread(entry.thread);
   reconcileRequestsFromThread(entry.thread);
+  rememberThreadQuestions(entry.thread, Boolean(page.cursor));
+  renderThreads(state.threads);
   return remainder;
 }
 
@@ -4111,7 +4537,7 @@ async function refreshPagedHistoryOnce(threadId) {
   const result = await rpc("thread/resume", { threadId, excludeTurns: true });
   if (generation !== state.connectionGeneration || !state.ready
     || cachedThread(threadId, false)?.history !== expectedHistory) return null;
-  let entry = mergeThreadSnapshot({ ...result.thread, turns: [] });
+  let entry = mergeThreadSnapshot({ ...threadWithModel(result), turns: [] });
   const history = entry.history;
   if (ui.notice.textContent === history.error) notice("");
   if (history.loading) await history.loading;
@@ -4143,6 +4569,7 @@ function renderThreadHistory(thread) {
   state.renderTarget = fragment;
   try {
     for (const turn of turns) {
+      rememberTurnModel(thread.id, turn.id, turn.model);
       for (const item of turn.items || []) renderItem(item, true, thread.id, turn.id);
     }
   } finally {
@@ -4215,36 +4642,101 @@ function threadActivityTimestamp(thread) {
   return 0;
 }
 
-function loadPinnedThreads() {
+function legacyPinnedThreads() {
   try {
     const stored = JSON.parse(localStorage.getItem(PINNED_THREADS_STORAGE_KEY) || "[]");
-    state.pinnedThreads = new Set(Array.isArray(stored)
-      ? stored.filter((id) => typeof id === "string" && id.trim()) : []);
+    return Array.isArray(stored)
+      ? [...new Set(stored.filter((id) => typeof id === "string" && id.trim() === id
+        && id.length > 0 && id.length <= 256 && !/[\x00-\x1f]/.test(id)))] : [];
   } catch {
-    state.pinnedThreads = new Set();
+    return [];
   }
 }
 
-function persistPinnedThreads() {
+function renderPinnedThreads() {
+  state.pinnedThreads = new Set(state.serverPinnedThreads);
+  for (const [threadId, pinned] of state.pinsPending) {
+    if (pinned) state.pinnedThreads.add(threadId);
+    else state.pinnedThreads.delete(threadId);
+  }
+  renderThreads(state.threads);
+}
+
+function applyPinnedThreads(snapshot) {
+  if (!snapshot || typeof snapshot.storeId !== "string" || !snapshot.storeId
+    || !Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0
+    || !Array.isArray(snapshot.threadIds)
+    || !snapshot.threadIds.every((id) => typeof id === "string" && id.length > 0)) {
+    throw new Error("Invalid pinned conversation response");
+  }
+  if (snapshot.storeId === state.pinsStoreId && snapshot.revision < state.pinsRevision) return false;
+  const changed = snapshot.threadIds.length !== state.serverPinnedThreads.size
+    || snapshot.threadIds.some((id) => !state.serverPinnedThreads.has(id));
+  state.pinsStoreId = snapshot.storeId;
+  state.pinsRevision = snapshot.revision;
+  state.pinsLoaded = true;
+  state.serverPinnedThreads = new Set(snapshot.threadIds);
+  renderPinnedThreads();
+  return changed;
+}
+
+async function pinRequest(method = "GET", body, path = "/api/pins") {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 15000);
   try {
-    localStorage.setItem(PINNED_THREADS_STORAGE_KEY, JSON.stringify([...state.pinnedThreads]));
-  } catch {
-    // Pinning still works for this tab when browser storage is unavailable.
+    const response = await fetch(path, {
+      method, cache: "no-store", signal: controller.signal,
+      ...(body ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}),
+    });
+    if (!response.ok) throw new Error(`Server returned ${response.status}`);
+    return await response.json();
+  } finally {
+    window.clearTimeout(timeout);
   }
 }
 
-function setThreadPinned(threadId, pinned) {
-  if (pinned) state.pinnedThreads.add(threadId);
-  else if (!state.pinnedThreads.delete(threadId)) return;
-  persistPinnedThreads();
-  renderThreads(state.threads);
+function loadPinnedThreads(refresh = true) {
+  if (state.pinsSyncPromise) return state.pinsSyncPromise;
+  state.pinsSyncPromise = (async () => {
+    try {
+      const legacy = legacyPinnedThreads();
+      const snapshot = legacy.length
+        ? await pinRequest("POST", { threadIds: legacy }, "/api/pins/migrate")
+        : await pinRequest();
+      const changed = applyPinnedThreads(snapshot);
+      // Retain the old list until the server confirms its import. Imports are
+      // idempotent even if storage is blocked or the response was lost.
+      try { localStorage.removeItem(PINNED_THREADS_STORAGE_KEY); } catch { /* Storage is optional. */ }
+      if (changed && refresh) void refreshThreads();
+      return true;
+    } catch (error) {
+      notice(`Unable to sync pinned chats: ${error.message}. Reconnect or reload to retry.`);
+      return false;
+    } finally {
+      state.pinsSyncPromise = null;
+    }
+  })();
+  return state.pinsSyncPromise;
 }
 
-function handlePinnedThreadsStorage(event) {
-  if (event.key !== PINNED_THREADS_STORAGE_KEY && event.key !== null) return;
-  loadPinnedThreads();
-  renderThreads(state.threads);
-  void refreshThreads();
+async function setThreadPinned(threadId, pinned) {
+  if (!state.pinsLoaded || state.pinsPending.has(threadId)) return;
+  state.pinsPending.set(threadId, pinned);
+  renderPinnedThreads();
+  try {
+    applyPinnedThreads(await pinRequest("PUT", { threadId, pinned }));
+  } catch (error) {
+    notice(`Unable to save pinned chat: ${error.message}. Please try again.`);
+  } finally {
+    state.pinsPending.delete(threadId);
+    renderPinnedThreads();
+  }
+  // Also recover from a lost response after a successful server commit.
+  void loadPinnedThreads();
+}
+
+function refreshPinnedThreadsWhenVisible() {
+  if (!document.hidden) void loadPinnedThreads();
 }
 
 function sortThreadsByActivity(threads) {
@@ -4288,12 +4780,7 @@ function plainPrimaryClick(event) {
 }
 
 function renderThreads(threads, reconcileActivity = false) {
-  const sortedThreads = sortThreadsByActivity(threads).sort((left, right) => (
-    Number(state.pinnedThreads.has(right.id)) - Number(state.pinnedThreads.has(left.id))
-  ));
-  state.threads = sortedThreads;
-  const focused = ui.threads.contains(document.activeElement) ? document.activeElement : null;
-  const nextNodes = new Map();
+  const sortedThreads = sortThreadsByActivity(threads);
   for (const thread of sortedThreads) {
     const status = state.liveThreadStatuses.get(thread.id) || thread.status;
     if (reconcileActivity) {
@@ -4303,13 +4790,26 @@ function renderThreads(threads, reconcileActivity = false) {
         && !state.activeTurns.get(thread.id)) {
         // A known in-progress turn from thread/resume also outranks thread/list.
         state.activeTurns.delete(thread.id);
+        state.threadQuestionTurns.delete(thread.id);
       }
     }
+  }
+  const pendingQuestions = new Set(sortedThreads.filter(threadHasPendingQuestions).map((thread) => thread.id));
+  sortedThreads.sort((left, right) => (
+    Number(pendingQuestions.has(right.id)) - Number(pendingQuestions.has(left.id))
+    || Number(state.pinnedThreads.has(right.id)) - Number(state.pinnedThreads.has(left.id))
+  ));
+  state.threads = sortedThreads;
+  const focused = ui.threads.contains(document.activeElement) ? document.activeElement : null;
+  const nextNodes = new Map();
+  for (const thread of sortedThreads) {
+    const status = state.liveThreadStatuses.get(thread.id) || thread.status;
     const running = status?.type === "active"
       || state.activeTurns.has(thread.id)
       || state.submittingThreads.has(thread.id);
     const item = state.threadNodes.get(thread.id) || createThreadRow(thread.id);
-    const { row, link, title, meta, pin } = item;
+    const { row, link, title, meta, pin, question } = item;
+    question.hidden = !pendingQuestions.has(thread.id);
     const pinned = state.pinnedThreads.has(thread.id);
     row.classList.toggle("pinned", pinned);
     link.className = `thread${thread.id === state.threadId ? " active" : ""}${running ? " running" : ""}`;
@@ -4326,6 +4826,9 @@ function renderThreads(threads, reconcileActivity = false) {
     const pinLabel = `${pinned ? "Unpin" : "Pin"} conversation: ${threadLabel(thread)}`;
     pin.setAttribute("aria-label", pinLabel);
     pin.setAttribute("aria-pressed", String(pinned));
+    pin.disabled = !state.pinsLoaded;
+    pin.setAttribute("aria-disabled", String(!state.pinsLoaded || state.pinsPending.has(thread.id)));
+    pin.setAttribute("aria-busy", String(state.pinsPending.has(thread.id)));
     pin.title = pinLabel;
     nextNodes.set(thread.id, item);
     ui.threads.append(row);
@@ -4345,7 +4848,17 @@ function createThreadRow(threadId) {
   const link = document.createElement("a");
   const title = document.createElement("strong");
   const meta = document.createElement("small");
-  link.append(title, meta);
+  const heading = document.createElement("span");
+  heading.className = "thread-heading";
+  const question = document.createElement("span");
+  question.className = "thread-question";
+  question.textContent = "?";
+  question.setAttribute("role", "img");
+  question.setAttribute("aria-label", "Question awaiting your reply");
+  question.title = "Question awaiting your reply";
+  question.hidden = true;
+  heading.append(title, question);
+  link.append(heading, meta);
   link.addEventListener("click", (event) => {
     if (!plainPrimaryClick(event)) return;
     event.preventDefault();
@@ -4359,7 +4872,7 @@ function createThreadRow(threadId) {
   pin.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m16 3 5 5-4 1-4 4-1 4-5-5 4-1 4-4z"></path><path d="m2 22 7-7"></path></svg>';
   pin.addEventListener("click", () => setThreadPinned(threadId, !state.pinnedThreads.has(threadId)));
   row.append(link, pin);
-  return { row, link, title, meta, pin };
+  return { row, link, title, meta, pin, question };
 }
 
 function showStartedThread(thread) {
@@ -4385,15 +4898,28 @@ function mergeProvisionalThreads(threads) {
   ];
 }
 
+async function fetchThreadListPage(cursor = null) {
+  if (!state.threadListHttp) {
+    return rpc("thread/list", { ...THREAD_LIST_PARAMS, ...(cursor ? { cursor } : {}) });
+  }
+  const response = await fetch("/api/threads", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cursor }), cache: "no-store", priority: "high",
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || "Unable to load conversations.");
+  return result;
+}
+
 async function refreshThreads() {
-  if (!state.ready) return;
+  if (!state.ready && !state.threadListHttp) return;
   const refreshId = ++state.threadRefreshId;
-  const requestedPins = new Set(state.pinnedThreads);
   try {
-    const result = await rpc("thread/list", THREAD_LIST_PARAMS);
+    const result = await fetchThreadListPage();
     if (refreshId !== state.threadRefreshId) return;
     if (!Array.isArray(result?.data)) throw new Error("Unable to load conversations.");
     const recent = result.data;
+    for (const thread of recent) rememberChatModel(thread.id, thread.model);
     const foundIds = new Set(recent.map((thread) => thread.id));
     const pins = new Map(state.threads
       .filter((thread) => state.pinnedThreads.has(thread.id) && !foundIds.has(thread.id)
@@ -4405,6 +4931,7 @@ async function refreshThreads() {
     ]), true);
     render();
     updateControls();
+    void refreshThreadQuestions(state.threads);
     let cursor = result?.nextCursor;
     const seenCursors = new Set();
     // Older pins must remain available beyond the recent-chat page.
@@ -4415,32 +4942,32 @@ async function refreshThreads() {
         throw new Error("Unable to load pinned conversations: invalid history cursor.");
       }
       seenCursors.add(cursor);
-      const page = await rpc("thread/list", { ...THREAD_LIST_PARAMS, cursor });
+      const page = await fetchThreadListPage(cursor);
       if (refreshId !== state.threadRefreshId) return;
       if (!Array.isArray(page?.data)) throw new Error("Unable to load pinned conversations.");
       for (const thread of page.data) {
+        rememberChatModel(thread.id, thread.model);
         if (state.pinnedThreads.has(thread.id) && !foundIds.has(thread.id)) pins.set(thread.id, thread);
         foundIds.add(thread.id);
       }
       render();
       cursor = page.nextCursor;
     }
-    if (cursor == null) {
-      // Only a complete, successful listing can retire pins for missing chats.
-      for (const id of requestedPins) {
-        if (!foundIds.has(id) && !state.provisionalThreads.has(id)) setThreadPinned(id, false);
-      }
-    }
+    // A listing can lag behind another device. Only an explicit unpin or a
+    // confirmed archive/delete event may remove a shared pin on the server.
     render();
     updateControls();
+    void refreshThreadQuestions(state.threads);
+    return true;
   } catch (error) {
     if (refreshId === state.threadRefreshId) notice(error.message);
+    return false;
   }
 }
 
 async function openThread(threadId, showErrors = true) {
   closeSettingsForChatChange(threadId);
-  if (!state.ready) return;
+  if (!state.ready && !state.threadListHttp) return;
   saveCurrentThreadView();
   saveComposerDraft();
   const selectionId = ++state.selectionId;
@@ -4463,11 +4990,13 @@ async function openThread(threadId, showErrors = true) {
   }
   renderThreads(state.threads);
   updateControls();
+  // The HTTP sidebar may be ready before the live socket. Remember the
+  // selection now; connection initialization opens the latest selected chat.
+  if (!state.ready) return;
   if (cached?.generation === state.connectionGeneration) {
     await reconcileThreadHistory(threadId);
     if (selectionId !== state.selectionId || state.threadId !== threadId) return;
     await refreshPermissionProfiles();
-    await refreshThreads();
     return;
   }
   try {
@@ -4475,16 +5004,14 @@ async function openThread(threadId, showErrors = true) {
       await refreshPagedHistory(threadId);
       if (selectionId !== state.selectionId || state.threadId !== threadId) return;
       await refreshPermissionProfiles();
-      await refreshThreads();
       return;
     }
     const result = await rpc("thread/resume", { threadId });
-    const thread = result.thread;
+    const thread = threadWithModel(result);
     const refreshed = mergeThreadSnapshot(thread);
     if (selectionId !== state.selectionId || state.threadId !== threadId) return;
     renderCachedThread(refreshed);
     await refreshPermissionProfiles();
-    await refreshThreads();
   } catch (error) {
     if (showErrors && selectionId === state.selectionId && state.threadId === threadId) {
       notice(error.message);
@@ -4556,7 +5083,7 @@ async function forkFromResponse(entry) {
       deferGoalContinuation: true,
       ...(state.historyChunkBytes ? { excludeTurns: true } : {}),
     });
-    const thread = result?.thread;
+    const thread = threadWithModel(result);
     if (!thread?.id || thread.id === sourceId) {
       throw new Error("The server did not return a separate chat.");
     }
@@ -4662,6 +5189,10 @@ async function submitPrompt(event) {
   const cwd = currentWorkingFolder();
   const chatSettingOverrides = { ...currentChatSettings() };
   const chatSettings = effectiveChatSettings(chatSettingOverrides);
+  const turnParams = turnSettingsParams(chatSettings);
+  // Omission uses the server's sticky model, including changes from another
+  // device since this page opened. Only an explicit choice overrides it.
+  if (state.threadId && !chatSettingOverrides.model) delete turnParams.model;
   if (state.modelsLoaded && chatSettings.model && !modelForSettings(chatSettings)) {
     notice("This model is unavailable. Open chat settings to refresh models or choose another model.");
     return;
@@ -4696,7 +5227,7 @@ async function submitPrompt(event) {
       targetThreadId = started.thread.id;
       targetComposerKey = threadComposerKey(targetThreadId, selectionId);
       moveComposerDraft(submissionComposerKey, targetComposerKey);
-      cacheThreadSnapshot(started.thread);
+      cacheThreadSnapshot(threadWithModel(started));
       const pending = {
         id: pendingId,
         text: pendingText,
@@ -4730,8 +5261,15 @@ async function submitPrompt(event) {
       input,
       cwd,
       clientUserMessageId: pendingId,
-      ...turnSettingsParams(chatSettings),
+      ...turnParams,
     });
+    if (turnParams.model) {
+      rememberChatModel(targetThreadId, turnParams.model);
+      const settings = state.settingsByThread.get(targetThreadId);
+      if (settings?.model === chatSettingOverrides.model) settings.model = "";
+      persistChatSettings();
+      if (state.threadId === targetThreadId) renderChatSettings();
+    }
     if (result.turn) cacheTurnUpdate(targetThreadId, result.turn);
     if (result.turn?.id) setPendingUserTurn(targetThreadId, result.turn.id);
     if (result.turn?.status === "inProgress") {
@@ -4883,6 +5421,7 @@ async function submitSteer({ draftText, text, attachments, input, turnId }) {
     if (state.ready) void reconcileThreadHistory(threadId);
   } finally {
     state.steeringThreads.delete(threadId);
+    renderThreads(state.threads);
     updateControls();
   }
 }
@@ -4914,6 +5453,7 @@ function removeRequest(id) {
   const card = state.requestCards.get(String(id));
   if (card) card.remove();
   state.requestCards.delete(String(id));
+  renderThreads(state.threads);
   updateControls();
 }
 
@@ -5116,6 +5656,7 @@ function addRequest(id, card, params, kind, method) {
   card.append(connectionNotice);
   state.requestCards.set(String(id), card);
   if (kind !== "input") ui.requests.append(card);
+  renderThreads(state.threads);
   updateControls();
 }
 
@@ -5166,6 +5707,7 @@ function handleServerRequest(message) {
 }
 
 async function boot() {
+  loadUsageLimitWarning();
   const requestedThreadId = threadIdFromSearch(globalThis.location?.search || "");
   if (requestedThreadId) {
     state.threadId = requestedThreadId;
@@ -5173,7 +5715,7 @@ async function boot() {
     restoreComposerDraft();
   }
   loadStoredChatSettings();
-  loadPinnedThreads();
+  void loadPinnedThreads(false);
   renderChatSettings();
   try {
     const response = await fetch("/api/config", { cache: "no-store" });
@@ -5187,12 +5729,16 @@ async function boot() {
     state.chatDefaults.toolActivity = config.showToolActivity === false ? "hide" : "show";
     state.uploadLimits = config.uploads || null;
     state.historyChunkBytes = config.historyChunkBytes || 0;
+    state.threadListHttp = config.threadListHttp === true;
     renderChatSettings();
   } catch (error) {
     notice(`Configuration error: ${error.message}`);
     // Do not download unbounded history when its configuration is unavailable.
     return;
   }
+  // The sidebar can load before the live connection finishes initialization.
+  // Reuse this request when the socket opens instead of downloading it twice.
+  if (state.threadListHttp) state.startupThreadList = loadPinnedThreads(false).then(refreshThreads);
   connect();
 }
 
@@ -5279,8 +5825,10 @@ if (globalThis.CODEX_WEB_TEST) {
     renderLocalPrompt,
     renderThreads,
     loadPinnedThreads,
+    applyPinnedThreads,
+    legacyPinnedThreads,
     setThreadPinned,
-    handlePinnedThreadsStorage,
+    refreshPinnedThreadsWhenVisible,
     refreshThreads,
     renderThemeControl,
     selectedThreadBusy,
@@ -5332,10 +5880,22 @@ if (globalThis.CODEX_WEB_TEST) {
     threadActivityTimestamp,
     ui,
     updateControls,
+    USAGE_LIMIT_STORAGE_KEY,
+    applyUsageLimits,
+    refreshUsageLimits,
+    loadUsageLimitWarning,
+    handleUsageLimitStorage,
+    observeUsageLimitError,
+    notice,
     upsertMessage,
   };
 } else {
-  window.addEventListener("storage", handlePinnedThreadsStorage);
+  window.addEventListener("focus", refreshPinnedThreadsWhenVisible);
+  document.addEventListener("visibilitychange", refreshPinnedThreadsWhenVisible);
+  window.setInterval(refreshPinnedThreadsWhenVisible, 30000);
+  window.addEventListener("storage", handleUsageLimitStorage);
+  window.addEventListener("focus", refreshUsageLimitsWhenVisible);
+  document.addEventListener("visibilitychange", refreshUsageLimitsWhenVisible);
   ui.composer.addEventListener("submit", submitPrompt);
   renderThemeControl();
   globalThis.CodexTheme?.subscribe(renderThemeControl);
@@ -5478,5 +6038,19 @@ if (globalThis.CODEX_WEB_TEST) {
     uploadFiles(event.dataTransfer?.files || []);
   });
 
+  let followAfterMath = false;
+  let mathAnchor = null;
+  document.addEventListener("codex:before-math-render", () => {
+    followAfterMath = shouldFollowMessages();
+    mathAnchor = followAfterMath ? null : historyViewportAnchor();
+  });
+  document.addEventListener("codex:after-math-render", () => {
+    const node = mathAnchor && state.items.get(mathAnchor.key)?.node;
+    if (node) {
+      ui.messages.scrollTop += node.getBoundingClientRect().top - mathAnchor.top;
+      rememberMessagesScrollTop();
+    }
+    presentContentChanged(followAfterMath);
+  });
   boot();
 }

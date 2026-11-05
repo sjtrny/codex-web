@@ -1,0 +1,36 @@
+name: codex-session-login
+
+services:
+  auth:
+    image: codex-web:session-login
+    build:
+      context: ../..
+    command: [python, session_bridge.py]
+    restart: unless-stopped
+    init: true
+    user: "1000:1000"
+    read_only: true
+    environment:
+      CODEX_WEB_LOGIN_USERNAME: ${CODEX_WEB_LOGIN_USERNAME:?Website username required}
+      CODEX_WEB_LOGIN_PASSWORD: ${CODEX_WEB_LOGIN_PASSWORD:?Website password required}
+      CODEX_WEB_LOGIN_ORIGIN: ${CODEX_WEB_LOGIN_ORIGIN:?HTTPS website origin required}
+    volumes:
+      - ${CODEX_WEB_LOGIN_STATE_DIR:?Absolute persistent state directory required}:/state
+    tmpfs:
+      - /tmp:mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 192m
+    cpus: 0.5
+    pids_limit: 64
+    networks:
+      proxy:
+        aliases: [codex-session-login]
+    labels:
+      traefik.enable: "false"
+
+networks:
+  proxy:
+    external: true
+    name: ${CODEX_WEB_LOGIN_NETWORK:?Existing private proxy network required}

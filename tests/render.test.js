@@ -662,6 +662,7 @@ state.chatDefaults = normalizeChatSettings({
   approvalPolicy: "never",
   permissions: ":danger-full-access",
 });
+state.chatModels.set(state.threadId, "gpt-5.6-sol");
 const effectiveSettings = effectiveChatSettings(normalizeChatSettings({
   cwd: "/workspaces/selected-project",
   effort: "high",
@@ -708,8 +709,8 @@ state.configRequirements = {
 };
 state.settingsByThread.set(state.threadId, normalizeChatSettings({}));
 renderChatSettings();
-assert.equal(defaultChatSettingOption("model").label, "Instance default — GPT-5.6-Sol");
-assert.equal(ui.settingModel.children[0].textContent, "Instance default — GPT-5.6-Sol");
+assert.equal(defaultChatSettingOption("model").label, "Chat model — GPT-5.6-Sol");
+assert.equal(ui.settingModel.children[0].textContent, "Chat model — GPT-5.6-Sol");
 assert.equal(ui.settingEffort.children[0].textContent, "Instance default — max");
 assert.equal(ui.settingServiceTier.children[0].textContent, "Instance default — Fast");
 assert.equal(ui.settingApproval.children[0].textContent, "Instance default — Never ask");
@@ -731,7 +732,7 @@ for (const select of [
     false,
   );
 }
-assert.match(ui.settingsNote.textContent, /Instance defaults apply wherever Default is selected/);
+assert.match(ui.settingsNote.textContent, /chat model follows the last-used model across devices/);
 
 assert.equal(DEFAULT_SIDEBAR_WIDTH, 260);
 assert.equal(clampSidebarWidth(100, 1280), MIN_SIDEBAR_WIDTH);

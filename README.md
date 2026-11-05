@@ -7,6 +7,15 @@ app-server share conversations.
 
 ![Codex Web in a browser window receives the same conversation updates as Codex CLI in a terminal window.](docs/sync-demo.gif)
 
+## Chat tables
+
+Tables use extra space on wide screens and scroll horizontally when needed.
+The scroll hint and edge shadows show when more columns are available. Select
+**Expand** to read a table in a larger view with a fixed header. **Close** or
+Escape returns to the same place in the chat. Keyboard users can focus a
+scrolling table and use the arrow keys. New response text keeps the table's
+horizontal position and also updates an open expanded view.
+
 ## Setup
 
 ### 1. App server
@@ -103,6 +112,29 @@ Values must be positive integers in bytes. Empty values use the default;
 invalid values prevent the web service from starting. This setting does not
 change the browser-input or attachment-upload limits.
 
+### Account sign-in and recovery
+
+Open **Settings → OpenAI account** to sign in with ChatGPT or switch accounts.
+Select **Sign in with ChatGPT** or **Switch account**, open the sign-in page,
+and enter the displayed code. Keep Codex Web open while you authorize the account.
+The page checks the connected account after sign-in completes. Device-code login
+must be enabled in the account's security settings or workspace permissions.
+
+An authentication error also shows a **Sign in** button above the conversation.
+These controls call the app-server directly, so they work when authentication
+prevents the chat agent from responding. The app-server saves and loads the new
+credentials; no terminal command or server restart is needed. This requires a
+Codex version that supports `account/login/start` with `chatgptDeviceCode`.
+
+The account applies to every user connected to the same app-server. Sign-in does
+not change the website's own access controls or create separate user accounts.
+Closing Settings leaves a pending login active. Use **Cancel sign-in** to stop
+it. The temporary code is kept in this tab's session storage until completion,
+cancellation or expiry; access and refresh tokens never enter the web UI.
+
+Run `npm run test:account` and `npm run test:browser:account` to check the login
+flow with simulated accounts and no real authentication changes.
+
 ### Agent instructions
 
 Codex Web bundles [`codex-web-instructions.md`](codex-web-instructions.md) in
@@ -138,14 +170,25 @@ for the full date and time zone. This browser keeps up to 2,000 recovered messag
 timestamps across reloads. Messages without an exact timestamp show no time
 information; task times, conversation times, and browser receipt times are omitted.
 
+Codex response headers also show the model used for their turn beside the time.
+The browser remembers up to 2,000 server-confirmed turn models across reloads.
+Changing the selected model does not relabel previous responses. When an older
+turn has no recorded model, its header shows **Model unavailable**; the current
+conversation model and next-turn preference are never used as a substitute.
+
 During an active task, the composer button shows **Stop** when the text box is
 empty. Type a message or attach a file to switch it to **Reply**. Send an answer,
 correction, or additional instruction without stopping the task. Pressing Enter
 in an empty text box does not stop the task.
 
 Open **Model and chat settings** beside the paperclip (**Attach**) to change the model,
-reasoning, and other chat options in a modal. Changes are saved for the chat and
-apply to the next new turn. Replies use the current task's settings.
+reasoning, and other chat options in a modal. Existing chats use **Chat model**:
+the most recently used model saved by the server, shared across devices. Old
+browser choices and instance defaults do not override it. Select another model
+to change the next new turn; once the server accepts that turn, it remembers the
+choice for subsequent turns. An unsent model choice lasts only in the current
+tab. New chats still use the instance default or your explicit selection.
+Other settings are saved in the browser. Replies use the current task's settings.
 
 The thinking indicator shows **Thinking. model reasoning …** on one line,
 using values reported by the server, with animated dots at the end. Above the message box, a single
@@ -168,6 +211,14 @@ box, so they stay visible while Codex continues working or you scroll through
 the conversation. Collapse the area to its question count when you need more
 space; new questions expand it again. Long question lists scroll separately.
 The original messages stay in chronological order in the conversation.
+
+Chats with unanswered questions show an amber **?** beside their title in the
+chat list and move above all other chats, including pinned chats. Within each
+group, pinned chats come first, followed by recent activity order. The indicator
+clears when you answer or the task ends. Active chats are checked on reload,
+including chats you have not opened. The browser downloads only a compact
+question status for these checks. The proxy uses read-only pagination of the
+latest turn; it does not send background conversation history to the browser.
 
 Answer using the same text box and **Reply** button; there are no separate
 answer controls. Accepted replies clear the pending questions. Failed replies
@@ -267,13 +318,44 @@ the pin to keep it above recent chats. Pinned conversations keep a visible blue
 pin; select it again to unpin. Keyboard focus also reveals the control, and pins
 remain visible on touch devices. Both groups follow recent activity order, and
 pinned conversations remain available even outside the 50 most recent chats.
+Chats with pending questions take priority over pins.
 
-Pins are saved in this browser and shared between tabs for the same Codex Web
-site. Archiving or deleting a conversation removes its pin. The pin controls
-support keyboard access and mobile touch input.
+Pins are saved on the server and shared across browsers and devices that use
+this Codex Web instance. Connected browsers receive changes immediately; opening,
+reconnecting or returning to a tab also refreshes pins. Visible tabs check every
+30 seconds as a fallback. Confirmed archive and delete events remove the pin.
+The pin controls support keyboard access and mobile touch input.
+
+Existing browser pins are imported automatically when that browser next opens
+the updated site. Imports add pins without replacing existing server choices.
+An explicit unpin is remembered so a stale browser cannot restore it. Clearing
+browser storage after migration does not remove server pins. Failed saves show
+an error and restore the last confirmed state.
+
+The database is `pins.sqlite3` in `CODEX_WEB_STATE_DIR`. By default this is
+`.codex-web` inside `CODEX_UPLOAD_DIR` (`/uploads/.codex-web` in Docker), so the
+existing persistent uploads mount also preserves pins across container
+recreation. A custom state directory must be absolute, writable by the service,
+and mounted on persistent storage. Back up this directory with the instance.
+All clients of one instance share the same pins, just as they share conversations;
+independent instances must use separate state directories.
+
+The recent conversation list loads through a separate, compressed HTTP request.
+It can appear while the live connection is still initializing. Responses contain
+only sidebar metadata and use `no-store`. Opening a chat reuses the displayed
+list; chat changes and live notifications still refresh it. Older pinned chats
+retain the same pagination and ordering.
 
 Run `npm run test:browser:pins` with the demo's Playwright dependencies for an
 isolated desktop/mobile check.
+Run `npm run test:browser:sidebar-questions` to check question indicators,
+priority ordering, replies, reloads, and mobile layouts.
+Run `PERF_CHECK_BUDGET=1 npm run test:browser:list-loading` for a 50-chat sidebar
+and large-history mobile scenario. It counts HTTP and WebSocket bytes, checks
+that startup requests the list once, and holds the live connection to verify
+that the sidebar loads independently. Chromium throttles both HTTP and WebSocket
+traffic. The synthetic backend adds a fixed processing delay; the measurements
+do not represent real backend load or a physical mobile device.
 
 ### Conversation history downloads
 
@@ -313,6 +395,15 @@ checks. The browser check uses a temporary local Python server and synthetic
 history; set `PYTHON` and `PLAYWRIGHT_MODULE` for existing installations.
 
 ### Chat settings defaults
+
+When the account reaches a usage limit, a warning stays below the chat title
+in every conversation, including new chats. It remains visible while scrolling,
+switching chats, reconnecting and reloading, and synchronizes between browser tabs.
+The warning shows an expected reset time when the backend supplies one. Usage is
+checked on connection, while the page is visible, and when the page regains focus.
+Only confirmed backend availability clears the warning; a failed check or an
+elapsed reset time does not dismiss it. Temporary request throttling and chat
+context or session-budget limits do not trigger the account warning.
 
 Unset chat settings use these instance defaults. Set them in `.env` for Docker
 Compose, or export them when running directly.
@@ -411,8 +502,14 @@ web service if historical downloads and previews should remain available.
 
 ## Security
 
-The UI is unauthenticated and listens on all interfaces. Keep it behind a VPN
-or firewall.
+The UI is unauthenticated by default and listens on all interfaces. Keep it
+behind a VPN, firewall, or authenticated reverse proxy.
+
+The optional [website session login](docs/session-login.md) adds a normal sign-in
+form and persistent browser cookies in front of an existing Basic Auth gateway.
+It covers HTTP and WebSocket requests without repeated browser password prompts.
+It protects access to a shared workspace; it does not create separate Codex
+accounts or change the OpenAI account used by the app-server.
 
 ## Development
 
@@ -429,3 +526,34 @@ npm run build
 Install Python dependencies in a virtual environment as shown above. The DOM
 tests use jsdom and the real page markup; the browser checks described above cover
 layout, focus, and interaction in Chromium.
+
+### Mobile loading and asset builds
+
+`npm run build` produces the production page and minified assets in
+`static/vendor/`. Run it after changing the frontend, page or styles. The server
+uses the generated page when available and falls back to the source page before
+the first build. Docker performs this build automatically.
+
+The production page references content-fingerprinted assets with a one-year
+immutable cache lifetime. Each JavaScript/CSS asset and the page have prebuilt
+Brotli and gzip representations; the server negotiates the supported encoding.
+Unversioned UI files require revalidation. The page, configuration, conversations,
+uploads and workspace files retain `no-store`; the service worker does not cache
+private data. The maths renderer and its styles/fonts load only when a message
+can contain maths. Failed maths downloads leave readable source and can retry on
+a later render. Message images use browser lazy loading.
+
+The selected conversation loads alongside settings and the sidebar. History
+downloads use negotiated compression while preserving the configured limit on
+decoded bytes, pagination cursors and `no-store` policy.
+
+With the demo's Playwright dependencies installed, run `npm run
+test:browser:loading` for slow settings, delayed/failed maths, sanitization and
+retry checks. `npm run test:browser:performance` measures three cold and warm
+mobile navigations at 500 kbit/s download, 128 kbit/s upload, 150 ms latency and
+4× CPU slowdown. It starts the real proxy with a synthetic backend; no real
+conversations are accessed. Set `PYTHON` and `PLAYWRIGHT_MODULE` if needed,
+`ARTIFACT_DIR` to save results, and `PERF_CHECK_BUDGET=1` to enforce the ordinary
+chat transfer budget. `PERF_SCENARIO=empty` or `math` checks those entry paths.
+The default `plain` scenario includes a short Markdown conversation; image-heavy
+histories and actual backend response times will vary.

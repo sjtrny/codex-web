@@ -44,6 +44,8 @@ async def main():
                 result = {"config": {}}
             elif method == "configRequirements/read":
                 result = {"requirements": None}
+            elif method in {"account/rateLimits/read", "account/read"}:
+                result = {}
             elif method in {"model/list", "permissionProfile/list"}:
                 result = {"data": []}
             else:
@@ -58,6 +60,7 @@ async def main():
             os.environ.update(
                 CODEX_APP_SERVER_URL=str(backend_server.make_url("/")).replace("http:", "ws:"),
                 CODEX_WORKSPACE_ROOT=workspace,
+                CODEX_WEB_STATE_DIR=workspace + "/state",
                 CODEX_WEB_HISTORY_CHUNK_BYTES="4096",
             )
             async with TestServer(app.create_app()) as frontend:

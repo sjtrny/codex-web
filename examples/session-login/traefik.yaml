@@ -1,0 +1,43 @@
+http:
+  routers:
+    codex-cookie-login:
+      rule: Host(`codex.example.com`) && (Path(`/login`) || Path(`/logout`) || Path(`/auth/session`) || Path(`/auth/login.css`))
+      entryPoints: [websecure]
+      priority: 2001
+      tls:
+        certResolver: letsencrypt
+      service: codex-cookie-login
+      middlewares: [codex-cookie-response]
+    codex-cookie-app:
+      rule: Host(`codex.example.com`)
+      entryPoints: [websecure]
+      priority: 2000
+      tls:
+        certResolver: letsencrypt
+      service: codex-cookie-existing-gateway
+      middlewares: [codex-cookie-response, codex-cookie-auth]
+  middlewares:
+    codex-cookie-response:
+      headers:
+        customResponseHeaders:
+          WWW-Authenticate: ""
+          Authorization: ""
+          X-Codex-Session-Login: "1"
+    codex-cookie-auth:
+      forwardAuth:
+        address: http://codex-session-login:8000/internal/verify
+        trustForwardHeader: false
+        authRequestHeaders: [Cookie, Authorization, Accept, Origin, Referer]
+        authResponseHeaders: [Authorization]
+        addAuthCookiesToResponse: [__Host-codex_web_session]
+        preserveLocationHeader: true
+        forwardBody: false
+  services:
+    codex-cookie-login:
+      loadBalancer:
+        servers:
+          - url: http://codex-session-login:8000
+    codex-cookie-existing-gateway:
+      loadBalancer:
+        servers:
+          - url: http://codex-gateway:8080

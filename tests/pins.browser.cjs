@@ -56,6 +56,23 @@ async function main() {
     ]);
     const received = [];
     const sockets = new Set();
+    const savedPins = new Map();
+    let pinRevision = 0;
+    const pinSnapshot = () => ({ storeId: "browser-fixture", revision: pinRevision,
+      threadIds: [...savedPins].filter(([, pinned]) => pinned).map(([id]) => id) });
+    await context.route("**/api/pins{,/migrate}", (route) => {
+      const request = route.request();
+      if (request.method() === "PUT") {
+        const { threadId, pinned } = request.postDataJSON();
+        savedPins.set(threadId, pinned);
+        pinRevision += 1;
+      } else if (request.method() === "POST") {
+        for (const id of request.postDataJSON().threadIds) if (!savedPins.has(id)) savedPins.set(id, true);
+        pinRevision += 1;
+      }
+      if (request.method() !== "GET") broadcast("codex-web/pins/updated", pinSnapshot());
+      return route.fulfill({ json: pinSnapshot() });
+    });
     let connections = 0;
     let fullList = true;
     let holdOlderPage = false;
@@ -72,11 +89,13 @@ async function main() {
         if (!message.method || message.id == null) return;
         let result;
         switch (message.method) {
+          case "account/rateLimits/read": result = {}; break;
           case "initialize": result = {}; break;
           case "model/list":
           case "permissionProfile/list": result = { data: [] }; break;
           case "config/read": result = { config: {} }; break;
           case "configRequirements/read": result = { requirements: null }; break;
+          case "thread/read":
           case "thread/resume": result = { thread: threads.get(message.params.threadId) }; break;
           case "thread/list":
             if (message.params.cursor) {
@@ -102,6 +121,11 @@ async function main() {
       });
     });
     function broadcast(method, params) {
+      if (method === "thread/archived" || method === "thread/deleted") {
+        savedPins.set(params.threadId, false);
+        pinRevision += 1;
+        broadcast("codex-web/pins/updated", pinSnapshot());
+      }
       for (const socket of sockets) socket.send(JSON.stringify({ method, params }));
     }
     const row = (tab, id) => tab.locator(`#threads a[href="/?thread=${id}"]`);
@@ -109,6 +133,11 @@ async function main() {
     async function clickPin(tab, id) {
       await row(tab, id).hover();
       await pin(tab, id).click();
+      await tab.waitForFunction((threadId) => {
+        const button = document.querySelector(`#threads a[href="/?thread=${threadId}"]`)
+          ?.parentElement.querySelector("button");
+        return !button || button.getAttribute("aria-busy") === "false";
+      }, id);
     }
     async function expectOrder(tab, ids) {
       await tab.waitForFunction((expected) => {
@@ -144,9 +173,13 @@ async function main() {
     await expectOrder(page, ["old", "recent", "middle"]);
     assert.equal(await pin(page, "old").getAttribute("aria-pressed"), "true");
     assert.equal(await pin(page, "old").evaluate((button) => button === document.activeElement), true);
+    await page.waitForFunction(() => document.querySelector('#threads a[href="/?thread=old"]')
+      .parentElement.querySelector("button").getAttribute("aria-busy") === "false");
     await page.keyboard.press("Space");
     await expectOrder(page, ["recent", "middle", "old"]);
     assert.equal(await pin(page, "old").getAttribute("aria-pressed"), "false");
+    await page.waitForFunction(() => document.querySelector('#threads a[href="/?thread=old"]')
+      .parentElement.querySelector("button").getAttribute("aria-busy") === "false");
     await clickPin(page, "old");
     await clickPin(page, "middle");
     await expectOrder(page, ["middle", "old", "recent"]);
@@ -214,11 +247,15 @@ async function main() {
       assert.ok(bounds.width >= 44 && bounds.height >= 44, "mobile pin targets must be at least 44px");
       assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width, "pin controls must fit narrow screens");
       await button.click();
+      await page.waitForFunction(() => document.querySelector('#threads a[href="/?thread=recent"]')
+        .parentElement.querySelector("button").getAttribute("aria-busy") === "false");
       await expectOrder(page, ["old", "recent", "middle"]);
       assert.equal(await page.locator("#sidebar").evaluate((node) => node.classList.contains("open")), true);
       assert.equal(page.url(), originalURL);
       assert.equal(await page.locator("#prompt").inputValue(), "Mobile draft stays here");
       await button.click();
+      await page.waitForFunction(() => document.querySelector('#threads a[href="/?thread=recent"]')
+        .parentElement.querySelector("button").getAttribute("aria-busy") === "false");
       await expectOrder(page, ["old", "middle", "recent"]);
       await screenshot(`mobile-pinned-conversations-${width}-${theme}`);
       await page.locator("#close-sidebar").click();
@@ -227,8 +264,7 @@ async function main() {
     threads.delete("old");
     broadcast("thread/archived", { threadId: "old" });
     await expectOrder(page, ["middle", "recent"]);
-    const pins = await page.evaluate(() => JSON.parse(localStorage.getItem("codex-web-pinned-threads-v1")));
-    assert.deepEqual(pins, ["middle"]);
+    assert.deepEqual(pinSnapshot().threadIds, ["middle"]);
     assert.ok(!received.some((message) => message.method?.startsWith("turn/")));
     assert.deepEqual(errors, []);
 
@@ -241,6 +277,17 @@ async function main() {
     await touchPage.goto(base);
     await touchPage.evaluate(() => {
       const app = globalThis.CodexWebTest;
+      app.applyPinnedThreads({ storeId: "touch", revision: 0, threadIds: [] });
+      let revision = 0;
+      let ids = [];
+      globalThis.fetch = async (_url, options) => {
+        if (options.method === "PUT") {
+          const { threadId, pinned } = JSON.parse(options.body);
+          ids = pinned ? [threadId] : [];
+          revision += 1;
+        }
+        return { ok: true, json: async () => ({ storeId: "touch", revision, threadIds: ids }) };
+      };
       app.initializeSidebarLayout();
       app.renderThreads([{ id: "touch", name: "Touch conversation", recencyAt: 1791244800, status: { type: "idle" } }]);
       app.setSidebarOpen(true, false);
@@ -251,8 +298,10 @@ async function main() {
       assert.equal(await button.evaluate((node) => getComputedStyle(node).opacity), "1");
       assert.equal(await button.evaluate((node) => getComputedStyle(node).pointerEvents), "auto");
       await button.tap();
+      await touchPage.waitForFunction(() => document.querySelector(".thread-pin").getAttribute("aria-busy") === "false");
       assert.equal(await button.getAttribute("aria-pressed"), "true");
       await button.tap();
+      await touchPage.waitForFunction(() => document.querySelector(".thread-pin").getAttribute("aria-busy") === "false");
       assert.equal(await button.getAttribute("aria-pressed"), "false");
       assert.equal(await button.evaluate((node) => getComputedStyle(node).opacity), "1");
     }
