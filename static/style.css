@@ -429,7 +429,7 @@ button:disabled { cursor: default; opacity: .45; }
 .copy-code.copy-failed { border-color: var(--notice-border); background: var(--notice-bg); color: var(--notice-text); }
 .clipboard-buffer { position: fixed; top: -1000px; left: -1000px; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .message .body hr { margin: 1.1em 0; border: 0; border-top: 1px solid var(--border-subtle); }
-.chat-table { width: max-content; max-width: 100%; margin: .9em 0; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--page-bg); }
+.chat-table { width: max-content; min-width: 100%; max-width: 100%; margin: .9em 0; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--page-bg); }
 .message.agent > .body > .chat-table {
   max-width: calc(100cqw - 40px);
   margin-inline-start: max(calc(-1 * max(0px, (100cqw - 890px) / 2)), min(0px, (100% - var(--table-width)) / 2));
@@ -446,7 +446,7 @@ button:disabled { cursor: default; opacity: .45; }
 .table-viewport.has-start::before, .table-viewport.has-end::after { opacity: 1; }
 .table-scroll { max-width: 100%; overflow: auto; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; }
 .table-scroll:focus-visible, .table-scroll .katex:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
-.message .body table { table-layout: fixed; border-collapse: separate; border-spacing: 0; margin: 0; overflow-wrap: normal; }
+.message .body table { min-width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; margin: 0; overflow-wrap: normal; }
 .message .body th, .message .body td { padding: 10px 12px; border: 0; border-bottom: 1px solid var(--border-subtle); vertical-align: top; text-align: start; line-height: 1.5; overflow-wrap: break-word; }
 .message .body th { background: var(--panel-bg); font-weight: 600; }
 .message .body tbody tr:last-child td { border-bottom: 0; }
