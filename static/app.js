@@ -185,6 +185,12 @@ const state = {
   selectionId: 0,
   threads: [],
   pinnedThreads: new Set(),
+  serverPinnedThreads: new Set(),
+  pinsPending: new Map(),
+  pinsLoaded: false,
+  pinsRevision: -1,
+  pinsStoreId: null,
+  pinsSyncPromise: null,
   threadNodes: new Map(),
   provisionalThreads: new Map(),
   threadRefreshId: 0,
@@ -2821,6 +2827,7 @@ async function connect() {
       notice("");
       updateControls();
       await loadChatSettingsCatalog();
+      await loadPinnedThreads(false);
       await refreshThreads();
       if (state.threadId) await openThread(state.threadId, false);
     } catch (error) {
@@ -2924,6 +2931,9 @@ function reconcileThreadHistory(threadId) {
 
 function handleNotification(method, params) {
   switch (method) {
+    case "codex-web/pins/updated":
+      if (applyPinnedThreads(params)) void refreshThreads();
+      return;
     case "codex-web/connected":
       return;
     case "codex-web/error":
@@ -2940,12 +2950,10 @@ function handleNotification(method, params) {
       refreshThreads();
       return;
     case "thread/archived":
-      setThreadPinned(params.threadId, false);
       state.provisionalThreads.delete(params.threadId);
       refreshThreads();
       return;
     case "thread/deleted":
-      setThreadPinned(params.threadId, false);
       removeRequestsForTurn(params.threadId);
       state.liveThreadStatuses.delete(params.threadId);
       state.activeTurns.delete(params.threadId);
@@ -4218,36 +4226,101 @@ function threadActivityTimestamp(thread) {
   return 0;
 }
 
-function loadPinnedThreads() {
+function legacyPinnedThreads() {
   try {
     const stored = JSON.parse(localStorage.getItem(PINNED_THREADS_STORAGE_KEY) || "[]");
-    state.pinnedThreads = new Set(Array.isArray(stored)
-      ? stored.filter((id) => typeof id === "string" && id.trim()) : []);
+    return Array.isArray(stored)
+      ? [...new Set(stored.filter((id) => typeof id === "string" && id.trim() === id
+        && id.length > 0 && id.length <= 256 && !/[\x00-\x1f]/.test(id)))] : [];
   } catch {
-    state.pinnedThreads = new Set();
+    return [];
   }
 }
 
-function persistPinnedThreads() {
+function renderPinnedThreads() {
+  state.pinnedThreads = new Set(state.serverPinnedThreads);
+  for (const [threadId, pinned] of state.pinsPending) {
+    if (pinned) state.pinnedThreads.add(threadId);
+    else state.pinnedThreads.delete(threadId);
+  }
+  renderThreads(state.threads);
+}
+
+function applyPinnedThreads(snapshot) {
+  if (!snapshot || typeof snapshot.storeId !== "string" || !snapshot.storeId
+    || !Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0
+    || !Array.isArray(snapshot.threadIds)
+    || !snapshot.threadIds.every((id) => typeof id === "string" && id.length > 0)) {
+    throw new Error("Invalid pinned conversation response");
+  }
+  if (snapshot.storeId === state.pinsStoreId && snapshot.revision < state.pinsRevision) return false;
+  const changed = snapshot.threadIds.length !== state.serverPinnedThreads.size
+    || snapshot.threadIds.some((id) => !state.serverPinnedThreads.has(id));
+  state.pinsStoreId = snapshot.storeId;
+  state.pinsRevision = snapshot.revision;
+  state.pinsLoaded = true;
+  state.serverPinnedThreads = new Set(snapshot.threadIds);
+  renderPinnedThreads();
+  return changed;
+}
+
+async function pinRequest(method = "GET", body, path = "/api/pins") {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 15000);
   try {
-    localStorage.setItem(PINNED_THREADS_STORAGE_KEY, JSON.stringify([...state.pinnedThreads]));
-  } catch {
-    // Pinning still works for this tab when browser storage is unavailable.
+    const response = await fetch(path, {
+      method, cache: "no-store", signal: controller.signal,
+      ...(body ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}),
+    });
+    if (!response.ok) throw new Error(`Server returned ${response.status}`);
+    return await response.json();
+  } finally {
+    window.clearTimeout(timeout);
   }
 }
 
-function setThreadPinned(threadId, pinned) {
-  if (pinned) state.pinnedThreads.add(threadId);
-  else if (!state.pinnedThreads.delete(threadId)) return;
-  persistPinnedThreads();
-  renderThreads(state.threads);
+function loadPinnedThreads(refresh = true) {
+  if (state.pinsSyncPromise) return state.pinsSyncPromise;
+  state.pinsSyncPromise = (async () => {
+    try {
+      const legacy = legacyPinnedThreads();
+      const snapshot = legacy.length
+        ? await pinRequest("POST", { threadIds: legacy }, "/api/pins/migrate")
+        : await pinRequest();
+      const changed = applyPinnedThreads(snapshot);
+      // Retain the old list until the server confirms its import. Imports are
+      // idempotent even if storage is blocked or the response was lost.
+      try { localStorage.removeItem(PINNED_THREADS_STORAGE_KEY); } catch { /* Storage is optional. */ }
+      if (changed && refresh) void refreshThreads();
+      return true;
+    } catch (error) {
+      notice(`Unable to sync pinned chats: ${error.message}. Reconnect or reload to retry.`);
+      return false;
+    } finally {
+      state.pinsSyncPromise = null;
+    }
+  })();
+  return state.pinsSyncPromise;
 }
 
-function handlePinnedThreadsStorage(event) {
-  if (event.key !== PINNED_THREADS_STORAGE_KEY && event.key !== null) return;
-  loadPinnedThreads();
-  renderThreads(state.threads);
-  void refreshThreads();
+async function setThreadPinned(threadId, pinned) {
+  if (!state.pinsLoaded || state.pinsPending.has(threadId)) return;
+  state.pinsPending.set(threadId, pinned);
+  renderPinnedThreads();
+  try {
+    applyPinnedThreads(await pinRequest("PUT", { threadId, pinned }));
+  } catch (error) {
+    notice(`Unable to save pinned chat: ${error.message}. Please try again.`);
+  } finally {
+    state.pinsPending.delete(threadId);
+    renderPinnedThreads();
+  }
+  // Also recover from a lost response after a successful server commit.
+  void loadPinnedThreads();
+}
+
+function refreshPinnedThreadsWhenVisible() {
+  if (!document.hidden) void loadPinnedThreads();
 }
 
 function sortThreadsByActivity(threads) {
@@ -4329,6 +4402,9 @@ function renderThreads(threads, reconcileActivity = false) {
     const pinLabel = `${pinned ? "Unpin" : "Pin"} conversation: ${threadLabel(thread)}`;
     pin.setAttribute("aria-label", pinLabel);
     pin.setAttribute("aria-pressed", String(pinned));
+    pin.disabled = !state.pinsLoaded;
+    pin.setAttribute("aria-disabled", String(!state.pinsLoaded || state.pinsPending.has(thread.id)));
+    pin.setAttribute("aria-busy", String(state.pinsPending.has(thread.id)));
     pin.title = pinLabel;
     nextNodes.set(thread.id, item);
     ui.threads.append(row);
@@ -4391,7 +4467,6 @@ function mergeProvisionalThreads(threads) {
 async function refreshThreads() {
   if (!state.ready) return;
   const refreshId = ++state.threadRefreshId;
-  const requestedPins = new Set(state.pinnedThreads);
   try {
     const result = await rpc("thread/list", THREAD_LIST_PARAMS);
     if (refreshId !== state.threadRefreshId) return;
@@ -4428,12 +4503,8 @@ async function refreshThreads() {
       render();
       cursor = page.nextCursor;
     }
-    if (cursor == null) {
-      // Only a complete, successful listing can retire pins for missing chats.
-      for (const id of requestedPins) {
-        if (!foundIds.has(id) && !state.provisionalThreads.has(id)) setThreadPinned(id, false);
-      }
-    }
+    // A listing can lag behind another device. Only an explicit unpin or a
+    // confirmed archive/delete event may remove a shared pin on the server.
     render();
     updateControls();
   } catch (error) {
@@ -5176,7 +5247,7 @@ async function boot() {
     restoreComposerDraft();
   }
   loadStoredChatSettings();
-  loadPinnedThreads();
+  void loadPinnedThreads(false);
   renderChatSettings();
   try {
     const response = await fetch("/api/config", { cache: "no-store" });
@@ -5282,8 +5353,10 @@ if (globalThis.CODEX_WEB_TEST) {
     renderLocalPrompt,
     renderThreads,
     loadPinnedThreads,
+    applyPinnedThreads,
+    legacyPinnedThreads,
     setThreadPinned,
-    handlePinnedThreadsStorage,
+    refreshPinnedThreadsWhenVisible,
     refreshThreads,
     renderThemeControl,
     selectedThreadBusy,
@@ -5338,7 +5411,9 @@ if (globalThis.CODEX_WEB_TEST) {
     upsertMessage,
   };
 } else {
-  window.addEventListener("storage", handlePinnedThreadsStorage);
+  window.addEventListener("focus", refreshPinnedThreadsWhenVisible);
+  document.addEventListener("visibilitychange", refreshPinnedThreadsWhenVisible);
+  window.setInterval(refreshPinnedThreadsWhenVisible, 30000);
   ui.composer.addEventListener("submit", submitPrompt);
   renderThemeControl();
   globalThis.CodexTheme?.subscribe(renderThemeControl);

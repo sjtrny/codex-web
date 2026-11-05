@@ -16,7 +16,24 @@ function fixture(t, stored) {
   window.eval(fs.readFileSync(path.join(__dirname, "../static/app.js"), "utf8"));
   const api = window.CodexWebTest;
   if (stored !== undefined) window.localStorage.setItem(api.PINNED_THREADS_STORAGE_KEY, stored);
-  api.loadPinnedThreads();
+  const server = { storeId: "test-store", revision: 0, threadIds: Array.from(api.legacyPinnedThreads()) };
+  api.applyPinnedThreads(server);
+  window.localStorage.removeItem(api.PINNED_THREADS_STORAGE_KEY);
+  const http = [];
+  window.fetch = async (url, options = {}) => {
+    http.push({ url, ...options });
+    const body = options.body && JSON.parse(options.body);
+    if (options.method === "PUT") {
+      server.threadIds = server.threadIds.filter((id) => id !== body.threadId);
+      if (body.pinned) server.threadIds.push(body.threadId);
+      server.revision += 1;
+    }
+    if (options.method === "POST") {
+      server.threadIds = [...new Set([...server.threadIds, ...body.threadIds])];
+      server.revision += 1;
+    }
+    return { ok: true, json: async () => ({ ...server, threadIds: [...server.threadIds] }) };
+  };
   const threads = [
     { id: "recent", name: "Recent chat", recencyAt: 300, status: { type: "idle" } },
     { id: "middle", name: "Active chat", recencyAt: 200, status: { type: "active" } },
@@ -29,7 +46,8 @@ function fixture(t, stored) {
     readyState: window.WebSocket.OPEN,
     send(raw) { requests.push(JSON.parse(raw)); },
   };
-  t.after(() => {
+  t.after(async () => {
+    await tick();
     api.state.ready = false;
     for (const id of api.state.pending.keys()) api.handleMessage({ id, error: { message: "Test cleanup" } });
     window.close();
@@ -40,12 +58,12 @@ function fixture(t, stored) {
     new URL(node.href).searchParams.get("thread")
   ));
   const reply = (index, result) => api.handleMessage({ id: requests[index].id, result });
-  return { ...api, window, threads, requests, link, pin, order, reply };
+  return { ...api, window, threads, requests, link, pin, order, reply, http, server };
 }
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
-test("pin buttons reorder conversations without opening them or changing activity", (t) => {
+test("pin buttons reorder conversations without opening them or changing activity", async (t) => {
   const app = fixture(t);
   const original = JSON.stringify(app.threads);
   app.ui.prompt.value = "Keep my unsent draft";
@@ -62,6 +80,7 @@ test("pin buttons reorder conversations without opening them or changing activit
   assert.equal(app.ui.prompt.value, "Keep my unsent draft");
   assert.deepEqual(app.requests, []);
   assert.equal(JSON.stringify(app.threads), original);
+  await tick();
   button.click();
   assert.deepEqual(app.order(), ["recent", "middle", "old"]);
   assert.equal(button.getAttribute("aria-pressed"), "false");
@@ -87,17 +106,19 @@ test("both pinned and recent groups follow activity order and preserve focused c
   assert.equal(app.link("middle").getAttribute("aria-current"), "page");
 });
 
-test("pins persist as IDs and restore when the browser reloads", (t) => {
+test("pins save on the server and load in a fresh browser without local storage", async (t) => {
   const app = fixture(t);
-  app.setThreadPinned("old", true);
-  const saved = app.window.localStorage.getItem(app.PINNED_THREADS_STORAGE_KEY);
-  assert.deepEqual(JSON.parse(saved), ["old"]);
-  const reloaded = fixture(t, saved);
+  await app.setThreadPinned("old", true);
+  assert.equal(app.window.localStorage.getItem(app.PINNED_THREADS_STORAGE_KEY), null);
+  assert.deepEqual(app.server.threadIds, ["old"]);
+  const reloaded = fixture(t);
+  reloaded.window.fetch = app.window.fetch;
+  await reloaded.loadPinnedThreads();
   assert.deepEqual(reloaded.order(), ["old", "recent", "middle"]);
   assert.equal(reloaded.pin("old").getAttribute("aria-pressed"), "true");
 });
 
-test("invalid saved pins and unavailable browser storage do not break the sidebar", (t) => {
+test("invalid saved pins and unavailable browser storage do not break server pins", async (t) => {
   for (const stored of ["invalid-json", "null", "{}", '"old"']) {
     const app = fixture(t, stored);
     assert.deepEqual(app.order(), ["recent", "middle", "old"]);
@@ -105,20 +126,18 @@ test("invalid saved pins and unavailable browser storage do not break the sideba
   const app = fixture(t, '[null,1,"","  ","old","old"]');
   assert.deepEqual(Array.from(app.state.pinnedThreads), ["old"]);
   Object.defineProperty(app.window, "localStorage", { get() { throw new Error("Storage disabled"); } });
-  app.loadPinnedThreads();
-  app.setThreadPinned("middle", true);
-  assert.deepEqual(app.order(), ["middle", "recent", "old"]);
+  await app.loadPinnedThreads();
+  await app.setThreadPinned("middle", true);
+  assert.deepEqual(app.order(), ["middle", "old", "recent"]);
 });
 
-test("storage events update pins between tabs and ignore unrelated settings", (t) => {
+test("server notifications synchronize pins and stale responses cannot undo changes", (t) => {
   const app = fixture(t);
-  app.window.localStorage.setItem(app.PINNED_THREADS_STORAGE_KEY, '["old"]');
-  app.handlePinnedThreadsStorage({ key: "unrelated-setting" });
-  assert.deepEqual(app.order(), ["recent", "middle", "old"]);
-  app.handlePinnedThreadsStorage({ key: app.PINNED_THREADS_STORAGE_KEY });
+  app.handleNotification("codex-web/pins/updated", { storeId: "test-store", revision: 2, threadIds: ["old"] });
   assert.deepEqual(app.order(), ["old", "recent", "middle"]);
-  app.window.localStorage.clear();
-  app.handlePinnedThreadsStorage({ key: null });
+  app.applyPinnedThreads({ storeId: "test-store", revision: 1, threadIds: [] });
+  assert.deepEqual(app.order(), ["old", "recent", "middle"]);
+  app.handleNotification("codex-web/pins/updated", { storeId: "test-store", revision: 3, threadIds: [] });
   assert.deepEqual(app.order(), ["recent", "middle", "old"]);
 });
 
@@ -167,10 +186,11 @@ test("failed or malformed history pages preserve pins, and repeated cursors stop
   assert.equal(app.state.pinnedThreads.has("old"), true);
 });
 
-test("a complete history scan retires missing pins without dropping a new provisional chat", async (t) => {
+test("a history scan never deletes shared pins absent from a stale listing", async (t) => {
   const app = fixture(t, '["missing","old"]');
   app.showStartedThread({ id: "new-chat", name: "New chat", recencyAt: 500 });
-  app.setThreadPinned("new-chat", true);
+  await app.setThreadPinned("new-chat", true);
+  await tick();
   app.state.ready = true;
   const refresh = app.refreshThreads();
   app.reply(0, { data: [app.threads[0]], nextCursor: "page-2" });
@@ -178,7 +198,7 @@ test("a complete history scan retires missing pins without dropping a new provis
   app.reply(1, { data: [app.threads[2]], nextCursor: null });
   await refresh;
   assert.deepEqual(app.order(), ["new-chat", "old", "recent"]);
-  assert.equal(app.state.pinnedThreads.has("missing"), false);
+  assert.equal(app.state.pinnedThreads.has("missing"), true);
   assert.equal(app.state.pinnedThreads.has("new-chat"), true);
 });
 
@@ -197,11 +217,56 @@ test("a stale history page cannot overwrite a newer refresh or remove pins", asy
   assert.equal(app.state.pinnedThreads.has("old"), true);
 });
 
-test("archiving and deletion remove only the affected pin", (t) => {
-  for (const method of ["thread/archived", "thread/deleted"]) {
-    const app = fixture(t, '["old","middle"]');
-    app.handleNotification(method, { threadId: "old" });
-    assert.equal(app.state.pinnedThreads.has("old"), false);
-    assert.deepEqual(JSON.parse(app.window.localStorage.getItem(app.PINNED_THREADS_STORAGE_KEY)), ["middle"]);
-  }
+test("failed imports preserve browser pins for a retry", async (t) => {
+  const app = fixture(t);
+  app.window.localStorage.setItem(app.PINNED_THREADS_STORAGE_KEY, '["old"]');
+  const fetch = app.window.fetch;
+  app.window.fetch = async () => ({ ok: false, status: 503 });
+  assert.equal(await app.loadPinnedThreads(), false);
+  assert.equal(app.window.localStorage.getItem(app.PINNED_THREADS_STORAGE_KEY), '["old"]');
+  app.window.fetch = fetch;
+  assert.equal(await app.loadPinnedThreads(), true);
+  assert.equal(app.window.localStorage.getItem(app.PINNED_THREADS_STORAGE_KEY), null);
+  assert.deepEqual(app.server.threadIds, ["old"]);
+});
+
+test("failed saves roll back only the failed pin and keep remote changes", async (t) => {
+  const app = fixture(t, '["old"]');
+  let respond;
+  app.window.fetch = () => new Promise((resolve) => { respond = resolve; });
+  const save = app.setThreadPinned("old", false);
+  assert.equal(app.pin("old").getAttribute("aria-pressed"), "false");
+  assert.equal(app.pin("old").getAttribute("aria-busy"), "true");
+  app.handleNotification("codex-web/pins/updated", { storeId: "test-store", revision: 5, threadIds: ["old", "middle"] });
+  respond({ ok: false, status: 503 });
+  await save;
+  assert.deepEqual(app.order(), ["middle", "old", "recent"]);
+  assert.match(app.ui.notice.textContent, /Unable to save pinned chat/);
+  respond({ ok: true, json: async () => ({ storeId: "test-store", revision: 5, threadIds: ["old", "middle"] }) });
+  await tick();
+});
+
+test("pins stay unavailable until the first successful server response", async (t) => {
+  const app = fixture(t);
+  app.state.pinsLoaded = false;
+  app.renderThreads(app.threads);
+  assert.equal(app.pin("old").disabled, true);
+  await app.setThreadPinned("old", true);
+  assert.equal(app.http.length, 0);
+  await app.loadPinnedThreads();
+  assert.equal(app.pin("old").disabled, false);
+});
+
+test("pending writes preserve their intent until acknowledged, then accept a newer remote decision", async (t) => {
+  const app = fixture(t);
+  let respond;
+  app.window.fetch = () => new Promise((resolve) => { respond = resolve; });
+  const save = app.setThreadPinned("old", true);
+  app.handleNotification("codex-web/pins/updated", { storeId: "test-store", revision: 3, threadIds: [] });
+  assert.equal(app.state.pinnedThreads.has("old"), true);
+  respond({ ok: true, json: async () => ({ storeId: "test-store", revision: 2, threadIds: ["old"] }) });
+  await save;
+  assert.equal(app.state.pinnedThreads.has("old"), false);
+  respond({ ok: true, json: async () => ({ storeId: "test-store", revision: 3, threadIds: [] }) });
+  await tick();
 });

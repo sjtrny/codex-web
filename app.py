@@ -12,6 +12,7 @@ import mimetypes
 import os
 import re
 import shutil
+import sqlite3
 import stat
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -33,6 +34,64 @@ from aiohttp import (
 from aiohttp.helpers import content_disposition_header
 
 from history import decode_cursor, read_history_chunk
+from pins import PinStore
+
+PIN_STORE = web.AppKey("pin_store", PinStore)
+PIN_CLIENTS = web.AppKey("pin_clients", set)
+MAX_PIN_IMPORT_IDS = 10000
+
+
+def valid_pin_id(value: object) -> bool:
+    return (isinstance(value, str) and 0 < len(value) <= 256
+            and value == value.strip() and not any(ord(char) < 32 for char in value))
+
+
+async def saved_pins(application: web.Application, **updates: object) -> dict:
+    return await asyncio.to_thread(application[PIN_STORE].snapshot, **updates)
+
+
+async def broadcast_pins(application: web.Application, snapshot: dict) -> None:
+    clients = tuple(application[PIN_CLIENTS])
+    if clients:
+        # A slow or closed browser must not prevent another browser from saving.
+        async def send(client: web.WebSocketResponse) -> None:
+            with suppress(ConnectionError, RuntimeError, TimeoutError):
+                async with asyncio.timeout(2):
+                    await client.send_str(proxy_notice("codex-web/pins/updated", **snapshot))
+        await asyncio.gather(*(send(client) for client in clients))
+
+
+async def pinned_threads(request: web.Request) -> web.Response:
+    updates = {}
+    if request.method != "GET":
+        # JSON-only writes reject cross-origin HTML forms; no CORS is enabled.
+        if request.content_type != "application/json":
+            return web.json_response({"error": "Expected application/json"}, status=415)
+        try:
+            raw = await request.clone(client_max_size=1024 * 1024).read()
+            body = json.loads(raw)
+        except (ValueError, UnicodeError):
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "Expected an object"}, status=400)
+        if request.path.endswith("/migrate"):
+            ids = body.get("threadIds")
+            if (not isinstance(ids, list) or len(ids) > MAX_PIN_IMPORT_IDS
+                    or not all(valid_pin_id(value) for value in ids)):
+                return web.json_response({"error": "Invalid pinned conversation IDs"}, status=400)
+            updates["imports"] = ids
+        else:
+            if not valid_pin_id(body.get("threadId")) or type(body.get("pinned")) is not bool:
+                return web.json_response({"error": "Expected a conversation ID and pinned boolean"}, status=400)
+            updates["changes"] = {body["threadId"]: body["pinned"]}
+    try:
+        snapshot = await saved_pins(request.app, **updates)
+    except (OSError, sqlite3.Error):
+        LOG.exception("Pinned conversation storage is unavailable")
+        return web.json_response({"error": "Pinned conversations could not be saved or loaded"}, status=503)
+    if updates:
+        await broadcast_pins(request.app, snapshot)
+    return web.json_response(snapshot)
 
 APP_VERSION = "0.9.3"
 ROOT = Path(__file__).resolve().parent
@@ -1453,6 +1512,7 @@ async def relay_websockets(
     browser: web.WebSocketResponse,
     upstream: ClientWebSocketResponse,
     connection_id: str,
+    application: web.Application,
 ) -> None:
     """Relay until either peer disconnects, then stop both message readers."""
 
@@ -1511,6 +1571,17 @@ async def relay_websockets(
                     payload = message.json()
                 except json.JSONDecodeError:
                     payload = None
+                if isinstance(payload, dict) and payload.get("method") in {
+                    "thread/archived", "thread/deleted",
+                }:
+                    params = payload.get("params")
+                    thread_id = params.get("threadId") if isinstance(params, dict) else None
+                    if valid_pin_id(thread_id):
+                        try:
+                            snapshot = await saved_pins(application, changes={thread_id: False})
+                            await broadcast_pins(application, snapshot)
+                        except (OSError, sqlite3.Error):
+                            LOG.exception("Could not remove pin for archived/deleted conversation")
                 if (
                     isinstance(payload, dict)
                     and "method" not in payload
@@ -1554,17 +1625,19 @@ async def websocket_proxy(request: web.Request) -> web.WebSocketResponse:
         compress=False,
     )
     await browser.prepare(request)
+    request.app[PIN_CLIENTS].add(browser)
     connection_id = uuid.uuid4().hex
 
     try:
         async with connect_backend() as (upstream, transport):
             await browser.send_str(proxy_notice("codex-web/connected", transport=transport))
-            await relay_websockets(browser, upstream, connection_id)
+            await relay_websockets(browser, upstream, connection_id, request.app)
     except (ClientError, OSError, RuntimeError, TimeoutError) as exc:
         LOG.warning("backend connection failed: %s", exc)
         await browser.send_str(proxy_notice("codex-web/error", message=str(exc)))
         await browser.close(code=1011, message=b"Codex backend unavailable")
     finally:
+        request.app[PIN_CLIENTS].discard(browser)
         await browser.close()
 
     return browser
@@ -1578,12 +1651,19 @@ def create_app() -> web.Application:
         client_max_size=max(MAX_MESSAGE_BYTES, max_upload_request_bytes),
     )
     application.on_response_prepare.append(security_headers)
+    application[PIN_STORE] = PinStore(Path(env(
+        "CODEX_WEB_STATE_DIR", str(Path(env("CODEX_UPLOAD_DIR", "/uploads")) / ".codex-web"),
+    )))
+    application[PIN_CLIENTS] = set()
     application.add_routes(
         [
             web.get("/", index),
             web.get("/manifest.webmanifest", pwa_manifest),
             web.get("/service-worker.js", service_worker),
             web.get("/api/config", app_config),
+            web.get("/api/pins", pinned_threads),
+            web.put("/api/pins", pinned_threads),
+            web.post("/api/pins/migrate", pinned_threads),
             web.get("/api/files", workspace_file),
             web.get("/api/attachments", attachment_file),
             web.get("/api/host-images", host_image),
