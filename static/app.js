@@ -4130,16 +4130,6 @@ function currentPromptHistory() {
   return state.promptHistoryByThread.get(state.threadId) || [];
 }
 
-function promptCaretIsOnFirstLine() {
-  const start = Number.isInteger(ui.prompt.selectionStart)
-    ? ui.prompt.selectionStart
-    : ui.prompt.value.length;
-  const end = Number.isInteger(ui.prompt.selectionEnd)
-    ? ui.prompt.selectionEnd
-    : start;
-  return start === end && !ui.prompt.value.slice(0, start).includes("\n");
-}
-
 function showPromptHistoryValue(value) {
   ui.prompt.value = value;
   saveComposerDraft();
@@ -4165,7 +4155,7 @@ function navigatePromptHistory(event) {
 
   if (event.key === "ArrowUp") {
     if (state.promptHistoryIndex === null) {
-      if (!promptCaretIsOnFirstLine()) return false;
+      if (ui.prompt.value !== "") return false;
       state.promptHistoryDraft = ui.prompt.value;
       state.promptHistoryIndex = prompts.length;
     }

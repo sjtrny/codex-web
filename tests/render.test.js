@@ -419,6 +419,11 @@ const historyKeyEvent = (key, overrides = {}) => ({
   ...overrides,
 });
 promptKeydown(historyKeyEvent("ArrowUp"));
+assert.equal(ui.prompt.value, "unfinished draft", "Up should preserve a nonempty draft");
+assert.equal(historyPreventCount, 0, "Up should retain normal textarea behavior while drafting");
+ui.prompt.value = "";
+handlePromptInput();
+promptKeydown(historyKeyEvent("ArrowUp"));
 assert.equal(ui.prompt.value, "second prompt", "Up should recall the newest prompt in this chat");
 promptKeydown(historyKeyEvent("ArrowUp"));
 assert.equal(ui.prompt.value, "first prompt", "repeated Up should move backward through prompts");
@@ -427,7 +432,7 @@ assert.equal(ui.prompt.value, "first prompt", "history should stop at the oldest
 promptKeydown(historyKeyEvent("ArrowDown"));
 assert.equal(ui.prompt.value, "second prompt", "Down should move toward newer prompts");
 promptKeydown(historyKeyEvent("ArrowDown"));
-assert.equal(ui.prompt.value, "unfinished draft", "Down past the newest prompt should restore the draft");
+assert.equal(ui.prompt.value, "", "Down past the newest prompt should restore the empty box");
 assert.equal(historyPreventCount, 5);
 promptKeydown(historyKeyEvent("ArrowDown"));
 assert.equal(historyPreventCount, 5, "Down should be untouched outside history navigation");
@@ -440,8 +445,8 @@ assert.equal(ui.prompt.value, "first line\nsecond line", "Up should retain norma
 assert.equal(historyPreventCount, 5);
 ui.prompt.setSelectionRange(0, 0);
 promptKeydown(historyKeyEvent("ArrowUp"));
-assert.equal(ui.prompt.value, "second prompt", "Up on the first line should enter prompt history");
-assert.equal(historyPreventCount, 6);
+assert.equal(ui.prompt.value, "first line\nsecond line", "Up on the first line should preserve a nonempty draft");
+assert.equal(historyPreventCount, 5);
 
 ui.prompt.value = "draft for chat A";
 handlePromptInput();
